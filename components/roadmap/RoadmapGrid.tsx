@@ -1097,7 +1097,7 @@ export default function RoadmapGrid() {
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
-              <div className="mt-3 space-y-0">
+              <div className="mt-3 space-y-0 max-h-[220px] overflow-y-auto pr-1">
                 {logsLoading ? (
                   <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
                     Loading activity...
