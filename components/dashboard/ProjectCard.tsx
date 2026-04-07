@@ -11,6 +11,7 @@ interface ProjectCardProps {
   ownerId: string;
   memberCount: number;
   currentUserId: string | null;
+  isSuperAdmin: boolean;
   onDelete?: (projectId: string) => Promise<void> | void;
 }
 
@@ -21,10 +22,11 @@ export default function ProjectCard({
   ownerId,
   memberCount,
   currentUserId,
+  isSuperAdmin,
   onDelete,
 }: ProjectCardProps) {
   const router = useRouter();
-  const canDelete = Boolean(onDelete && currentUserId && ownerId === currentUserId);
+  const canDelete = Boolean(onDelete && currentUserId && (ownerId === currentUserId || isSuperAdmin));
 
   const handleNavigate = () => {
     router.push(`/dashboard/projects/${projectId}`);

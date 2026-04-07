@@ -21,6 +21,7 @@ type ProjectRow = {
 export default function DashboardPage() {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -137,6 +138,12 @@ export default function DashboardPage() {
         console.log("User role:", userProfile?.system_role ?? null);
 
         const isAdmin = (userProfile?.system_role ?? "").toLowerCase() === "admin";
+        const isSuperAdminUser = (userProfile?.system_role ?? "").toLowerCase() === "admin";
+
+        if (isMounted) {
+          setIsSuperAdmin(isSuperAdminUser);
+        }
+
         const fetchedProjects = await fetchProjectsForUser(user.id, isAdmin);
 
         if (isMounted) {
@@ -172,9 +179,8 @@ export default function DashboardPage() {
       return;
     }
 
-    const isOwner = currentUserId === project.owner_id;
-    if (!isOwner) {
-      alert("Only project owner can delete");
+    if (currentUserId !== project.owner_id && !isSuperAdmin) {
+      alert("Only project owner or super admin can delete");
       return;
     }
 
@@ -352,6 +358,7 @@ export default function DashboardPage() {
               ownerId={ownerId}
               memberCount={memberCount}
               currentUserId={currentUserId}
+              isSuperAdmin={isSuperAdmin}
               onDelete={handleDelete}
             />
           );
