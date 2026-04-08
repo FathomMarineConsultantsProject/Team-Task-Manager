@@ -2,7 +2,7 @@
 
 import { KeyboardEvent, MouseEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Trash2, Users } from "lucide-react";
+import { ArrowRight, Trash2, Users, Pencil } from "lucide-react";
 
 interface ProjectCardProps {
   projectId: string;
@@ -13,6 +13,7 @@ interface ProjectCardProps {
   currentUserId: string | null;
   isSuperAdmin: boolean;
   onDelete?: (projectId: string) => Promise<void> | void;
+  onEdit?: (projectId: string) => void;
 }
 
 export default function ProjectCard({
@@ -24,9 +25,11 @@ export default function ProjectCard({
   currentUserId,
   isSuperAdmin,
   onDelete,
+  onEdit,
 }: ProjectCardProps) {
   const router = useRouter();
   const canDelete = Boolean(onDelete && currentUserId && (ownerId === currentUserId || isSuperAdmin));
+  const canEdit = Boolean(onEdit && currentUserId && (ownerId === currentUserId || isSuperAdmin));
 
   const handleNavigate = () => {
     router.push(`/dashboard/projects/${projectId}`);
@@ -58,6 +61,14 @@ export default function ProjectCard({
     }
   };
 
+  const handleEditClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (!canEdit || !onEdit) {
+      return;
+    }
+    onEdit(projectId);
+  };
+
   return (
     <div
       role="button"
@@ -72,6 +83,16 @@ export default function ProjectCard({
           <h3 className="mt-2 text-xl font-semibold text-slate-900">{projectName}</h3>
         </div>
         <div className="flex items-center gap-2">
+          {canEdit ? (
+            <button
+              type="button"
+              aria-label="Edit project"
+              onClick={handleEditClick}
+              className="rounded-full border border-blue-100 bg-blue-50 p-2 text-blue-500 transition hover:bg-blue-100"
+            >
+              <Pencil size={16} />
+            </button>
+          ) : null}
           {canDelete ? (
             <button
               type="button"

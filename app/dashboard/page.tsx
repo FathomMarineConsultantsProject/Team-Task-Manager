@@ -10,6 +10,7 @@ type ProjectRow = {
   id: string;
   name: string;
   description: string | null;
+  end_date: string | null;
   owner_id: string | null;
   users: {
     id: string | null;
@@ -30,6 +31,12 @@ export default function DashboardPage() {
   const [projectDescription, setProjectDescription] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isEditingProject, setIsEditingProject] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editProjectName, setEditProjectName] = useState("");
+  const [editProjectDescription, setEditProjectDescription] = useState("");
+  const [editEndDate, setEditEndDate] = useState("");
 
   const fetchProjectsForUser = async (userId: string, isAdmin: boolean) => {
     let projectQuery = supabase
@@ -39,6 +46,7 @@ export default function DashboardPage() {
           id,
           name,
           description,
+          end_date,
           owner_id,
           users!projects_owner_id_fkey (
             id,
@@ -301,6 +309,73 @@ export default function DashboardPage() {
     }
   };
 
+  const handleOpenEditModal = (projectId: string) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project) {
+      alert("Project not found");
+      return;
+    }
+
+    setEditingProjectId(projectId);
+    setEditProjectName(project.name);
+    setEditProjectDescription(project.description ?? "");
+    setEditEndDate(project.end_date ?? "");
+    setIsEditModalOpen(true);
+  };
+
+  const handleEditProject = async () => {
+    if (!editProjectName.trim()) {
+      alert("Project name is required.");
+      return;
+    }
+
+    setIsEditingProject(true);
+
+    try {
+      const { error: updateError } = await supabase
+        .from("projects")
+        .update({
+          name: editProjectName.trim(),
+          description: editProjectDescription.trim() || null,
+          end_date: editEndDate || null,
+        })
+        .eq("id", editingProjectId);
+
+      if (updateError) {
+        console.error(updateError);
+        alert(updateError.message);
+        return;
+      }
+
+      setProjects((prev) =>
+        prev.map((project) =>
+          project.id === editingProjectId
+            ? {
+                ...project,
+                name: editProjectName.trim(),
+                description: editProjectDescription.trim() || null,
+              }
+            : project,
+        ),
+      );
+
+      setEditingProjectId(null);
+      setEditProjectName("");
+      setEditProjectDescription("");
+      setEditEndDate("");
+      setIsEditModalOpen(false);
+    } catch (error) {
+      console.error(error);
+      if (error && typeof error === "object" && "message" in error) {
+        alert(String((error as { message?: string }).message ?? "Failed to edit project"));
+      } else {
+        alert("Failed to edit project");
+      }
+    } finally {
+      setIsEditingProject(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-500">
@@ -359,6 +434,7 @@ export default function DashboardPage() {
                 currentUserId={currentUserId}
                 isSuperAdmin={isSuperAdmin}
                 onDelete={handleDelete}
+                onEdit={handleOpenEditModal}
               />
             );
           })}
@@ -448,6 +524,80 @@ export default function DashboardPage() {
               disabled={isCreatingProject || !projectName.trim()}
             >
               {isCreatingProject ? "Creating..." : "Create Project"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title="Edit Project"
+        isOpen={isEditModalOpen}
+        onClose={() => {
+          if (isEditingProject) {
+            return;
+          }
+          setIsEditModalOpen(false);
+        }}
+      >
+        <div className="space-y-4">
+          <div>
+            <label htmlFor="edit-project-name" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              Project Name
+            </label>
+            <input
+              id="edit-project-name"
+              type="text"
+              value={editProjectName}
+              onChange={(event) => setEditProjectName(event.target.value)}
+              placeholder="Enter project name"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+              disabled={isEditingProject}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="edit-project-description" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              Description
+            </label>
+            <textarea
+              id="edit-project-description"
+              value={editProjectDescription}
+              onChange={(event) => setEditProjectDescription(event.target.value)}
+              placeholder="Optional description"
+              className="mt-1 min-h-[96px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+              disabled={isEditingProject}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="edit-project-end-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              End Date
+            </label>
+            <input
+              id="edit-project-end-date"
+              type="date"
+              value={editEndDate}
+              onChange={(event) => setEditEndDate(event.target.value)}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
+              disabled={isEditingProject}
+            />
+          </div>
+
+          <div className="flex justify-end gap-3">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setIsEditModalOpen(false)}
+              disabled={isEditingProject}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={handleEditProject}
+              disabled={isEditingProject || !editProjectName.trim()}
+            >
+              {isEditingProject ? "Saving..." : "Save Changes"}
             </Button>
           </div>
         </div>
