@@ -317,15 +317,6 @@ export default function DashboardPage() {
     );
   }
 
-  if (projects.length === 0) {
-    return (
-      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 text-center">
-        <p className="text-xl font-semibold text-slate-900">No projects yet</p>
-        <p className="text-sm text-slate-500">Create a project to get started.</p>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-8">
       <header className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -334,36 +325,45 @@ export default function DashboardPage() {
           <h1 className="text-3xl font-semibold text-slate-900">Projects</h1>
           <p className="mt-2 text-sm text-slate-500">Browse all projects in your workspace.</p>
         </div>
-        <Button
-          type="button"
-          className="self-start rounded-xl px-4 py-2"
-          onClick={() => setIsCreateModalOpen(true)}
-        >
-          Create Project
-        </Button>
+        {currentUserId && (
+          <Button
+            type="button"
+            className="self-start rounded-xl px-4 py-2"
+            onClick={() => setIsCreateModalOpen(true)}
+          >
+            Create Project
+          </Button>
+        )}
       </header>
 
-      <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-        {projects.map((project) => {
-          const ownerId = project.owner_id ?? "";
-          const ownerName = project.users?.name ?? "Unknown";
-          const memberCount = project.project_members?.length ?? 0;
+      {projects.length === 0 ? (
+        <div className="flex min-h-[40vh] flex-col items-center justify-center gap-4 text-center">
+          <p className="text-xl font-semibold text-slate-900">No projects yet</p>
+          <p className="text-sm text-slate-500">Create a project to get started.</p>
+        </div>
+      ) : (
+        <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+          {projects.map((project) => {
+            const ownerId = project.owner_id ?? "";
+            const ownerName = project.users?.name ?? "Unknown";
+            const memberCount = project.project_members?.length ?? 0;
 
-          return (
-            <ProjectCard
-              key={project.id}
-              projectId={project.id}
-              projectName={project.name}
-              ownerName={ownerName}
-              ownerId={ownerId}
-              memberCount={memberCount}
-              currentUserId={currentUserId}
-              isSuperAdmin={isSuperAdmin}
-              onDelete={handleDelete}
-            />
-          );
-        })}
-      </div>
+            return (
+              <ProjectCard
+                key={project.id}
+                projectId={project.id}
+                projectName={project.name}
+                ownerName={ownerName}
+                ownerId={ownerId}
+                memberCount={memberCount}
+                currentUserId={currentUserId}
+                isSuperAdmin={isSuperAdmin}
+                onDelete={handleDelete}
+              />
+            );
+          })}
+        </div>
+      )}
 
       <Modal
         title="Create Project"
