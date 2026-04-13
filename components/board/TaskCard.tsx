@@ -19,8 +19,10 @@ interface TaskCardProps extends Task {
 export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onClaimTask, canClaim = false, canDelete = true, onDragStart, onDragEnd, ...task }: TaskCardProps) {
   const [isRemoving, setIsRemoving] = useState(false);
   const canDrag = task.canDrag ?? false;
+  const isFutureTask = task.start_date && new Date(task.start_date) > new Date();
   const baseClasses = "select-none rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition-all duration-200 cursor-default";
   const interactionClasses = canDrag ? "active:cursor-grabbing" : "";
+  const futureTaskClasses = isFutureTask ? "opacity-50 pointer-events-none" : "";
   const stateClasses = isRemoving
     ? "opacity-0 scale-95"
     : canDrag
@@ -86,10 +88,13 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
       onDragStart={handleDragStartInternal}
       onDragEnd={handleDragEndInternal}
       onClick={() => onOpenDetails?.()}
-      className={`${baseClasses} ${interactionClasses} ${stateClasses}`.trim()}
+      className={`${baseClasses} ${interactionClasses} ${futureTaskClasses} ${stateClasses}`.trim()}
     >
       <div>
         <h3 className="text-sm font-semibold text-gray-900">{task.title}</h3>
+        {task.start_date ? (
+          <p className="mt-1 text-xs text-gray-500">Starts on: {task.start_date}</p>
+        ) : null}
         <div className="mt-2">
           <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-700">
             {task.statusLabel ?? "TODO"}

@@ -3,6 +3,8 @@ export type RoadmapTask = {
   title: string | null;
   status?: string | null;
   assigned_to?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
   assigned_user?: {
     id: string;
     name: string | null;
@@ -92,6 +94,13 @@ export function getTaskDates(task: RoadmapTask) {
 }
 
 export function getTaskDateForWeek(task: RoadmapTask, week: RoadmapWeek) {
+  if (task.start_date) {
+    const startDate = parseDate(task.start_date);
+    if (startDate && startDate >= week.start && startDate <= week.end) {
+      return startDate;
+    }
+  }
+
   const dates = getTaskDates(task);
   return dates.find((date) => date >= week.start && date <= week.end) ?? null;
 }

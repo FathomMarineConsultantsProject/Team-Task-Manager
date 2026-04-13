@@ -5,6 +5,8 @@ export type TaskDirection = "up" | "down" | "right";
 export type Task = {
   title: string;
   id: string;
+  start_date?: string | null;
+  end_date?: string | null;
   direction?: TaskDirection;
   initials?: string;
   statusLabel?: string;

@@ -15,6 +15,8 @@ type DbTask = {
   title: string | null;
   status: string | null;
   assigned_to: string | null;
+  start_date: string | null;
+  end_date: string | null;
 };
 
 type DbUser = {
@@ -62,6 +64,8 @@ type TaskDetailsModalState = {
   assigneeName: string;
   assigneeId: string | null;
   createdAt: string | null;
+  startDate: string | null;
+  endDate: string | null;
 };
 
 type TaskLogRow = {
@@ -213,6 +217,8 @@ export default function ProjectBoardPage({
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskStatus, setNewTaskStatus] = useState<ColumnId>("todo");
   const [newTaskAssignee, setNewTaskAssignee] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [newMemberSearch, setNewMemberSearch] = useState("");
   const [selectedMember, setSelectedMember] = useState<DbUser | null>(null);
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
@@ -440,20 +446,26 @@ export default function ProjectBoardPage({
       }
 
       let createdAt: string | null = null;
+      let startDateValue: string | null = null;
+      let endDateValue: string | null = null;
 
       try {
         const { data, error } = await supabase
           .from("tasks")
-          .select("created_at")
+          .select("created_at, start_date, end_date")
           .eq("id", taskId)
           .eq("project_id", projectId)
           .single();
 
         if (!error) {
           createdAt = (data as { created_at: string | null } | null)?.created_at ?? null;
+          startDateValue = (data as { start_date: string | null } | null)?.start_date ?? null;
+          endDateValue = (data as { end_date: string | null } | null)?.end_date ?? null;
         }
       } catch {
         createdAt = null;
+        startDateValue = null;
+        endDateValue = null;
       }
 
       setSelectedTaskDetails({
@@ -463,6 +475,8 @@ export default function ProjectBoardPage({
         assigneeName: task.assigneeName ?? task.assigneeEmail ?? "Unassigned",
         assigneeId: task.assigneeId ?? null,
         createdAt,
+        startDate: startDateValue,
+        endDate: endDateValue,
       });
       setIsUpdateComposerOpen(false);
       setUpdateContent("");
@@ -702,6 +716,8 @@ export default function ProjectBoardPage({
         project_id: projectId,
         status: COLUMN_TO_STATUS[newTaskStatus],
         assigned_to: newTaskAssignee || null,
+        start_date: startDate || null,
+        end_date: endDate || null,
         created_by: profile?.id ?? null,
       };
       console.log("Creating task with payload:", payload);
@@ -731,6 +747,8 @@ export default function ProjectBoardPage({
         setNewTaskTitle("");
         setNewTaskAssignee("");
         setNewTaskStatus("todo");
+        setStartDate("");
+        setEndDate("");
         setShowCreateTaskModal(false);
 
         // Immediately append new task to local state
@@ -771,6 +789,8 @@ export default function ProjectBoardPage({
                 assigneeName: assignee?.name ?? null,
                 assigneeEmail: assignee?.email ?? null,
                 assigneeRole: assignee?.job_role ?? null,
+                start_date: newTask.start_date ?? null,
+                end_date: newTask.end_date ?? null,
                 statusLabel: STATUS_LABEL[columnId],
                 canDrag: canMoveTask(newTask.assigned_to),
               },
@@ -786,7 +806,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, newTaskAssignee, newTaskStatus, profile?.id, members, canMoveTask, insertTaskLog],
+    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog],
   );
 
   const handleAddMember = useCallback(
@@ -897,7 +917,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, status, assigned_to")
+          .select("id, title, status, assigned_to, start_date, end_date")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -993,6 +1013,8 @@ export default function ProjectBoardPage({
               assigneeName: assignee?.name ?? null,
               assigneeEmail: assignee?.email ?? null,
               assigneeRole: assignee?.job_role ?? null,
+              start_date: row.start_date,
+              end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
               canDrag: canMoveTask(row.assigned_to),
               updatesCount: updatesMap[row.id] ?? 0,
@@ -1257,7 +1279,7 @@ export default function ProjectBoardPage({
 
       const { data: taskRows, error: taskError } = await supabase
         .from("tasks")
-        .select("id, title, status, assigned_to")
+        .select("id, title, status, assigned_to, start_date, end_date")
         .eq("project_id", projectId)
         .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1331,6 +1353,8 @@ export default function ProjectBoardPage({
             assigneeName: assignee?.name ?? null,
             assigneeEmail: assignee?.email ?? null,
             assigneeRole: assignee?.job_role ?? null,
+            start_date: row.start_date,
+            end_date: row.end_date,
             statusLabel: STATUS_LABEL[columnId],
             canDrag: canMoveTask(row.assigned_to),
             updatesCount: updatesMap[row.id] ?? 0,
@@ -1364,7 +1388,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, status, assigned_to")
+          .select("id, title, status, assigned_to, start_date, end_date")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1460,6 +1484,8 @@ export default function ProjectBoardPage({
               assigneeName: assignee?.name ?? null,
               assigneeEmail: assignee?.email ?? null,
               assigneeRole: assignee?.job_role ?? null,
+              start_date: row.start_date,
+              end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
               canDrag: canMoveTask(row.assigned_to),
               updatesCount: updatesMap[row.id] ?? 0,
@@ -1639,6 +1665,18 @@ export default function ProjectBoardPage({
               </div>
               <p className="text-sm text-slate-600">{selectedTaskDetails.assigneeName}</p>
               <p className="text-xs text-slate-500">Created: {formatDateTime(selectedTaskDetails.createdAt)}</p>
+              {selectedTaskDetails.startDate && (
+                <div>
+                  <p className="text-xs text-gray-500">Start Date</p>
+                  <p className="text-sm">{selectedTaskDetails.startDate}</p>
+                </div>
+              )}
+              {selectedTaskDetails.endDate && (
+                <div>
+                  <p className="text-xs text-gray-500">Due Date</p>
+                  <p className="text-sm">{selectedTaskDetails.endDate}</p>
+                </div>
+              )}
               {!canAddTaskUpdate ? (
                 <p className="text-xs text-slate-500">Only assignee, project owner, or super admin can update this task.</p>
               ) : null}
@@ -1843,6 +1881,30 @@ export default function ProjectBoardPage({
             <p className="mt-1 text-xs text-slate-500">
               Creating in: {STATUS_LABEL[newTaskStatus]}
             </p>
+          </div>
+
+          <div className="mt-3">
+            <label htmlFor="task-start-date" className="text-xs text-gray-500">Start Date</label>
+            <input
+              id="task-start-date"
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-full border rounded px-2 py-1 mt-1"
+              disabled={isSubmitting}
+            />
+          </div>
+
+          <div className="mt-3">
+            <label htmlFor="task-end-date" className="text-xs text-gray-500">End Date</label>
+            <input
+              id="task-end-date"
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full border rounded px-2 py-1 mt-1"
+              disabled={isSubmitting}
+            />
           </div>
         </div>
 

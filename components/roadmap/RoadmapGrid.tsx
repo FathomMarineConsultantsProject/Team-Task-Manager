@@ -33,6 +33,8 @@ type TaskRow = {
   status: string | null;
   assigned_to: string | null;
   project_id: string | null;
+  start_date: string | null;
+  end_date: string | null;
   updated_at: string | null;
   created_at: string | null;
   completed_at: string | null;
@@ -331,6 +333,8 @@ export default function RoadmapGrid() {
               project_id,
               updated_at,
               created_at,
+              start_date,
+              end_date,
               completed_at,
               assigned_user:users(id, name)
             `,
@@ -361,6 +365,8 @@ export default function RoadmapGrid() {
             assigned_to: task.assigned_to,
             assigned_user: normalizedAssignedUser,
             project_id: task.project_id,
+            start_date: task.start_date,
+            end_date: task.end_date,
             updated_at: task.updated_at,
             created_at: task.created_at,
             completed_at: task.completed_at,
