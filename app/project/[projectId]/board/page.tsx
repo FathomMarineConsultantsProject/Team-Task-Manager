@@ -1615,29 +1615,43 @@ export default function ProjectBoardPage({
       {/* KANBAN BOARD */}
       <div className="overflow-x-auto">
         <div className="flex min-h-[500px] gap-6">
-          {BOARD_COLUMNS.map((column) => (
-            <BoardColumn
-              key={column.id}
-              columnId={column.id}
-              title={column.title}
-              tasks={columns[column.id]}
-              isDragOver={dragOverColumn === column.id}
-              onColumnDragOver={setDragOverColumn}
-              onColumnDrop={onColumnDrop}
-              onTaskDragStart={onTaskDragStart}
-              onTaskDragEnd={onTaskDragEnd}
-              onRemoveTask={onRemoveTask}
-              onDeleteTask={onDeleteTask}
-              onOpenTaskDetails={handleOpenTaskDetails}
-              onQuickAddTask={(columnId) => {
-                setNewTaskStatus(columnId);
-                setShowCreateTaskModal(true);
-              }}
-              onClaimTask={claimTask}
-              canClaim={!canManageProject}
-              canDelete={canManageProject}
-            />
-          ))}
+          {BOARD_COLUMNS.map((column) => {
+            const sortedTasks = [...columns[column.id]].sort((a, b) => {
+              const now = new Date();
+
+              const aFuture = a.start_date && new Date(a.start_date) > now;
+              const bFuture = b.start_date && new Date(b.start_date) > now;
+
+              if (aFuture && !bFuture) return 1;
+              if (!aFuture && bFuture) return -1;
+
+              return 0;
+            });
+
+            return (
+              <BoardColumn
+                key={column.id}
+                columnId={column.id}
+                title={column.title}
+                tasks={sortedTasks}
+                isDragOver={dragOverColumn === column.id}
+                onColumnDragOver={setDragOverColumn}
+                onColumnDrop={onColumnDrop}
+                onTaskDragStart={onTaskDragStart}
+                onTaskDragEnd={onTaskDragEnd}
+                onRemoveTask={onRemoveTask}
+                onDeleteTask={onDeleteTask}
+                onOpenTaskDetails={handleOpenTaskDetails}
+                onQuickAddTask={(columnId) => {
+                  setNewTaskStatus(columnId);
+                  setShowCreateTaskModal(true);
+                }}
+                onClaimTask={claimTask}
+                canClaim={!canManageProject}
+                canDelete={canManageProject}
+              />
+            );
+          })}
         </div>
       </div>
 
