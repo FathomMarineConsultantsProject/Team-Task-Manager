@@ -2,15 +2,16 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
-import { ChevronLeft, ChevronRight, Share2 } from "lucide-react";
+import { BarChart3, ChevronLeft, ChevronRight, LayoutGrid, Layers, Share2 } from "lucide-react";
 import { useAppData } from "@/components/providers/AppDataProvider";
 import Modal from "@/components/ui/modal";
 import {
   formatWeekLabel,
   getAvailableWeeks,
-  getTaskDateForWeek,
+  getTaskDate,
   getWeekDays,
   getWeekDayIndex,
+  isSameWeek,
   startOfWeek,
   type RoadmapProject,
   type RoadmapTask,
@@ -141,11 +142,44 @@ type TaskUpdateEntry = {
 const statusStyles: Record<string, { badge: string; label: string }> = {
   todo: { badge: "bg-gray-100 text-gray-600", label: "TODO" },
   in_progress: { badge: "bg-blue-100 text-blue-600", label: "IN PROGRESS" },
+  in_review: {
+    badge: "border border-purple-300 bg-purple-100 text-purple-700",
+    label: "IN REVIEW",
+  },
   done: { badge: "bg-green-100 text-green-700", label: "DONE" },
 };
 
+const STATUS_UI = {
+  todo: {
+    label: "TODO",
+    header: "bg-slate-100 text-slate-700",
+    border: "border-l-slate-400",
+  },
+  in_progress: {
+    label: "IN PROGRESS",
+    header: "bg-blue-100 text-blue-700",
+    border: "border-l-blue-500",
+  },
+  in_review: {
+    label: "IN REVIEW",
+    header: "bg-purple-100 text-purple-700",
+    border: "border-l-purple-500",
+  },
+  done: {
+    label: "DONE",
+    header: "bg-green-100 text-green-700",
+    border: "border-l-green-500",
+  },
+} as const;
+
 const navigationButtonClass =
   "inline-flex min-h-10 items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-300";
+
+function layoutTabClass(active: boolean) {
+  return active
+    ? "inline-flex min-h-10 items-center gap-2 rounded-full border border-slate-900 bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition"
+    : navigationButtonClass;
+}
 
 const taskCardClass =
   "rounded-[10px] border border-slate-200 bg-white px-2.5 py-2 shadow-sm transition duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md";
@@ -200,10 +234,6 @@ function getAdjacentWeek(weeks: RoadmapWeek[], currentWeek: RoadmapWeek, directi
   return weeks[nextIndex] ?? null;
 }
 
-function isTaskInWeek(task: RoadmapTask, week: RoadmapWeek) {
-  return Boolean(getTaskDateForWeek(task, week));
-}
-
 function getProjectRange(project: RoadmapProjectRecord, fallbackWeek: RoadmapWeek) {
   const start = startOfWeek(parseDate(project.start_date) ?? fallbackWeek.start);
   const end = project.end_date ? parseDate(project.end_date) ?? fallbackWeek.end : fallbackWeek.end;
@@ -222,6 +252,7 @@ export default function RoadmapGrid() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string>("all");
   const [currentWeekStart, setCurrentWeekStart] = useState<Date | null>(() => getStartOfWeek(new Date()));
+  const [layout, setLayout] = useState<"gantt" | "kanban" | "epic">("gantt");
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [selectedTaskDetails, setSelectedTaskDetails] = useState<SelectedTaskDetails | null>(null);
   const [logs, setLogs] = useState<TaskLogEntry[]>([]);
@@ -513,19 +544,90 @@ export default function RoadmapGrid() {
 
     return selectedProjects
       .map((project) => {
-        const tasksInWeek = project.tasks.filter((task) => isTaskInWeek(task, currentWeek));
+        const hasTaskInWeek = project.tasks.some((task) => {
+          const taskDate = getTaskDate(task);
+          return taskDate !== null && isSameWeek(taskDate, currentWeek);
+        });
 
-        if (tasksInWeek.length === 0) {
+        if (!hasTaskInWeek) {
           return null;
         }
 
         return {
           ...project,
-          tasksInWeek,
+          tasksInWeek: project.tasks,
         };
       })
       .filter((project): project is RoadmapProjectRecord => project !== null);
   }, [currentWeek, selectedProjects]);
+
+  const kanbanGroups = useMemo(() => {
+    const groups = {
+      todo: [] as RoadmapTask[],
+      in_progress: [] as RoadmapTask[],
+      in_review: [] as RoadmapTask[],
+      done: [] as RoadmapTask[],
+    };
+
+    if (!currentWeek) {
+      return groups;
+    }
+
+    visibleProjects.forEach((project) => {
+      project.tasksInWeek.forEach((task) => {
+        const taskDate = getTaskDate(task);
+        if (!taskDate || !isSameWeek(taskDate, currentWeek)) {
+          return;
+        }
+
+        if (!task.status) {
+          return;
+        }
+
+        let status = task.status.toLowerCase();
+        if (status === "review") {
+          status = "in_review";
+        }
+
+        if (status in groups) {
+          groups[status as keyof typeof groups].push(task);
+        }
+      });
+    });
+
+    return groups;
+  }, [visibleProjects, currentWeek]);
+
+  const epicGroups = useMemo(() => {
+    if (!currentWeek) {
+      return [];
+    }
+
+    return visibleProjects.map((project) => ({
+      epicName: project.name,
+      tasks: project.tasksInWeek.filter((task) => {
+        const taskDate = getTaskDate(task);
+        return taskDate !== null && isSameWeek(taskDate, currentWeek);
+      }),
+    }));
+  }, [visibleProjects, currentWeek]);
+
+  const epicGroupsWithProgress = useMemo(
+    () =>
+      epicGroups.map((epic) => {
+        const total = epic.tasks.length;
+        const completed = epic.tasks.filter((t) => t.status?.toLowerCase() === "done").length;
+        const progress = total === 0 ? 0 : Math.round((completed / total) * 100);
+
+        return {
+          ...epic,
+          total,
+          completed,
+          progress,
+        };
+      }),
+    [epicGroups],
+  );
 
   const selectedProjectLabel =
     selectedProjectId === "all"
@@ -564,6 +666,30 @@ export default function RoadmapGrid() {
       year: "numeric",
       month: "short",
       day: "2-digit",
+    });
+  };
+
+  const openRoadmapTaskDetails = (task: RoadmapTask, project: RoadmapProjectRecord) => {
+    let statusKey = (task.status ?? "todo").toLowerCase();
+
+    if (statusKey === "review") {
+      statusKey = "in_review";
+    }
+
+    const styles = statusStyles[statusKey] ?? statusStyles.todo;
+    const assigneeName = task.assigned_user?.name ?? "Unassigned";
+
+    setSelectedTaskDetails({
+      id: task.id,
+      projectId: project.id,
+      title: task.title ?? "Untitled task",
+      status: styles.label,
+      statusKey,
+      assignee: assigneeName,
+      createdAt: formatCreatedDate(task.created_at),
+      createdByName: "Unknown",
+      projectName: project.name ?? "Untitled project",
+      creator: null,
     });
   };
 
@@ -951,6 +1077,22 @@ export default function RoadmapGrid() {
           </div>
         </div>
 
+        <div className="mb-4 mt-4 flex flex-wrap gap-2">
+          <button type="button" className={layoutTabClass(layout === "gantt")} onClick={() => setLayout("gantt")}>
+            <BarChart3 className="h-4 w-4 shrink-0" />
+            <span>Gantt Chart</span>
+          </button>
+          <button type="button" className={layoutTabClass(layout === "kanban")} onClick={() => setLayout("kanban")}>
+            <LayoutGrid className="h-4 w-4 shrink-0" />
+            <span>Kanban Swimlanes</span>
+          </button>
+          <button type="button" className={layoutTabClass(layout === "epic")} onClick={() => setLayout("epic")}>
+            <Layers className="h-4 w-4 shrink-0" />
+            <span>By Epic</span>
+          </button>
+        </div>
+
+        {layout === "gantt" && (
         <div className="mt-5 grid min-w-[1180px] grid-cols-[190px_repeat(7,minmax(145px,1fr))] gap-2 text-xs text-slate-500">
           <div className="font-semibold text-slate-900">Project / Task</div>
           {currentWeekDays.map((day) => (
@@ -999,8 +1141,12 @@ export default function RoadmapGrid() {
                 <div className="pt-2 text-sm font-semibold text-slate-900">{project.name ?? "Untitled project"}</div>
                 {currentWeekDays.map((day, index) => {
                   const dayTasks = project.tasksInWeek.filter((task) => {
-                    const taskDate = getTaskDateForWeek(task, currentWeek);
-                    return taskDate ? getWeekDayIndex(taskDate) === index : false;
+                    const taskDate = getTaskDate(task);
+                    if (!taskDate || !isSameWeek(taskDate, currentWeek)) {
+                      return false;
+                    }
+
+                    return getWeekDayIndex(taskDate) === index;
                   });
                   const isInsideProjectRange = isDateWithinRange(day.date, projectRange.start, projectRange.end);
 
@@ -1014,7 +1160,12 @@ export default function RoadmapGrid() {
                     >
                       <div className="space-y-2">
                         {dayTasks.map((task) => {
-                          const statusKey = (task.status ?? "todo").toLowerCase();
+                          let statusKey = (task.status ?? "todo").toLowerCase();
+
+                          if (statusKey === "review") {
+                            statusKey = "in_review";
+                          }
+
                           const styles = statusStyles[statusKey] ?? statusStyles.todo;
                           const assigneeName = task.assigned_user?.name ?? "Unassigned";
 
@@ -1023,20 +1174,7 @@ export default function RoadmapGrid() {
                               key={task.id}
                               type="button"
                               className={[taskCardClass, "min-w-[140px] w-full text-left cursor-pointer"].join(" ")}
-                              onClick={() =>
-                                setSelectedTaskDetails({
-                                  id: task.id,
-                                  projectId: project.id,
-                                  title: task.title ?? "Untitled task",
-                                  status: styles.label,
-                                  statusKey,
-                                  assignee: assigneeName,
-                                  createdAt: formatCreatedDate(task.created_at),
-                                  createdByName: "Unknown",
-                                  projectName: project.name ?? "Untitled project",
-                                  creator: null,
-                                })
-                              }
+                              onClick={() => openRoadmapTaskDetails(task, project)}
                             >
                               <div className="flex items-start justify-between gap-1">
                                 <div className="min-w-0">
@@ -1060,6 +1198,95 @@ export default function RoadmapGrid() {
             );
           })}
         </div>
+        )}
+
+        {layout === "kanban" && (
+          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {Object.entries(kanbanGroups).map(([status, tasks]) => {
+              const ui = STATUS_UI[status as keyof typeof STATUS_UI];
+
+              return (
+                <div key={status}>
+                  <div className={`mb-3 rounded-md px-3 py-2 text-xs font-semibold ${ui?.header ?? ""}`}>
+                    {ui?.label ?? status.toUpperCase()}
+                  </div>
+
+                  {tasks.map((task) => (
+                    <div
+                      key={task.id}
+                      onClick={() => {
+                        const project = visibleProjects.find(
+                          (p) => p.id === task.project_id || p.tasksInWeek.some((t) => t.id === task.id),
+                        );
+                        if (project) {
+                          openRoadmapTaskDetails(task, project);
+                        }
+                      }}
+                      className={`mb-3 cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:shadow-md border-l-4 ${ui?.border ?? "border-l-slate-400"}`}
+                    >
+                      <p className="text-sm font-medium text-slate-900">{task.title ?? "Untitled task"}</p>
+
+                      <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+                        <span>{task.assigned_user?.name || "Unassigned"}</span>
+                        <span className="text-[10px] opacity-70">{task.start_date ?? ""}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {layout === "epic" && (
+          <div className="mt-5 space-y-4">
+            {epicGroupsWithProgress.map((epic, epicIndex) => {
+              const epicProject = visibleProjects[epicIndex];
+
+              return (
+                <div key={`${epic.epicName ?? "epic"}-${epicIndex}`} className="rounded-xl border border-slate-200 p-4">
+                  <h3 className="mb-3 font-semibold text-slate-900">{epic.epicName ?? "Untitled project"}</h3>
+
+                  <div className="mb-3">
+                    <div className="mb-1 flex justify-between text-xs text-gray-500">
+                      <span>
+                        {epic.completed}/{epic.total} done
+                      </span>
+                      <span>{epic.progress}%</span>
+                    </div>
+
+                    <div className="h-2 w-full rounded bg-slate-200">
+                      <div className="h-2 rounded bg-blue-500" style={{ width: `${epic.progress}%` }} />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {epic.tasks.map((task) => {
+                      const raw = task.status?.toLowerCase();
+                      const statusChipKey = raw === "review" ? "in_review" : raw;
+
+                      return (
+                        <div
+                          key={task.id}
+                          onClick={() => {
+                            if (epicProject) {
+                              openRoadmapTaskDetails(task, epicProject);
+                            }
+                          }}
+                          className={`cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 border-l-4 ${
+                            STATUS_UI[statusChipKey as keyof typeof STATUS_UI]?.border ?? "border-l-slate-400"
+                          }`}
+                        >
+                          {task.title ?? "Untitled task"}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <Modal

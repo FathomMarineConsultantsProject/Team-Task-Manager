@@ -1,13 +1,14 @@
 'use client';
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, ListChecks, Map, Users } from "lucide-react";
+import { LayoutDashboard, ListChecks, Map, Table2, Users } from "lucide-react";
 import { useAppData } from "@/components/providers/AppDataProvider";
 
 const navLinks = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Backlog", href: "/backlog", icon: ListChecks },
   { label: "Roadmap", href: "/roadmap", icon: Map },
+  { label: "Spreadsheet", href: "/spreadsheet", icon: Table2 },
 ];
 
 const linkBaseClass = "flex items-center justify-between rounded-2xl px-3 py-2 text-sm font-medium transition";

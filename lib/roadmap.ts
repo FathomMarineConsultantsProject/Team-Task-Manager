@@ -36,6 +36,26 @@ function parseDate(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+/** Parse date-only strings (YYYY-MM-DD) as local calendar midnight to avoid UTC day shifts. */
+function parseRoadmapCalendarDate(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.includes("T")) {
+    const date = new Date(trimmed);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const date = new Date(`${trimmed}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 export function startOfWeek(date: Date) {
   const start = new Date(date);
   start.setHours(0, 0, 0, 0);
@@ -87,22 +107,34 @@ export function formatWeekLabel(start: Date, end: Date) {
   return `${startMonth} ${startDay}, ${start.getFullYear()} - ${endMonth} ${endDay}, ${end.getFullYear()}`;
 }
 
-export function getTaskDates(task: RoadmapTask) {
-  return [parseDate(task.updated_at ?? task.created_at), parseDate(task.completed_at)].filter(
-    (value): value is Date => value !== null,
-  );
-}
-
-export function getTaskDateForWeek(task: RoadmapTask, week: RoadmapWeek) {
+/** Anchor date for roadmap placement: start_date when set, otherwise created_at (local calendar day). */
+export function getTaskDate(task: RoadmapTask): Date | null {
   if (task.start_date) {
-    const startDate = parseDate(task.start_date);
-    if (startDate && startDate >= week.start && startDate <= week.end) {
-      return startDate;
-    }
+    return parseRoadmapCalendarDate(task.start_date);
   }
 
-  const dates = getTaskDates(task);
-  return dates.find((date) => date >= week.start && date <= week.end) ?? null;
+  if (task.created_at) {
+    const parsed = parseRoadmapCalendarDate(task.created_at);
+    if (!parsed) {
+      return null;
+    }
+
+    return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0);
+  }
+
+  return null;
+}
+
+export function isSameWeek(date: Date, week: RoadmapWeek): boolean {
+  const weekStart = startOfWeek(week.start);
+  const dateWeekStart = startOfWeek(date);
+  return dateWeekStart.getTime() === weekStart.getTime();
+}
+
+/** Returns the calendar anchor used for a task (start_date, else created_at). Week is ignored. */
+export function getTaskDateForWeek(task: RoadmapTask, _week: RoadmapWeek): Date | null {
+  void _week;
+  return getTaskDate(task);
 }
 
 export function getAvailableWeeks(projects: RoadmapProject[]): RoadmapWeek[] {
@@ -110,20 +142,23 @@ export function getAvailableWeeks(projects: RoadmapProject[]): RoadmapWeek[] {
 
   projects.forEach((project) => {
     project.tasks.forEach((task) => {
-      getTaskDates(task).forEach((date) => {
-        const start = startOfWeek(date);
-        const startTime = start.getTime();
+      const anchor = getTaskDate(task);
+      if (!anchor) {
+        return;
+      }
 
-        if (weeksByStart.has(startTime)) {
-          return;
-        }
+      const start = startOfWeek(anchor);
+      const startTime = start.getTime();
 
-        const end = endOfWeek(start);
-        weeksByStart.set(startTime, {
-          start,
-          end,
-          label: formatWeekLabel(start, end),
-        });
+      if (weeksByStart.has(startTime)) {
+        return;
+      }
+
+      const end = endOfWeek(start);
+      weeksByStart.set(startTime, {
+        start,
+        end,
+        label: formatWeekLabel(start, end),
       });
     });
   });
