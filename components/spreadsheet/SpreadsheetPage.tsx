@@ -9,11 +9,18 @@ type AssignedUser = {
   email: string | null;
 };
 
+/** Same shape as board `Add Member` directory (`DbUser`). */
+type DbUser = {
+  id: string;
+  name: string | null;
+  email: string | null;
+  job_role: string | null;
+};
+
 type TaskRow = {
   id: string;
   title: string | null;
   status: string | null;
-  priority: string | null;
   start_date: string | null;
   end_date: string | null;
   assigned_to: string | null;
@@ -24,11 +31,36 @@ type SpreadsheetTaskRow = TaskRow & {
   assigned_user: AssignedUser | null;
 };
 
+function normalizeStatusKey(status: string | null | undefined): string {
+  const key = (status ?? "todo").toLowerCase();
+  if (key === "review") {
+    return "in_review";
+  }
+  return key;
+}
+
+function statusBadgeClass(statusKey: string): string {
+  switch (statusKey) {
+    case "todo":
+      return "bg-blue-100 text-blue-700";
+    case "in_progress":
+      return "bg-amber-100 text-amber-800";
+    case "in_review":
+      return "bg-purple-100 text-purple-800";
+    case "done":
+      return "bg-green-100 text-green-800";
+    default:
+      return "bg-slate-100 text-slate-700";
+  }
+}
+
 export default function SpreadsheetPage() {
   const { supabase, authUser, profile, isAuthLoading } = useAppData();
   const [tasks, setTasks] = useState<SpreadsheetTaskRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedAssignee, setSelectedAssignee] = useState<string>("all");
+  const [assigneeSearch, setAssigneeSearch] = useState("");
+  const [selectedUser, setSelectedUser] = useState<DbUser | null>(null);
+  const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
 
   const currentUser = profile;
   const normalizedRole = (currentUser?.system_role ?? currentUser?.role ?? "").toLowerCase();
@@ -55,7 +87,6 @@ export default function SpreadsheetPage() {
     id,
     title,
     status,
-    priority,
     start_date,
     end_date,
     assigned_to,
@@ -112,32 +143,67 @@ export default function SpreadsheetPage() {
   }, [loadTasks]);
 
   useEffect(() => {
+    let isMounted = true;
+
+    const loadUsers = async () => {
+      const { data, error } = await supabase
+        .from("users")
+        .select("id, name, email, job_role")
+        .order("name", { ascending: true });
+
+      if (error) {
+        console.error("Failed to load users", error);
+        return;
+      }
+
+      if (isMounted) {
+        setDirectoryUsers((data as DbUser[] | null | undefined) ?? []);
+      }
+    };
+
+    void loadUsers();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase]);
+
+  useEffect(() => {
     if (!isAdminUser) {
-      setSelectedAssignee("all");
+      setAssigneeSearch("");
+      setSelectedUser(null);
     }
   }, [isAdminUser]);
 
-  const assigneeOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    tasks.forEach((task) => {
-      const id = task.assigned_to;
-      if (!id) {
-        return;
-      }
-      const label = task.assigned_user?.name?.trim() || task.assigned_user?.email?.trim() || "User";
-      map.set(id, label);
-    });
-    return Array.from(map.entries())
-      .map(([id, label]) => ({ id, label }))
-      .sort((a, b) => a.label.localeCompare(b.label));
-  }, [tasks]);
-
-  const visibleTasks = useMemo(() => {
-    if (!isAdminUser || selectedAssignee === "all") {
-      return tasks;
+  useEffect(() => {
+    if (!assigneeSearch) {
+      setSelectedUser(null);
     }
-    return tasks.filter((task) => task.assigned_to === selectedAssignee);
-  }, [isAdminUser, selectedAssignee, tasks]);
+  }, [assigneeSearch]);
+
+  const filteredUsers = useMemo(() => {
+    const search = assigneeSearch.trim().toLowerCase();
+
+    if (!search) {
+      return [];
+    }
+
+    return directoryUsers
+      .filter((user) => {
+        const name = user.name?.toLowerCase() ?? "";
+        const role = user.job_role?.toLowerCase() ?? "";
+        return name.includes(search) || role.includes(search);
+      })
+      .slice(0, 8);
+  }, [directoryUsers, assigneeSearch]);
+
+  const filteredTasks = useMemo(() => {
+    const allTasks = tasks;
+    if (!selectedUser) {
+      return allTasks;
+    }
+    return allTasks.filter((task) => task.assigned_to === selectedUser.id);
+  }, [tasks, selectedUser]);
 
   const handleDelete = async (taskId: string) => {
     const confirmed = window.confirm("Delete this task?");
@@ -186,22 +252,58 @@ export default function SpreadsheetPage() {
 
       {isAdminUser ? (
         <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
-          <label htmlFor="spreadsheet-assignee" className="font-medium text-slate-700">
+          <label htmlFor="spreadsheet-assignee-search" className="font-medium text-slate-700">
             Assignee
           </label>
-          <select
-            id="spreadsheet-assignee"
-            className="min-w-[200px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-300"
-            value={selectedAssignee}
-            onChange={(e) => setSelectedAssignee(e.target.value)}
-          >
-            <option value="all">All</option>
-            {assigneeOptions.map((opt) => (
-              <option key={opt.id} value={opt.id}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+          <div className="relative w-64">
+            <input
+              id="spreadsheet-assignee-search"
+              type="text"
+              placeholder="Search assignee or role"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none"
+              value={assigneeSearch}
+              onChange={(e) => {
+                setAssigneeSearch(e.target.value);
+                setSelectedUser(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && filteredUsers.length > 0) {
+                  e.preventDefault();
+                  const user = filteredUsers[0];
+                  const label = user.name ?? user.email ?? user.id;
+                  setSelectedUser(user);
+                  setAssigneeSearch(label);
+                }
+              }}
+            />
+
+            {assigneeSearch && !selectedUser && filteredUsers.length > 0 ? (
+              <div className="absolute z-10 mt-1 w-full max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow">
+                {filteredUsers.map((user) => (
+                  <div
+                    key={user.id}
+                    role="option"
+                    tabIndex={0}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                    }}
+                    onClick={() => {
+                      const label = user.name ?? user.email ?? user.id;
+                      setSelectedUser(user);
+                      setAssigneeSearch(label);
+                      window.setTimeout(() => {
+                        setAssigneeSearch(label);
+                      }, 0);
+                    }}
+                    className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100"
+                  >
+                    <span className="font-medium">{user.name ?? user.email ?? "Unknown"}</span>
+                    <span className="text-xs italic text-gray-400">{user.job_role ?? "user"}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -212,7 +314,6 @@ export default function SpreadsheetPage() {
               <th className="px-4 py-2">Key</th>
               <th className="px-4 py-2">Summary</th>
               <th className="px-4 py-2">Status</th>
-              <th className="px-4 py-2">Priority</th>
               <th className="px-4 py-2">Assignee</th>
               <th className="px-4 py-2">Start Date</th>
               <th className="px-4 py-2">Due Date</th>
@@ -220,19 +321,31 @@ export default function SpreadsheetPage() {
             </tr>
           </thead>
           <tbody>
-            {visibleTasks.length === 0 ? (
+            {filteredTasks.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
                   No tasks to show.
                 </td>
               </tr>
             ) : (
-              visibleTasks.map((task, index) => (
+              filteredTasks.map((task, index) => {
+                const statusKey = normalizeStatusKey(task.status);
+                const statusLabel = statusKey.replace(/_/g, " ");
+
+                return (
                 <tr key={task.id} className="border-t hover:bg-slate-50">
                   <td className="px-4 py-2">TASK-{index + 1}</td>
                   <td className="px-4 py-2 font-medium">{task.title ?? ""}</td>
-                  <td className="px-4 py-2">{task.status || "todo"}</td>
-                  <td className="px-4 py-2">{task.priority || "-"}</td>
+                  <td className="px-4 py-2">
+                    <span
+                      className={[
+                        "inline-block rounded px-2 py-1 text-xs font-medium capitalize",
+                        statusBadgeClass(statusKey),
+                      ].join(" ")}
+                    >
+                      {statusLabel}
+                    </span>
+                  </td>
                   <td className="px-4 py-2">{task.assigned_user?.name || "Unassigned"}</td>
                   <td className="px-4 py-2">{task.start_date || "-"}</td>
                   <td className="px-4 py-2">{task.end_date || "-"}</td>
@@ -246,7 +359,8 @@ export default function SpreadsheetPage() {
                     </button>
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>
