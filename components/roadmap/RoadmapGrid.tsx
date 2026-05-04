@@ -49,6 +49,7 @@ type TaskRow = {
     name: string | null;
   }[]
   | null;
+  task_assignees?: { user: { id: string; name: string | null } | null }[] | null;
 };
 
 type RoadmapProjectRecord = RoadmapProject & {
@@ -367,7 +368,10 @@ export default function RoadmapGrid() {
               start_date,
               end_date,
               completed_at,
-              assigned_user:users(id, name)
+              assigned_user:users(id, name),
+              task_assignees(
+                user:users(id, name)
+              )
             `,
           )
           .in("project_id", accessibleProjectIds)
@@ -388,6 +392,16 @@ export default function RoadmapGrid() {
             ? task.assigned_user[0] ?? null
             : task.assigned_user;
 
+          // Build multi-assignee list: primary user + additional assignees (deduplicated)
+          const multiUsers = (task.task_assignees ?? [])
+            .map((a: any) => a.user)
+            .filter(Boolean) as { id: string; name: string | null }[];
+          const primaryUser = normalizedAssignedUser ?? null;
+          const assignees = [
+            ...(primaryUser ? [primaryUser] : []),
+            ...multiUsers.filter(u => u.id !== primaryUser?.id),
+          ];
+
           const existingTasks = tasksByProjectId.get(task.project_id) ?? [];
           existingTasks.push({
             id: task.id,
@@ -401,6 +415,7 @@ export default function RoadmapGrid() {
             updated_at: task.updated_at,
             created_at: task.created_at,
             completed_at: task.completed_at,
+            assignees,
           });
           tasksByProjectId.set(task.project_id, existingTasks);
         });
@@ -677,7 +692,12 @@ export default function RoadmapGrid() {
     }
 
     const styles = statusStyles[statusKey] ?? statusStyles.todo;
-    const assigneeName = task.assigned_user?.name ?? "Unassigned";
+    const assigneeName = (() => {
+      const assignees = task.assignees ?? [];
+      if (assignees.length === 0) return task.assigned_user?.name ?? "Unassigned";
+      if (assignees.length === 1) return assignees[0].name ?? "Unknown";
+      return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
+    })();
 
     setSelectedTaskDetails({
       id: task.id,
@@ -1167,7 +1187,12 @@ export default function RoadmapGrid() {
                           }
 
                           const styles = statusStyles[statusKey] ?? statusStyles.todo;
-                          const assigneeName = task.assigned_user?.name ?? "Unassigned";
+                          const ganttAssigneeName = (() => {
+                            const assignees = task.assignees ?? [];
+                            if (assignees.length === 0) return task.assigned_user?.name ?? "Unassigned";
+                            if (assignees.length === 1) return assignees[0].name ?? "Unknown";
+                            return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
+                          })();
 
                           return (
                             <button
@@ -1181,7 +1206,7 @@ export default function RoadmapGrid() {
                                   <p className="line-clamp-2 text-sm font-medium leading-tight text-slate-900">
                                     {task.title ?? "Untitled task"}
                                   </p>
-                                  <p className="mt-1 text-[11px] font-normal leading-[1.3] text-slate-600">{assigneeName}</p>
+                                  <p className="mt-1 text-[11px] font-normal leading-[1.3] text-slate-600">{ganttAssigneeName}</p>
                                 </div>
                                 <span className={"inline-flex max-w-fit whitespace-nowrap items-center rounded-full px-2 py-[2px] text-[10px] font-semibold leading-none uppercase tracking-[0.08em] " + styles.badge}>
                                   {styles.label}
@@ -1227,7 +1252,12 @@ export default function RoadmapGrid() {
                       <p className="text-sm font-medium text-slate-900">{task.title ?? "Untitled task"}</p>
 
                       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-                        <span>{task.assigned_user?.name || "Unassigned"}</span>
+                        <span title={task.assignees?.map(u => u.name).filter(Boolean).join(", ") ?? ""}>{(() => {
+                          const assignees = task.assignees ?? [];
+                          if (assignees.length === 0) return task.assigned_user?.name || "Unassigned";
+                          if (assignees.length === 1) return assignees[0].name ?? "Unknown";
+                          return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
+                        })()}</span>
                         <span className="text-[10px] opacity-70">{task.start_date ?? ""}</span>
                       </div>
                     </div>

@@ -25,6 +25,13 @@ type TaskRow = {
   assigned_user: {
     email: string | null;
   } | null;
+  task_assignees?: {
+    user: {
+      email: string | null;
+      name: string | null;
+    } | null;
+  }[] | null;
+  assignees?: { email: string | null; name: string | null }[];
 };
 
 type GroupedTasks = Record<string, TaskRow[]>;
@@ -171,7 +178,10 @@ export default function DashboardBacklogPage() {
             `
               *,
               project:projects(id, name, start_date, end_date),
-              assigned_user:users(email)
+              assigned_user:users(email),
+              task_assignees(
+                user:users(email, name)
+              )
             `,
           )
           .order("created_at", { ascending: false, nullsFirst: false });
@@ -189,7 +199,18 @@ export default function DashboardBacklogPage() {
         }
 
         if (isMounted) {
-          const normalizedTasks = ((tasksData ?? []) as TaskRow[]).sort((a, b) => {
+          const normalizedTasks = ((tasksData ?? []) as TaskRow[]).map(task => {
+            // Build multi-assignee list
+            const multiUsers = (task.task_assignees ?? [])
+              .map((a: any) => a.user)
+              .filter(Boolean) as { email: string | null; name: string | null }[];
+            const primaryUser = task.assigned_user ? { email: task.assigned_user.email, name: null as string | null } : null;
+            const assignees = [
+              ...(primaryUser ? [primaryUser] : []),
+              ...multiUsers.filter(u => u.email !== primaryUser?.email),
+            ];
+            return { ...task, assignees };
+          }).sort((a, b) => {
             const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
             const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
             return bTime - aTime;
@@ -320,8 +341,23 @@ export default function DashboardBacklogPage() {
 
                         <div className="flex items-center gap-4">
                           <span className="text-xs uppercase text-gray-500">{normalizedStatus}</span>
-                          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 text-xs text-gray-700">
-                            {assigneeInitials}
+                          <div
+                            className="flex items-center -space-x-1"
+                            title={task.assignees?.map(u => u.name ?? u.email ?? "").filter(Boolean).join(", ") ?? ""}
+                          >
+                            {(task.assignees && task.assignees.length > 0 ? task.assignees.slice(0, 2) : [{ email: task.assigned_user?.email ?? null, name: null }]).map((user, idx) => {
+                              const initials = getInitials(user.name ?? user.email);
+                              return (
+                                <div key={`${user.email ?? idx}`} className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 text-xs text-gray-700 border border-white" title={user.name ?? user.email ?? ""}>
+                                  {initials}
+                                </div>
+                              );
+                            })}
+                            {task.assignees && task.assignees.length > 2 && (
+                              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-100 text-[10px] text-gray-600 border border-white font-medium">
+                                +{task.assignees.length - 2}
+                              </div>
+                            )}
                           </div>
                           {normalizedStatus === "done" && <span className="text-sm text-gray-500">{days}d</span>}
                         </div>

@@ -17,6 +17,7 @@ export type Task = {
   assigneeRole?: string | null;
   canDrag?: boolean;
   updatesCount?: number;
+  assignees?: { id: string; name: string | null; email: string | null }[];
 };
 
 export type TaskUpdateSummary = {

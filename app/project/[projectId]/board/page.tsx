@@ -66,6 +66,7 @@ type TaskDetailsModalState = {
   createdAt: string | null;
   startDate: string | null;
   endDate: string | null;
+  assignees?: { id: string; name: string | null; email: string | null }[];
 };
 
 type TaskLogRow = {
@@ -234,6 +235,9 @@ export default function ProjectBoardPage({
   const [editingUpdateId, setEditingUpdateId] = useState<string | null>(null);
   const [editingUpdateContent, setEditingUpdateContent] = useState("");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
+  const [isAddingTaskMember, setIsAddingTaskMember] = useState(false);
+  const [showTaskMemberDropdown, setShowTaskMemberDropdown] = useState(false);
 
   const isOwner = Boolean(project?.owner_id && profile?.id && project.owner_id === profile.id);
   const isSuperAdmin = (profile?.system_role ?? "").toLowerCase() === "super_admin";
@@ -265,13 +269,14 @@ export default function ProjectBoardPage({
   }, [directoryUsers, members, newMemberSearch]);
 
   const canMoveTask = useCallback(
-    (assignedTo: string | null) => {
+    (assignedTo: string | null, assignees?: { id: string }[]) => {
       if (!profile?.id) {
         return false;
       }
 
       const isAssignee = Boolean(assignedTo && assignedTo === profile.id);
-      return canManageProject || isAssignee;
+      const isMultiAssignee = assignees?.some(u => u.id === profile.id) ?? false;
+      return canManageProject || isAssignee || isMultiAssignee;
     },
     [profile?.id, canManageProject],
   );
@@ -477,6 +482,7 @@ export default function ProjectBoardPage({
         createdAt,
         startDate: startDateValue,
         endDate: endDateValue,
+        assignees: task.assignees ?? [],
       });
       setIsUpdateComposerOpen(false);
       setUpdateContent("");
@@ -494,7 +500,68 @@ export default function ProjectBoardPage({
     setUpdateContent("");
     setEditingUpdateId(null);
     setEditingUpdateContent("");
+    setShowTaskMemberDropdown(false);
   }, []);
+
+  const addMemberToTask = useCallback(
+    async (userId: string) => {
+      if (!selectedTaskDetails?.id || !projectId) return;
+
+      // Prevent duplicates
+      if (selectedTaskDetails.assignees?.some((u) => u.id === userId)) return;
+
+      setIsAddingTaskMember(true);
+      try {
+        const { error } = await supabase.from("task_assignees").insert({
+          task_id: selectedTaskDetails.id,
+          user_id: userId,
+        });
+
+        if (error) {
+          console.error("Failed to add member to task", error);
+          return;
+        }
+
+        // Find user info from members list
+        const memberUser = members.find((m) => m.user_id === userId)?.user;
+        const newAssignee = {
+          id: userId,
+          name: memberUser?.name ?? null,
+          email: memberUser?.email ?? null,
+        };
+
+        // Update selectedTaskDetails
+        setSelectedTaskDetails((prev) =>
+          prev
+            ? {
+                ...prev,
+                assignees: [...(prev.assignees ?? []), newAssignee],
+              }
+            : prev,
+        );
+
+        // Update task in columns state
+        setColumns((prev) => {
+          const next = { ...prev };
+          BOARD_COLUMNS.forEach((col) => {
+            next[col.id] = next[col.id].map((t) =>
+              t.id === selectedTaskDetails.id
+                ? { ...t, assignees: [...(t.assignees ?? []), newAssignee] }
+                : t,
+            );
+          });
+          return next;
+        });
+
+        setShowTaskMemberDropdown(false);
+      } catch (err) {
+        console.error("Failed to add member to task", err);
+      } finally {
+        setIsAddingTaskMember(false);
+      }
+    },
+    [selectedTaskDetails, projectId, supabase, members],
+  );
 
   const canAddTaskUpdate = useMemo(() => {
     if (!selectedTaskDetails || !profile?.id) {
@@ -502,8 +569,38 @@ export default function ProjectBoardPage({
     }
 
     const isAssignee = selectedTaskDetails.assigneeId === profile.id;
-    return isAssignee || isProjectOwnerMember || isSuperAdmin;
-  }, [isProjectOwnerMember, isSuperAdmin, profile?.id, selectedTaskDetails]);
+    // Check multi-assignees from the task in columns
+    let isMultiAssignee = false;
+    BOARD_COLUMNS.forEach((col) => {
+      const t = columns[col.id].find((task) => task.id === selectedTaskDetails.id);
+      if (t?.assignees?.some(u => u.id === profile.id)) {
+        isMultiAssignee = true;
+      }
+    });
+    return isAssignee || isMultiAssignee || isProjectOwnerMember || isSuperAdmin;
+  }, [columns, isProjectOwnerMember, isSuperAdmin, profile?.id, selectedTaskDetails]);
+
+  const canManageAssignees = useMemo(() => {
+    if (!profile?.id) return false;
+
+    const isPrimaryAssignee = selectedTaskDetails?.assigneeId === profile.id;
+
+    let isMultiAssignee = false;
+    BOARD_COLUMNS.forEach((col) => {
+      const t = columns[col.id].find((task) => task.id === selectedTaskDetails?.id);
+      if (t?.assignees?.some(u => u.id === profile.id)) {
+        isMultiAssignee = true;
+      }
+    });
+
+    return (
+      isSuperAdmin ||
+      isProjectOwnerMember ||
+      canManageProject ||
+      isPrimaryAssignee ||
+      isMultiAssignee
+    );
+  }, [profile?.id, selectedTaskDetails, columns, isSuperAdmin, isProjectOwnerMember, canManageProject]);
 
   const createTaskUpdate = useCallback(async () => {
     const trimmed = updateContent.trim();
@@ -772,10 +869,35 @@ export default function ProjectBoardPage({
             });
           }
 
+          // Insert additional assignees into task_assignees
+          const additionalAssigneesToInsert = selectedAdditionalAssignees.filter(
+            (u) => u.id !== newTask.assigned_to
+          );
+          if (additionalAssigneesToInsert.length > 0) {
+            try {
+              await supabase.from("task_assignees").insert(
+                additionalAssigneesToInsert.map((user) => ({
+                  task_id: newTask.id,
+                  user_id: user.id,
+                }))
+              );
+            } catch {
+              // task_assignees table may not exist yet — fail silently
+            }
+          }
+          setSelectedAdditionalAssignees([]);
+
           const columnId = resolveColumn(newTask.status);
           const assignee = newTask.assigned_to
             ? members.find((m) => m.user_id === newTask.assigned_to)?.user
             : undefined;
+
+          // Build assignees array: primary + additional
+          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+          const assignees = [
+            ...(primaryUser ? [primaryUser] : []),
+            ...additionalAssigneesToInsert.map(u => ({ id: u.id, name: u.name ?? null, email: u.email ?? null })),
+          ];
 
           setColumns((prev) => ({
             ...prev,
@@ -792,7 +914,8 @@ export default function ProjectBoardPage({
                 start_date: newTask.start_date ?? null,
                 end_date: newTask.end_date ?? null,
                 statusLabel: STATUS_LABEL[columnId],
-                canDrag: canMoveTask(newTask.assigned_to),
+                canDrag: canMoveTask(newTask.assigned_to, assignees),
+                assignees,
               },
               ...prev[columnId],
             ],
@@ -806,7 +929,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog],
+    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, selectedAdditionalAssignees],
   );
 
   const handleAddMember = useCallback(
@@ -998,9 +1121,39 @@ export default function ProjectBoardPage({
 
         const groupedColumns = createEmptyColumns();
 
+        // Fetch multi-assignees for all tasks
+        const allTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
+        let assigneesMap: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
+        if (allTaskIds.length > 0) {
+          try {
+            const { data: assigneesData } = await supabase
+              .from("task_assignees")
+              .select("task_id, user:users(id, name, email)")
+              .in("task_id", allTaskIds);
+
+            if (assigneesData) {
+              (assigneesData as any[]).forEach((row: any) => {
+                if (!row.task_id || !row.user) return;
+                if (!assigneesMap[row.task_id]) assigneesMap[row.task_id] = [];
+                assigneesMap[row.task_id].push(row.user);
+              });
+            }
+          } catch {
+            // task_assignees table may not exist yet — fail silently
+          }
+        }
+
         ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
           const columnId = resolveColumn(row.status);
           const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
+
+          // Build multi-assignee list: primary + additional (deduplicated)
+          const multiUsers = assigneesMap[row.id] ?? [];
+          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+          const assignees = [
+            ...(primaryUser ? [primaryUser] : []),
+            ...multiUsers.filter(u => u.id !== primaryUser?.id),
+          ];
 
           groupedColumns[columnId] = [
             ...groupedColumns[columnId],
@@ -1016,8 +1169,9 @@ export default function ProjectBoardPage({
               start_date: row.start_date,
               end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
-              canDrag: canMoveTask(row.assigned_to),
+              canDrag: canMoveTask(row.assigned_to, assignees),
               updatesCount: updatesMap[row.id] ?? 0,
+              assignees,
             },
           ];
         });
@@ -1069,7 +1223,7 @@ export default function ProjectBoardPage({
   const onTaskDragStart = useCallback(
     (taskId: string, from: ColumnId) => {
       const task = columns[from].find((item) => item.id === taskId);
-      const canMove = canMoveTask(task?.assigneeId ?? null);
+      const canMove = canMoveTask(task?.assigneeId ?? null, task?.assignees);
 
       if (!canMove) {
         console.warn("Unauthorized action");
@@ -1089,7 +1243,7 @@ export default function ProjectBoardPage({
   const updateTaskStatus = useCallback(
     async (taskId: string, destination: ColumnId, source: ColumnId) => {
       const sourceTask = columns[source].find((task) => task.id === taskId);
-      const canMove = canMoveTask(sourceTask?.assigneeId ?? null);
+      const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees);
 
       if (!canMove) {
         console.warn("Unauthorized action");
@@ -1164,7 +1318,7 @@ export default function ProjectBoardPage({
           return current;
         }
 
-        const canMove = canMoveTask(movedTask.assigneeId ?? null);
+        const canMove = canMoveTask(movedTask.assigneeId ?? null, movedTask.assignees);
         if (!canMove) {
           console.warn("Unauthorized action");
           return current;
@@ -1338,9 +1492,39 @@ export default function ProjectBoardPage({
 
       const groupedColumns = createEmptyColumns();
 
+      // Fetch multi-assignees for all tasks
+      const claimTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
+      let claimAssigneesMap: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
+      if (claimTaskIds.length > 0) {
+        try {
+          const { data: assigneesData } = await supabase
+            .from("task_assignees")
+            .select("task_id, user:users(id, name, email)")
+            .in("task_id", claimTaskIds);
+
+          if (assigneesData) {
+            (assigneesData as any[]).forEach((row: any) => {
+              if (!row.task_id || !row.user) return;
+              if (!claimAssigneesMap[row.task_id]) claimAssigneesMap[row.task_id] = [];
+              claimAssigneesMap[row.task_id].push(row.user);
+            });
+          }
+        } catch {
+          // task_assignees table may not exist yet — fail silently
+        }
+      }
+
       ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
         const columnId = resolveColumn(row.status);
         const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
+
+        // Build multi-assignee list: primary + additional (deduplicated)
+        const multiUsers = claimAssigneesMap[row.id] ?? [];
+        const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+        const assignees = [
+          ...(primaryUser ? [primaryUser] : []),
+          ...multiUsers.filter(u => u.id !== primaryUser?.id),
+        ];
 
         groupedColumns[columnId] = [
           ...groupedColumns[columnId],
@@ -1356,8 +1540,9 @@ export default function ProjectBoardPage({
             start_date: row.start_date,
             end_date: row.end_date,
             statusLabel: STATUS_LABEL[columnId],
-            canDrag: canMoveTask(row.assigned_to),
+            canDrag: canMoveTask(row.assigned_to, assignees),
             updatesCount: updatesMap[row.id] ?? 0,
+            assignees,
           },
         ];
       });
@@ -1469,9 +1654,39 @@ export default function ProjectBoardPage({
 
         const groupedColumns = createEmptyColumns();
 
+        // Fetch multi-assignees for all tasks
+        const allTaskIds2 = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
+        let assigneesMap2: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
+        if (allTaskIds2.length > 0) {
+          try {
+            const { data: assigneesData } = await supabase
+              .from("task_assignees")
+              .select("task_id, user:users(id, name, email)")
+              .in("task_id", allTaskIds2);
+
+            if (assigneesData) {
+              (assigneesData as any[]).forEach((row: any) => {
+                if (!row.task_id || !row.user) return;
+                if (!assigneesMap2[row.task_id]) assigneesMap2[row.task_id] = [];
+                assigneesMap2[row.task_id].push(row.user);
+              });
+            }
+          } catch {
+            // task_assignees table may not exist yet — fail silently
+          }
+        }
+
         ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
           const columnId = resolveColumn(row.status);
           const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
+
+          // Build multi-assignee list: primary + additional (deduplicated)
+          const multiUsers = assigneesMap2[row.id] ?? [];
+          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+          const assignees = [
+            ...(primaryUser ? [primaryUser] : []),
+            ...multiUsers.filter(u => u.id !== primaryUser?.id),
+          ];
 
           groupedColumns[columnId] = [
             ...groupedColumns[columnId],
@@ -1487,8 +1702,9 @@ export default function ProjectBoardPage({
               start_date: row.start_date,
               end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
-              canDrag: canMoveTask(row.assigned_to),
+              canDrag: canMoveTask(row.assigned_to, assignees),
               updatesCount: updatesMap[row.id] ?? 0,
+              assignees,
             },
           ];
         });
@@ -1677,7 +1893,90 @@ export default function ProjectBoardPage({
                   </button>
                 ) : null}
               </div>
-              <p className="text-sm text-slate-600">{selectedTaskDetails.assigneeName}</p>
+              {/* Multi-assignee display */}
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-1">Assigned To</p>
+                {(() => {
+                  const assignees = selectedTaskDetails.assignees ?? [];
+                  if (assignees.length === 0) {
+                    return <p className="text-sm text-slate-600">Unassigned</p>;
+                  }
+                  const names = assignees.map((u) => u.name || u.email || "Unknown");
+                  const display =
+                    names.length <= 2
+                      ? names.join(", ")
+                      : `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
+                  return (
+                    <p
+                      className="text-sm text-slate-600"
+                      title={names.join(", ")}
+                    >
+                      {display}
+                    </p>
+                  );
+                })()}
+
+                {/* Add member to task */}
+                {canManageAssignees && (
+                  <div className="mt-2">
+                    {showTaskMemberDropdown ? (
+                      <div className="rounded-lg border border-slate-200 bg-white p-2">
+                        <div className="max-h-[160px] overflow-y-auto space-y-1">
+                          {(() => {
+                            const currentAssigneeIds = new Set(
+                              (selectedTaskDetails.assignees ?? []).map((u) => u.id),
+                            );
+                            const available = members.filter(
+                              (m) => m.user && !currentAssigneeIds.has(m.user_id),
+                            );
+                            if (available.length === 0) {
+                              return (
+                                <p className="px-2 py-1.5 text-xs text-slate-400">
+                                  All members already assigned
+                                </p>
+                              );
+                            }
+                            return available.map((member) => {
+                              const user = member.user;
+                              if (!user) return null;
+                              return (
+                                <button
+                                  key={user.id}
+                                  type="button"
+                                  disabled={isAddingTaskMember}
+                                  onClick={() => void addMemberToTask(user.id)}
+                                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                                >
+                                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200 text-[10px] font-semibold text-slate-600">
+                                    {buildInitials(user.name, user.email)}
+                                  </div>
+                                  <span>{user.name ?? user.email ?? "Unknown"}</span>
+                                </button>
+                              );
+                            });
+                          })()}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowTaskMemberDropdown(false)}
+                          className="mt-1 w-full rounded-md px-2 py-1 text-xs font-medium text-slate-500 transition hover:bg-slate-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setShowTaskMemberDropdown(true)}
+                        className="rounded-md border border-dashed border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-500 transition hover:border-slate-400 hover:text-slate-700"
+                      >
+                        + Add Member
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <p className="text-xs text-slate-500">Created: {formatDateTime(selectedTaskDetails.createdAt)}</p>
               {selectedTaskDetails.startDate && (
                 <div>
@@ -1766,7 +2065,8 @@ export default function ProjectBoardPage({
                   No updates yet.
                 </div>
               ) : (
-                <div className="mt-3 space-y-3">
+                <div className="mt-3 max-h-[320px] overflow-y-auto pr-2">
+                  <div className="space-y-3">
                   {taskUpdates.map((update) => {
                     const canEdit = canAddTaskUpdate && (update.user_id === profile?.id || isProjectOwnerMember || isSuperAdmin);
                     const initials = buildInitials(update.user?.name, update.user?.email);
@@ -1844,6 +2144,7 @@ export default function ProjectBoardPage({
                       </div>
                     );
                   })}
+                  </div>
                 </div>
               )}
             </div>
@@ -1895,6 +2196,67 @@ export default function ProjectBoardPage({
             <p className="mt-1 text-xs text-slate-500">
               Creating in: {STATUS_LABEL[newTaskStatus]}
             </p>
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              Additional Assignees (Optional)
+            </label>
+            {selectedAdditionalAssignees.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {selectedAdditionalAssignees.map((user) => (
+                  <span
+                    key={user.id}
+                    className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
+                  >
+                    {user.name ?? user.email ?? user.id}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedAdditionalAssignees((prev) =>
+                          prev.filter((u) => u.id !== user.id)
+                        )
+                      }
+                      className="ml-0.5 text-slate-400 hover:text-slate-600"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {members
+                .filter((member) => {
+                  const user = member.user;
+                  if (!user) return false;
+                  // Exclude the primary assignee
+                  if (user.id === newTaskAssignee) return false;
+                  // Exclude already selected
+                  if (selectedAdditionalAssignees.some((u) => u.id === user.id)) return false;
+                  return true;
+                })
+                .map((member) => {
+                  const user = member.user;
+                  if (!user) return null;
+                  return (
+                    <button
+                      key={user.id}
+                      type="button"
+                      onClick={() =>
+                        setSelectedAdditionalAssignees((prev) => {
+                          if (prev.find((u) => u.id === user.id)) return prev;
+                          return [...prev, user as DbUser];
+                        })
+                      }
+                      className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-50 hover:border-slate-300"
+                      disabled={isSubmitting}
+                    >
+                      + {user.name ?? user.email ?? "Unknown"}
+                    </button>
+                  );
+                })}
+            </div>
           </div>
 
           <div className="mt-3">

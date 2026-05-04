@@ -13,6 +13,7 @@ export type RoadmapTask = {
   updated_at?: string | null;
   created_at: string | null;
   completed_at: string | null;
+  assignees?: { id: string; name: string | null }[];
 };
 
 export type RoadmapProject = {

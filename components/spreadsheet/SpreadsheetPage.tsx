@@ -29,6 +29,7 @@ type TaskRow = {
 
 type SpreadsheetTaskRow = TaskRow & {
   assigned_user: AssignedUser | null;
+  assignees?: AssignedUser[];
 };
 
 function normalizeStatusKey(status: string | null | undefined): string {
@@ -124,9 +125,45 @@ export default function SpreadsheetPage() {
         assigned_user: task.assigned_to ? userMap[task.assigned_to] ?? null : null,
       }));
 
-      let next = finalTasks;
+      // Fetch multi-assignees for all tasks
+      const taskIds = rows.map(t => t.id);
+      let assigneesMap: Record<string, AssignedUser[]> = {};
+      if (taskIds.length > 0) {
+        try {
+          const { data: assigneesData } = await supabase
+            .from("task_assignees")
+            .select("task_id, user:users(id, name, email)")
+            .in("task_id", taskIds);
+
+          if (assigneesData) {
+            (assigneesData as any[]).forEach((row: any) => {
+              if (!row.task_id || !row.user) return;
+              if (!assigneesMap[row.task_id]) assigneesMap[row.task_id] = [];
+              assigneesMap[row.task_id].push(row.user as AssignedUser);
+            });
+          }
+        } catch {
+          // task_assignees table may not exist yet — fail silently
+        }
+      }
+
+      // Merge assignees: primary + additional (deduplicated)
+      const enrichedTasks: SpreadsheetTaskRow[] = finalTasks.map((task) => {
+        const multiUsers = assigneesMap[task.id] ?? [];
+        const primaryUser = task.assigned_user ?? null;
+        const assignees = [
+          ...(primaryUser ? [primaryUser] : []),
+          ...multiUsers.filter(u => u.id !== primaryUser?.id),
+        ];
+        return { ...task, assignees };
+      });
+
+      let next = enrichedTasks;
       if (!isAdminUser) {
-        next = finalTasks.filter((t) => t.assigned_to === currentUser.id);
+        next = enrichedTasks.filter((t) =>
+          t.assigned_to === currentUser.id ||
+          t.assignees?.some(u => u.id === currentUser.id)
+        );
       }
 
       setTasks(next);
@@ -346,7 +383,17 @@ export default function SpreadsheetPage() {
                       {statusLabel}
                     </span>
                   </td>
-                  <td className="px-4 py-2">{task.assigned_user?.name || "Unassigned"}</td>
+                  <td
+                    className="px-4 py-2"
+                    title={task.assignees?.map(u => u.name).filter(Boolean).join(", ") ?? ""}
+                  >
+                    {(() => {
+                      const assignees = task.assignees ?? [];
+                      if (assignees.length === 0) return task.assigned_user?.name || "Unassigned";
+                      if (assignees.length === 1) return assignees[0].name ?? "Unknown";
+                      return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
+                    })()}
+                  </td>
                   <td className="px-4 py-2">{task.start_date || "-"}</td>
                   <td className="px-4 py-2">{task.end_date || "-"}</td>
                   <td className="px-4 py-2">

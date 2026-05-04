@@ -102,16 +102,51 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
         </div>
         <div className="mt-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            {avatarLabel ? (
-              <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium text-white ${avatarAccent}`}>
-                {avatarLabel}
-              </div>
+            {task.assignees && task.assignees.length > 0 ? (
+              <>
+                <div
+                  className="flex items-center -space-x-2"
+                  title={task.assignees.map(a => a.name ?? a.email ?? "").filter(Boolean).join(", ")}
+                >
+                  {task.assignees.slice(0, 2).map((user) => {
+                    const initials =
+                      user.name?.split(" ").map(p => p[0]).join("").slice(0, 2).toUpperCase() ?? "--";
+                    return (
+                      <div
+                        key={user.id}
+                        className="h-7 w-7 rounded-full bg-slate-400 text-white text-xs flex items-center justify-center border-2 border-white"
+                        title={user.name ?? user.email ?? ""}
+                      >
+                        {initials}
+                      </div>
+                    );
+                  })}
+                  {task.assignees.length > 2 && (
+                    <div className="h-7 w-7 rounded-full bg-slate-200 text-xs flex items-center justify-center border-2 border-white text-slate-600 font-medium">
+                      +{task.assignees.length - 2}
+                    </div>
+                  )}
+                </div>
+                <p className="text-xs text-gray-600">
+                  {task.assignees.length === 1
+                    ? (task.assignees[0].name ?? "Unknown")
+                    : `${task.assignees[0].name ?? "Unknown"} +${task.assignees.length - 1}`}
+                </p>
+              </>
             ) : (
-              <div className="h-7 w-7 rounded-full border border-dashed border-slate-200 text-[10px] font-semibold uppercase tracking-wide text-slate-400 flex items-center justify-center">
-                --
-              </div>
+              <>
+                {avatarLabel ? (
+                  <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium text-white ${avatarAccent}`}>
+                    {avatarLabel}
+                  </div>
+                ) : (
+                  <div className="h-7 w-7 rounded-full border border-dashed border-slate-200 text-[10px] font-semibold uppercase tracking-wide text-slate-400 flex items-center justify-center">
+                    --
+                  </div>
+                )}
+                <p className="text-xs text-gray-600">{assigneeDisplay}</p>
+              </>
             )}
-            <span className="text-sm font-medium text-gray-700">{assigneeDisplay}</span>
             {isUnassigned && onClaimTask ? (
               <button
                 type="button"
