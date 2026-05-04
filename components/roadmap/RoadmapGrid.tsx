@@ -1249,7 +1249,7 @@ export default function RoadmapGrid() {
                       }}
                       className={`mb-3 cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:shadow-md border-l-4 ${ui?.border ?? "border-l-slate-400"}`}
                     >
-                      <p className="text-sm font-medium text-slate-900">{task.title ?? "Untitled task"}</p>
+                      <p className="text-sm font-medium text-slate-900 break-words line-clamp-2">{task.title ?? "Untitled task"}</p>
 
                       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
                         <span title={task.assignees?.map(u => u.name).filter(Boolean).join(", ") ?? ""}>{(() => {
@@ -1307,7 +1307,7 @@ export default function RoadmapGrid() {
                             STATUS_UI[statusChipKey as keyof typeof STATUS_UI]?.border ?? "border-l-slate-400"
                           }`}
                         >
-                          {task.title ?? "Untitled task"}
+                          <span className="break-words line-clamp-2">{task.title ?? "Untitled task"}</span>
                         </div>
                       );
                     })}
@@ -1331,7 +1331,9 @@ export default function RoadmapGrid() {
         {selectedTaskDetails && (
           <div className="space-y-5 text-sm text-slate-700">
             <div>
-              <p className="text-xl font-bold leading-tight text-slate-900">{selectedTaskDetails.title}</p>
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight text-slate-900 break-words line-clamp-2">{selectedTaskDetails.title}</p>
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
@@ -1433,7 +1435,7 @@ export default function RoadmapGrid() {
               ) : null}
 
               {taskUpdates.length > 0 ? (
-                <div className="mt-4 space-y-3">
+                <div className="mt-4 max-h-[220px] overflow-y-auto pr-2 space-y-3">
                   {taskUpdates.map((update) => {
                     const formattedDate = new Date(update.created_at).toLocaleString(undefined, {
                       day: "2-digit",
@@ -1445,7 +1447,7 @@ export default function RoadmapGrid() {
 
                     return (
                       <div key={update.id} className="rounded-lg border border-slate-200 bg-white px-3 py-3">
-                        <p className="whitespace-pre-wrap text-sm text-slate-900">{update.content}</p>
+                        <p className="whitespace-pre-wrap break-words text-sm text-slate-900">{update.content}</p>
                         <p className="mt-2 text-xs text-slate-500">
                           {update.user?.name || "Unknown"}
                           {" • "}

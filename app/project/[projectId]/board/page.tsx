@@ -238,6 +238,8 @@ export default function ProjectBoardPage({
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [isAddingTaskMember, setIsAddingTaskMember] = useState(false);
   const [showTaskMemberDropdown, setShowTaskMemberDropdown] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [isSavingEdit2, setIsSavingEdit2] = useState(false);
 
   const isOwner = Boolean(project?.owner_id && profile?.id && project.owner_id === profile.id);
   const isSuperAdmin = (profile?.system_role ?? "").toLowerCase() === "super_admin";
@@ -269,14 +271,27 @@ export default function ProjectBoardPage({
   }, [directoryUsers, members, newMemberSearch]);
 
   const canMoveTask = useCallback(
-    (assignedTo: string | null, assignees?: { id: string }[]) => {
-      if (!profile?.id) {
-        return false;
+    (assignedTo: string | null, assignees?: { id: string }[], startDate?: string | null) => {
+      if (!profile?.id) return false;
+
+      // Admin / owner always allowed
+      if (canManageProject) return true;
+
+      const isAssignee = assignedTo === profile.id;
+      const isMultiAssignee = assignees?.some(u => u.id === profile.id) ?? false;
+
+      if (!isAssignee && !isMultiAssignee) return false;
+
+      // Date lock: future tasks cannot be moved
+      if (startDate) {
+        const today = new Date();
+        const taskStart = new Date(startDate);
+        today.setHours(0, 0, 0, 0);
+        taskStart.setHours(0, 0, 0, 0);
+        if (taskStart > today) return false;
       }
 
-      const isAssignee = Boolean(assignedTo && assignedTo === profile.id);
-      const isMultiAssignee = assignees?.some(u => u.id === profile.id) ?? false;
-      return canManageProject || isAssignee || isMultiAssignee;
+      return true;
     },
     [profile?.id, canManageProject],
   );
@@ -873,7 +888,7 @@ export default function ProjectBoardPage({
           const additionalAssigneesToInsert = selectedAdditionalAssignees.filter(
             (u) => u.id !== newTask.assigned_to
           );
-          if (additionalAssigneesToInsert.length > 0) {
+          if (newTask.assigned_to && additionalAssigneesToInsert.length > 0) {
             try {
               await supabase.from("task_assignees").insert(
                 additionalAssigneesToInsert.map((user) => ({
@@ -914,7 +929,7 @@ export default function ProjectBoardPage({
                 start_date: newTask.start_date ?? null,
                 end_date: newTask.end_date ?? null,
                 statusLabel: STATUS_LABEL[columnId],
-                canDrag: canMoveTask(newTask.assigned_to, assignees),
+                canDrag: canMoveTask(newTask.assigned_to, assignees, newTask.start_date),
                 assignees,
               },
               ...prev[columnId],
@@ -1169,7 +1184,7 @@ export default function ProjectBoardPage({
               start_date: row.start_date,
               end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
-              canDrag: canMoveTask(row.assigned_to, assignees),
+              canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
               updatesCount: updatesMap[row.id] ?? 0,
               assignees,
             },
@@ -1223,7 +1238,7 @@ export default function ProjectBoardPage({
   const onTaskDragStart = useCallback(
     (taskId: string, from: ColumnId) => {
       const task = columns[from].find((item) => item.id === taskId);
-      const canMove = canMoveTask(task?.assigneeId ?? null, task?.assignees);
+      const canMove = canMoveTask(task?.assigneeId ?? null, task?.assignees, task?.start_date);
 
       if (!canMove) {
         console.warn("Unauthorized action");
@@ -1243,7 +1258,7 @@ export default function ProjectBoardPage({
   const updateTaskStatus = useCallback(
     async (taskId: string, destination: ColumnId, source: ColumnId) => {
       const sourceTask = columns[source].find((task) => task.id === taskId);
-      const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees);
+      const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees, sourceTask?.start_date);
 
       if (!canMove) {
         console.warn("Unauthorized action");
@@ -1318,7 +1333,7 @@ export default function ProjectBoardPage({
           return current;
         }
 
-        const canMove = canMoveTask(movedTask.assigneeId ?? null, movedTask.assignees);
+        const canMove = canMoveTask(movedTask.assigneeId ?? null, movedTask.assignees, movedTask.start_date);
         if (!canMove) {
           console.warn("Unauthorized action");
           return current;
@@ -1354,15 +1369,18 @@ export default function ProjectBoardPage({
 
   const onDeleteTask = useCallback(
     async (taskId: string, column: ColumnId) => {
-      // SECURITY: Only owner can delete tasks
-      if (!canManageProject) {
-        alert("Only the project owner or admin can delete tasks.");
-        console.warn("Unauthorized: Non-owner/non-admin attempted to delete task", { taskId });
+      const existingTask = columns[column].find((task) => task.id === taskId);
+      if (!existingTask) {
         return;
       }
 
-      const existingTask = columns[column].find((task) => task.id === taskId);
-      if (!existingTask) {
+      // Permission: owner/admin OR assignee (primary or multi)
+      const isAssignee = existingTask.assigneeId === profile?.id;
+      const isMultiAssignee = existingTask.assignees?.some(u => u.id === profile?.id);
+      const canDelete = canManageProject || isAssignee || isMultiAssignee;
+
+      if (!canDelete) {
+        alert("You don't have permission to delete this task.");
         return;
       }
 
@@ -1385,8 +1403,86 @@ export default function ProjectBoardPage({
         console.log("Task deleted successfully");
       }
     },
-    [columns, projectId, supabase, canManageProject],
+    [columns, projectId, supabase, canManageProject, profile?.id],
   );
+
+  const findTaskFromColumns = useCallback(
+    (taskId: string): Task | null => {
+      for (const col of BOARD_COLUMNS) {
+        const found = columns[col.id].find((t) => t.id === taskId);
+        if (found) return found;
+      }
+      return null;
+    },
+    [columns],
+  );
+
+  const handleEditTask = useCallback(
+    (taskId: string) => {
+      const task = findTaskFromColumns(taskId);
+      if (!task) return;
+
+      // Permission check
+      const canEdit =
+        canManageProject ||
+        task.assigneeId === profile?.id ||
+        task.assignees?.some(u => u.id === profile?.id);
+
+      if (!canEdit) {
+        alert("You don't have permission to edit this task.");
+        return;
+      }
+
+      setEditingTask({ ...task });
+    },
+    [findTaskFromColumns, canManageProject, profile?.id],
+  );
+
+  const handleUpdateTask = useCallback(async () => {
+    if (!editingTask) return;
+
+    setIsSavingEdit2(true);
+    try {
+      const { error } = await supabase
+        .from("tasks")
+        .update({
+          title: editingTask.title,
+          start_date: editingTask.start_date ?? null,
+          end_date: editingTask.end_date ?? null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", editingTask.id)
+        .eq("project_id", projectId);
+
+      if (!error) {
+        setColumns((prev) => {
+          const updated = { ...prev };
+          BOARD_COLUMNS.forEach((col) => {
+            updated[col.id] = updated[col.id].map((t) => {
+              if (t.id !== editingTask.id) return t;
+              return {
+                ...t,
+                title: editingTask.title,
+                start_date: editingTask.start_date,
+                end_date: editingTask.end_date,
+                canDrag: canMoveTask(t.assigneeId ?? null, t.assignees, editingTask.start_date),
+              };
+            });
+          });
+          return updated;
+        });
+        setEditingTask(null);
+      } else {
+        console.error("Task update error:", error);
+        alert("Failed to update task.");
+      }
+    } catch (err) {
+      console.error("Failed to update task", err);
+      alert("Failed to update task.");
+    } finally {
+      setIsSavingEdit2(false);
+    }
+  }, [editingTask, projectId, supabase, canMoveTask]);
 
   const claimTask = useCallback(
     async (taskId: string) => {
@@ -1540,7 +1636,7 @@ export default function ProjectBoardPage({
             start_date: row.start_date,
             end_date: row.end_date,
             statusLabel: STATUS_LABEL[columnId],
-            canDrag: canMoveTask(row.assigned_to, assignees),
+            canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
             updatesCount: updatesMap[row.id] ?? 0,
             assignees,
           },
@@ -1702,7 +1798,7 @@ export default function ProjectBoardPage({
               start_date: row.start_date,
               end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
-              canDrag: canMoveTask(row.assigned_to, assignees),
+              canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
               updatesCount: updatesMap[row.id] ?? 0,
               assignees,
             },
@@ -1857,6 +1953,7 @@ export default function ProjectBoardPage({
                 onTaskDragEnd={onTaskDragEnd}
                 onRemoveTask={onRemoveTask}
                 onDeleteTask={onDeleteTask}
+                onEditTask={handleEditTask}
                 onOpenTaskDetails={handleOpenTaskDetails}
                 onQuickAddTask={(columnId) => {
                   setNewTaskStatus(columnId);
@@ -1864,7 +1961,8 @@ export default function ProjectBoardPage({
                 }}
                 onClaimTask={claimTask}
                 canClaim={!canManageProject}
-                canDelete={canManageProject}
+                canDelete={true}
+                canEdit={true}
               />
             );
           })}
@@ -1879,8 +1977,8 @@ export default function ProjectBoardPage({
           <div className="space-y-5 text-sm text-slate-700">
             <div className="space-y-2">
               <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-xl font-bold leading-tight text-slate-900">{selectedTaskDetails.title}</p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xl font-bold leading-tight text-slate-900 break-words line-clamp-2">{selectedTaskDetails.title}</p>
                   <p className="mt-1 text-xs uppercase tracking-[0.15em] text-slate-500">{selectedTaskDetails.status}</p>
                 </div>
                 {canAddTaskUpdate ? (
@@ -2030,7 +2128,7 @@ export default function ProjectBoardPage({
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
-              <div className="mt-3 space-y-0">
+              <div className="mt-3 max-h-[200px] overflow-y-auto pr-2 space-y-0">
                 {taskLogsLoading ? (
                   <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
                     Loading activity...
@@ -2139,7 +2237,7 @@ export default function ProjectBoardPage({
                             </div>
                           </div>
                         ) : (
-                          <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">{update.content}</p>
+                          <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{update.content}</p>
                         )}
                       </div>
                     );
@@ -2198,10 +2296,15 @@ export default function ProjectBoardPage({
             </p>
           </div>
 
-          <div>
+          <div className={newTaskAssignee ? "" : "opacity-50 pointer-events-none"}>
             <label className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
               Additional Assignees (Optional)
             </label>
+            {!newTaskAssignee && (
+              <p className="text-xs text-gray-400 mt-1">
+                Select a primary assignee first
+              </p>
+            )}
             {selectedAdditionalAssignees.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {selectedAdditionalAssignees.map((user) => (
@@ -2365,6 +2468,71 @@ export default function ProjectBoardPage({
             {isSubmitting ? "Adding..." : "Add Member"}
           </Button>
         </div>
+      </Modal>
+
+      {/* EDIT TASK MODAL */}
+      <Modal title="Edit Task" isOpen={Boolean(editingTask)} onClose={() => setEditingTask(null)}>
+        {editingTask && (
+          <div className="space-y-4">
+            <div>
+              <label htmlFor="edit-task-title" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                Title
+              </label>
+              <input
+                id="edit-task-title"
+                type="text"
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+                value={editingTask.title}
+                onChange={(e) => setEditingTask({ ...editingTask, title: e.target.value })}
+                disabled={isSavingEdit2}
+                autoFocus
+              />
+            </div>
+            <div>
+              <label htmlFor="edit-task-start-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                Start Date
+              </label>
+              <input
+                id="edit-task-start-date"
+                type="date"
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
+                value={editingTask.start_date ?? ""}
+                onChange={(e) => setEditingTask({ ...editingTask, start_date: e.target.value || null })}
+                disabled={isSavingEdit2}
+              />
+            </div>
+            <div>
+              <label htmlFor="edit-task-end-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                End Date
+              </label>
+              <input
+                id="edit-task-end-date"
+                type="date"
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
+                value={editingTask.end_date ?? ""}
+                onChange={(e) => setEditingTask({ ...editingTask, end_date: e.target.value || null })}
+                disabled={isSavingEdit2}
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <Button
+                variant="ghost"
+                onClick={() => setEditingTask(null)}
+                disabled={isSavingEdit2}
+                className="rounded-lg px-4 py-2 text-sm font-semibold"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => void handleUpdateTask()}
+                disabled={isSavingEdit2 || !editingTask.title.trim()}
+                className="rounded-lg px-4 py-2 text-sm font-semibold"
+              >
+                {isSavingEdit2 ? "Saving..." : "Save"}
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

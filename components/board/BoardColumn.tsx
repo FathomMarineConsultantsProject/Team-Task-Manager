@@ -14,11 +14,13 @@ interface BoardColumnProps {
   onTaskDragEnd: () => void;
   onRemoveTask: (taskId: string, column: ColumnId) => void;
   onDeleteTask: (taskId: string, column: ColumnId) => Promise<void> | void;
+  onEditTask?: (taskId: string) => void;
   onOpenTaskDetails?: (taskId: string, column: ColumnId) => void;
   onQuickAddTask?: (columnId: ColumnId) => void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
   canClaim?: boolean;
   canDelete?: boolean;
+  canEdit?: boolean;
 }
 
 export default function BoardColumn({
@@ -32,11 +34,13 @@ export default function BoardColumn({
   onTaskDragEnd,
   onRemoveTask,
   onDeleteTask,
+  onEditTask,
   onOpenTaskDetails,
   onQuickAddTask,
   onClaimTask,
   canClaim = false,
   canDelete = true,
+  canEdit = false,
 }: BoardColumnProps) {
   const columnRing = isDragOver
     ? "border-2 border-dashed border-slate-400 bg-white shadow-md"
@@ -91,10 +95,12 @@ export default function BoardColumn({
             columnId={columnId}
             onRemoveTask={onRemoveTask}
             onDeleteTask={onDeleteTask}
+            onEditTask={onEditTask}
             onOpenDetails={() => onOpenTaskDetails?.(task.id, columnId)}
             onClaimTask={onClaimTask}
             canClaim={canClaim}
             canDelete={canDelete}
+            canEdit={canEdit}
             onDragStart={(event) => onTaskDragStart(task.id, columnId, event)}
             onDragEnd={onTaskDragEnd}
           />
