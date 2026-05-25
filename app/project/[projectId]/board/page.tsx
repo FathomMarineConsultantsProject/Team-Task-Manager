@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Plus, Users, LayoutDashboard } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X } from "lucide-react";
 import BoardColumn from "@/components/board/BoardColumn";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
+import Avatar from "@/components/ui/Avatar";
+import ChatPanel from "@/components/ui/ChatPanel";
+import MentionTextarea, { RenderMentionText, encodeMentionsForDatabase } from "@/components/ui/MentionTextarea";
 import type { ColumnId, Task } from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
 import { createEmptyColumns } from "@/lib/data";
@@ -13,6 +16,7 @@ import { createEmptyColumns } from "@/lib/data";
 type DbTask = {
   id: string;
   title: string | null;
+  description: string | null;
   status: string | null;
   assigned_to: string | null;
   start_date: string | null;
@@ -24,6 +28,7 @@ type DbUser = {
   name: string | null;
   email: string | null;
   job_role: string | null;
+  avatar_url: string | null;
 };
 
 type DbProject = {
@@ -33,6 +38,7 @@ type DbProject = {
   owner_id: string;
   start_date: string | null;
   end_date: string | null;
+  created_at?: string | null;
   owner?: {
     id: string | null;
     email: string | null;
@@ -54,12 +60,14 @@ type DbProjectMember = {
     name: string | null;
     email: string | null;
     job_role: string | null;
+    avatar_url: string | null;
   } | null;
 };
 
 type TaskDetailsModalState = {
   id: string;
   title: string;
+  description: string | null;
   status: string;
   assigneeName: string;
   assigneeId: string | null;
@@ -94,6 +102,7 @@ type TaskUpdateRow = {
   user_id: string;
   content: string;
   created_at: string;
+  reply_to: string | null;
 };
 
 type TaskUpdateEntry = TaskUpdateRow & {
@@ -102,6 +111,23 @@ type TaskUpdateEntry = TaskUpdateRow & {
     name: string | null;
     email: string | null;
     job_role: string | null;
+    avatar_url: string | null;
+  } | null;
+  replies?: TaskUpdateEntry[];
+};
+
+type TaskChatMessage = {
+  id: string;
+  task_id: string;
+  project_id: string;
+  user_id: string;
+  content: string;
+  created_at: string;
+  user: {
+    id: string;
+    name: string | null;
+    email: string | null;
+    avatar_url: string | null;
   } | null;
 };
 
@@ -191,6 +217,21 @@ const formatStatusValue = (value: string | null | undefined) => {
   return value.replace(/_/g, " ").toUpperCase();
 };
 
+const formatDuration = (ms: number) => {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return {
+    days: String(days),
+    hours: String(hours).padStart(2, "0"),
+    minutes: String(minutes).padStart(2, "0"),
+    seconds: String(seconds).padStart(2, "0"),
+  };
+};
+
 export default function ProjectBoardPage({
   params,
 }: {
@@ -198,6 +239,9 @@ export default function ProjectBoardPage({
 }) {
   const projectId = params?.projectId ?? "";
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const deepLinkTaskId = searchParams?.get("taskId");
+  const hasOpenedDeepLinkRef = React.useRef(false);
   const { supabase, profile } = useAppData();
   
   // Board state (existing)
@@ -220,6 +264,7 @@ export default function ProjectBoardPage({
   const [newTaskAssignee, setNewTaskAssignee] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [newTaskDescription, setNewTaskDescription] = useState("");
   const [newMemberSearch, setNewMemberSearch] = useState("");
   const [selectedMember, setSelectedMember] = useState<DbUser | null>(null);
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
@@ -235,11 +280,31 @@ export default function ProjectBoardPage({
   const [editingUpdateId, setEditingUpdateId] = useState<string | null>(null);
   const [editingUpdateContent, setEditingUpdateContent] = useState("");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [expandedReplies, setExpandedReplies] = useState<Record<string, boolean>>({});
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [isAddingTaskMember, setIsAddingTaskMember] = useState(false);
   const [showTaskMemberDropdown, setShowTaskMemberDropdown] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
+  const [replyingToId, setReplyingToId] = useState<string | null>(null);
+  const [replyContent, setReplyContent] = useState("");
+  const [isSavingReply, setIsSavingReply] = useState(false);
+  const [taskChatMessages, setTaskChatMessages] = useState<TaskChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [isSendingChat, setIsSendingChat] = useState(false);
+  const [activeTab, setActiveTab] = useState<"details" | "chat">("details");
+  const [unreadTaskNotifs, setUnreadTaskNotifs] = useState<Record<string, number>>({});
+  const [timerNow, setTimerNow] = useState<number | null>(null);
+
+  // Part 2 - Team collapse
+  const [teamExpanded, setTeamExpanded] = useState(false);
+  // Part 3 - Pipeline search
+  const [boardSearch, setBoardSearch] = useState("");
+  // Part 4 - Sort & filter
+  const [boardSort, setBoardSort] = useState<"default" | "created" | "start" | "due" | "alpha" | "near_due" | "overdue">("default");
+  const [boardTimeFilter, setBoardTimeFilter] = useState<"all" | "today" | "week" | "month" | "overdue" | "near_due" | "completed">("all");
+  const [boardMemberFilter, setBoardMemberFilter] = useState("all");
+  const [showFilters, setShowFilters] = useState(false);
 
   const isOwner = Boolean(project?.owner_id && profile?.id && project.owner_id === profile.id);
   const isSuperAdmin = (profile?.system_role ?? "").toLowerCase() === "super_admin";
@@ -251,6 +316,17 @@ export default function ProjectBoardPage({
       members.some((member) => member.user_id === profile.id && (member.role ?? "").toLowerCase() === "owner"),
   );
   const canViewTaskUpdates = isProjectMember || canManageProject;
+
+  useEffect(() => {
+    setTimerNow(Date.now());
+    const interval = setInterval(() => setTimerNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const timerStart = useMemo(() => {
+    const value = project?.start_date || project?.created_at || null;
+    return value ? new Date(value).getTime() : null;
+  }, [project?.start_date, project?.created_at]);
 
   const filteredUsers = useMemo(() => {
     const search = newMemberSearch.trim().toLowerCase();
@@ -376,7 +452,17 @@ export default function ProjectBoardPage({
   }, [projectId, supabase]);
 
   const loadTaskDetailsData = useCallback(async () => {
+    console.log("[DEBUG loadTaskDetailsData] called", {
+      taskId: selectedTaskDetails?.id,
+      projectId,
+      canViewTaskUpdates,
+    });
     if (!selectedTaskDetails?.id || !projectId || !canViewTaskUpdates) {
+      console.log("[DEBUG loadTaskDetailsData] EARLY RETURN - missing:", {
+        hasTaskId: !!selectedTaskDetails?.id,
+        hasProjectId: !!projectId,
+        canViewTaskUpdates,
+      });
       setTaskLogs([]);
       setTaskUpdates([]);
       return;
@@ -393,11 +479,18 @@ export default function ProjectBoardPage({
           .order("created_at", { ascending: false }),
         supabase
           .from("task_updates")
-          .select("id, task_id, project_id, user_id, content, created_at")
+          .select("id, task_id, project_id, user_id, content, created_at, reply_to")
           .eq("task_id", selectedTaskDetails.id)
           .eq("project_id", projectId)
           .order("created_at", { ascending: false }),
       ]);
+      console.log("[DEBUG loadTaskDetailsData] query results:", {
+        logsError: logsResponse.error,
+        logsCount: logsResponse.data?.length ?? 0,
+        updatesError: updatesResponse.error,
+        updatesCount: updatesResponse.data?.length ?? 0,
+        updatesData: updatesResponse.data,
+      });
 
       if (logsResponse.error) {
         setTaskLogs([]);
@@ -422,7 +515,7 @@ export default function ProjectBoardPage({
         try {
           const { data: usersData, error: usersError } = await supabase
             .from("users")
-            .select("id, name, email, job_role")
+            .select("id, name, email, job_role, avatar_url")
             .in("id", userIds);
 
           if (!usersError) {
@@ -468,29 +561,33 @@ export default function ProjectBoardPage({
       let createdAt: string | null = null;
       let startDateValue: string | null = null;
       let endDateValue: string | null = null;
+      let descriptionValue: string | null = null;
 
       try {
         const { data, error } = await supabase
           .from("tasks")
-          .select("created_at, start_date, end_date")
+          .select("created_at, start_date, end_date, description")
           .eq("id", taskId)
           .eq("project_id", projectId)
           .single();
 
         if (!error) {
-          createdAt = (data as { created_at: string | null } | null)?.created_at ?? null;
-          startDateValue = (data as { start_date: string | null } | null)?.start_date ?? null;
-          endDateValue = (data as { end_date: string | null } | null)?.end_date ?? null;
+          createdAt = (data as any)?.created_at ?? null;
+          startDateValue = (data as any)?.start_date ?? null;
+          endDateValue = (data as any)?.end_date ?? null;
+          descriptionValue = (data as any)?.description ?? null;
         }
       } catch {
         createdAt = null;
         startDateValue = null;
         endDateValue = null;
+        descriptionValue = null;
       }
 
       setSelectedTaskDetails({
         id: task.id,
         title: task.title,
+        description: descriptionValue,
         status: task.statusLabel ?? STATUS_LABEL[column],
         assigneeName: task.assigneeName ?? task.assigneeEmail ?? "Unassigned",
         assigneeId: task.assigneeId ?? null,
@@ -578,22 +675,15 @@ export default function ProjectBoardPage({
     [selectedTaskDetails, projectId, supabase, members],
   );
 
+  // Live Chat is project-wide collaboration: any project member can participate.
+  // Task edit/move/delete permissions remain unchanged (assignee/owner/admin only).
   const canAddTaskUpdate = useMemo(() => {
     if (!selectedTaskDetails || !profile?.id) {
       return false;
     }
 
-    const isAssignee = selectedTaskDetails.assigneeId === profile.id;
-    // Check multi-assignees from the task in columns
-    let isMultiAssignee = false;
-    BOARD_COLUMNS.forEach((col) => {
-      const t = columns[col.id].find((task) => task.id === selectedTaskDetails.id);
-      if (t?.assignees?.some(u => u.id === profile.id)) {
-        isMultiAssignee = true;
-      }
-    });
-    return isAssignee || isMultiAssignee || isProjectOwnerMember || isSuperAdmin;
-  }, [columns, isProjectOwnerMember, isSuperAdmin, profile?.id, selectedTaskDetails]);
+    return isProjectMember || isProjectOwnerMember || isSuperAdmin;
+  }, [isProjectMember, isProjectOwnerMember, isSuperAdmin, profile?.id, selectedTaskDetails]);
 
   const canManageAssignees = useMemo(() => {
     if (!profile?.id) return false;
@@ -637,7 +727,7 @@ export default function ProjectBoardPage({
         task_id: selectedTaskDetails.id,
         project_id: projectId,
         user_id: profile.id,
-        content: trimmed,
+        content: encodeMentionsForDatabase(trimmed, members.map(m => m.user).filter((u): u is NonNullable<typeof u> => u !== null)),
       });
 
       if (error) {
@@ -668,7 +758,7 @@ export default function ProjectBoardPage({
       setIsSavingEdit(true);
       const { error } = await supabase
         .from("task_updates")
-        .update({ content: trimmed })
+        .update({ content: encodeMentionsForDatabase(trimmed, members.map(m => m.user).filter((u): u is NonNullable<typeof u> => u !== null)) })
         .eq("id", editingUpdateId);
 
       if (error) {
@@ -683,7 +773,7 @@ export default function ProjectBoardPage({
     } finally {
       setIsSavingEdit(false);
     }
-  }, [canAddTaskUpdate, editingUpdateContent, editingUpdateId, loadTaskDetailsData, loadTaskUpdateCounts, supabase]);
+  }, [canAddTaskUpdate, editingUpdateContent, editingUpdateId, loadTaskDetailsData, loadTaskUpdateCounts, supabase, members]);
 
   const deleteTaskUpdate = useCallback(
     async (updateId: string) => {
@@ -752,6 +842,7 @@ export default function ProjectBoardPage({
               owner_id,
               start_date,
               end_date,
+              created_at,
               owner:users!projects_owner_id_fkey (
                 id,
                 email
@@ -780,7 +871,7 @@ export default function ProjectBoardPage({
             `
               user_id,
               role,
-              user:users(id, name, email, job_role)
+              user:users(id, name, email, job_role, avatar_url)
             `,
           )
           .eq("project_id", projectId);
@@ -822,9 +913,10 @@ export default function ProjectBoardPage({
 
       setIsSubmitting(true);
 
-      // Build strict payload - NO description, NO created_at
+      // Build strict payload
       const payload = {
         title: title.trim(),
+        description: newTaskDescription.trim() || null,
         project_id: projectId,
         status: COLUMN_TO_STATUS[newTaskStatus],
         assigned_to: newTaskAssignee || null,
@@ -861,6 +953,7 @@ export default function ProjectBoardPage({
         setNewTaskStatus("todo");
         setStartDate("");
         setEndDate("");
+        setNewTaskDescription("");
         setShowCreateTaskModal(false);
 
         // Immediately append new task to local state
@@ -908,10 +1001,10 @@ export default function ProjectBoardPage({
             : undefined;
 
           // Build assignees array: primary + additional
-          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
           const assignees = [
             ...(primaryUser ? [primaryUser] : []),
-            ...additionalAssigneesToInsert.map(u => ({ id: u.id, name: u.name ?? null, email: u.email ?? null })),
+            ...additionalAssigneesToInsert.map(u => ({ id: u.id, name: u.name ?? null, email: u.email ?? null, avatar_url: u.avatar_url ?? null })),
           ];
 
           setColumns((prev) => ({
@@ -920,12 +1013,14 @@ export default function ProjectBoardPage({
               {
                 id: newTask.id,
                 title: newTask.title?.trim() || "Untitled task",
+                description: newTask.description ?? null,
                 accent: COLUMN_ACCENT[columnId],
                 initials: buildInitials(assignee?.name, assignee?.email),
                 assigneeId: newTask.assigned_to,
                 assigneeName: assignee?.name ?? null,
                 assigneeEmail: assignee?.email ?? null,
                 assigneeRole: assignee?.job_role ?? null,
+                avatarUrl: assignee?.avatar_url ?? null,
                 start_date: newTask.start_date ?? null,
                 end_date: newTask.end_date ?? null,
                 statusLabel: STATUS_LABEL[columnId],
@@ -988,7 +1083,7 @@ export default function ProjectBoardPage({
           .select(
             `
               user_id,
-              user:users(id, name, email, job_role)
+              user:users(id, name, email, job_role, avatar_url)
             `,
           )
           .eq("project_id", projectId);
@@ -1014,7 +1109,7 @@ export default function ProjectBoardPage({
     const loadDirectoryUsers = async () => {
       const { data, error } = await supabase
         .from("users")
-        .select("id, name, email, job_role")
+        .select("id, name, email, job_role, avatar_url")
         .order("name", { ascending: true });
 
       if (error) {
@@ -1055,7 +1150,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, status, assigned_to, start_date, end_date")
+          .select("id, title, description, status, assigned_to, start_date, end_date")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1121,7 +1216,7 @@ export default function ProjectBoardPage({
         if (assignedIds.length > 0) {
           const { data: userRows, error: userError } = await supabase
             .from("users")
-            .select("id, name, email, job_role")
+            .select("id, name, email, job_role, avatar_url")
             .in("id", assignedIds);
 
           if (userError) {
@@ -1143,7 +1238,7 @@ export default function ProjectBoardPage({
           try {
             const { data: assigneesData } = await supabase
               .from("task_assignees")
-              .select("task_id, user:users(id, name, email)")
+              .select("task_id, user:users(id, name, email, avatar_url)")
               .in("task_id", allTaskIds);
 
             if (assigneesData) {
@@ -1164,7 +1259,7 @@ export default function ProjectBoardPage({
 
           // Build multi-assignee list: primary + additional (deduplicated)
           const multiUsers = assigneesMap[row.id] ?? [];
-          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
           const assignees = [
             ...(primaryUser ? [primaryUser] : []),
             ...multiUsers.filter(u => u.id !== primaryUser?.id),
@@ -1175,12 +1270,14 @@ export default function ProjectBoardPage({
             {
               id: row.id,
               title: row.title?.trim() || "Untitled task",
+              description: row.description,
               accent: COLUMN_ACCENT[columnId],
               initials: buildInitials(assignee?.name, assignee?.email),
               assigneeId: row.assigned_to,
               assigneeName: assignee?.name ?? null,
               assigneeEmail: assignee?.email ?? null,
               assigneeRole: assignee?.job_role ?? null,
+              avatarUrl: assignee?.avatar_url ?? null,
               start_date: row.start_date,
               end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
@@ -1418,7 +1515,7 @@ export default function ProjectBoardPage({
   );
 
   const handleEditTask = useCallback(
-    (taskId: string) => {
+    async (taskId: string) => {
       const task = findTaskFromColumns(taskId);
       if (!task) return;
 
@@ -1433,9 +1530,21 @@ export default function ProjectBoardPage({
         return;
       }
 
-      setEditingTask({ ...task });
+      // Fetch description from DB
+      let description: string | null = null;
+      try {
+        const { data } = await supabase
+          .from("tasks")
+          .select("description")
+          .eq("id", taskId)
+          .eq("project_id", projectId)
+          .single();
+        description = (data as any)?.description ?? null;
+      } catch { /* silent */ }
+
+      setEditingTask({ ...task, description });
     },
-    [findTaskFromColumns, canManageProject, profile?.id],
+    [findTaskFromColumns, canManageProject, profile?.id, supabase, projectId],
   );
 
   const handleUpdateTask = useCallback(async () => {
@@ -1447,6 +1556,7 @@ export default function ProjectBoardPage({
         .from("tasks")
         .update({
           title: editingTask.title,
+          description: editingTask.description ?? null,
           start_date: editingTask.start_date ?? null,
           end_date: editingTask.end_date ?? null,
           updated_at: new Date().toISOString(),
@@ -1463,6 +1573,7 @@ export default function ProjectBoardPage({
               return {
                 ...t,
                 title: editingTask.title,
+                description: editingTask.description,
                 start_date: editingTask.start_date,
                 end_date: editingTask.end_date,
                 canDrag: canMoveTask(t.assigneeId ?? null, t.assignees, editingTask.start_date),
@@ -1529,7 +1640,7 @@ export default function ProjectBoardPage({
 
       const { data: taskRows, error: taskError } = await supabase
         .from("tasks")
-        .select("id, title, status, assigned_to, start_date, end_date")
+        .select("id, title, description, status, assigned_to, start_date, end_date")
         .eq("project_id", projectId)
         .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1572,7 +1683,7 @@ export default function ProjectBoardPage({
       if (assignedIds.length > 0) {
         const { data: userRows, error: userError } = await supabase
           .from("users")
-          .select("id, name, email, job_role")
+          .select("id, name, email, job_role, avatar_url")
           .in("id", assignedIds);
 
         if (userError) {
@@ -1595,7 +1706,7 @@ export default function ProjectBoardPage({
         try {
           const { data: assigneesData } = await supabase
             .from("task_assignees")
-            .select("task_id, user:users(id, name, email)")
+            .select("task_id, user:users(id, name, email, avatar_url)")
             .in("task_id", claimTaskIds);
 
           if (assigneesData) {
@@ -1616,7 +1727,7 @@ export default function ProjectBoardPage({
 
         // Build multi-assignee list: primary + additional (deduplicated)
         const multiUsers = claimAssigneesMap[row.id] ?? [];
-        const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+        const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
         const assignees = [
           ...(primaryUser ? [primaryUser] : []),
           ...multiUsers.filter(u => u.id !== primaryUser?.id),
@@ -1627,12 +1738,14 @@ export default function ProjectBoardPage({
           {
             id: row.id,
             title: row.title?.trim() || "Untitled task",
+            description: row.description,
             accent: COLUMN_ACCENT[columnId],
             initials: buildInitials(assignee?.name, assignee?.email),
             assigneeId: row.assigned_to,
             assigneeName: assignee?.name ?? null,
             assigneeEmail: assignee?.email ?? null,
             assigneeRole: assignee?.job_role ?? null,
+            avatarUrl: assignee?.avatar_url ?? null,
             start_date: row.start_date,
             end_date: row.end_date,
             statusLabel: STATUS_LABEL[columnId],
@@ -1669,7 +1782,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, status, assigned_to, start_date, end_date")
+          .select("id, title, description, status, assigned_to, start_date, end_date")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1735,7 +1848,7 @@ export default function ProjectBoardPage({
         if (assignedIds.length > 0) {
           const { data: userRows, error: userError } = await supabase
             .from("users")
-            .select("id, name, email, job_role")
+            .select("id, name, email, job_role, avatar_url")
             .in("id", assignedIds);
 
           if (userError) {
@@ -1757,7 +1870,7 @@ export default function ProjectBoardPage({
           try {
             const { data: assigneesData } = await supabase
               .from("task_assignees")
-              .select("task_id, user:users(id, name, email)")
+              .select("task_id, user:users(id, name, email, avatar_url)")
               .in("task_id", allTaskIds2);
 
             if (assigneesData) {
@@ -1778,7 +1891,7 @@ export default function ProjectBoardPage({
 
           // Build multi-assignee list: primary + additional (deduplicated)
           const multiUsers = assigneesMap2[row.id] ?? [];
-          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null } : null;
+          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
           const assignees = [
             ...(primaryUser ? [primaryUser] : []),
             ...multiUsers.filter(u => u.id !== primaryUser?.id),
@@ -1789,12 +1902,14 @@ export default function ProjectBoardPage({
             {
               id: row.id,
               title: row.title?.trim() || "Untitled task",
+              description: row.description,
               accent: COLUMN_ACCENT[columnId],
               initials: buildInitials(assignee?.name, assignee?.email),
               assigneeId: row.assigned_to,
               assigneeName: assignee?.name ?? null,
               assigneeEmail: assignee?.email ?? null,
               assigneeRole: assignee?.job_role ?? null,
+              avatarUrl: assignee?.avatar_url ?? null,
               start_date: row.start_date,
               end_date: row.end_date,
               statusLabel: STATUS_LABEL[columnId],
@@ -1829,6 +1944,34 @@ export default function ProjectBoardPage({
     };
   }, [canMoveTask, projectId, supabase]);
 
+  // Deep linking for task ID
+  useEffect(() => {
+    if (!loading && deepLinkTaskId && !hasOpenedDeepLinkRef.current) {
+      let foundColumn: ColumnId | null = null;
+      for (const col of BOARD_COLUMNS) {
+        if (columns[col.id]?.some(t => t.id === deepLinkTaskId)) {
+          foundColumn = col.id;
+          break;
+        }
+      }
+      
+      if (foundColumn) {
+        hasOpenedDeepLinkRef.current = true;
+        void handleOpenTaskDetails(deepLinkTaskId, foundColumn);
+        
+        // Remove the parameter from URL to prevent reopening on subsequent closes
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("taskId");
+          window.history.replaceState({}, "", url.toString());
+        } catch { /* silent */ }
+      } else {
+        // If it wasn't found but we finished loading, mark as checked so we don't keep trying
+        hasOpenedDeepLinkRef.current = true;
+      }
+    }
+  }, [loading, deepLinkTaskId, columns, handleOpenTaskDetails]);
+
   if (!projectId) {
     return <div className="p-6 text-sm text-red-600">Missing project identifier</div>;
   }
@@ -1844,7 +1987,7 @@ export default function ProjectBoardPage({
             {/* HEADER: Title + Description + Buttons */}
             <div className="flex items-start justify-between">
               <div className="flex-1">
-                <h1 className="text-4xl font-bold text-slate-900">{project.name || "Untitled Project"}</h1>
+                <h1 className="text-4xl font-bold tracking-[-0.02em] text-slate-900">{project.name || "Untitled Project"}</h1>
                 {project.description ? (
                   <p className="mt-1 text-sm text-slate-600">{project.description}</p>
                 ) : null}
@@ -1856,88 +1999,274 @@ export default function ProjectBoardPage({
                   </p>
                 )}
               </div>
-              <div className="ml-8 flex items-center gap-3">
-                <Button
-                  onClick={() => router.push("/dashboard")}
-                  className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-                >
-                  <LayoutDashboard size={16} />
-                  Dashboard
-                </Button>
-                {canManageProject && (
+              <div className="ml-8 flex flex-col items-end gap-2">
+                <div className="flex items-center gap-1.5 rounded-xl border border-slate-200/60 bg-white/80 px-3 py-2 shadow-[0_8px_24px_-16px_rgba(15,23,42,0.5)] backdrop-blur-sm -translate-y-2">
+                  {(timerStart && timerNow !== null) ? (
+                    (() => {
+                      const parts = formatDuration(timerNow - timerStart);
+                      const cells = [
+                        { label: "DAYS", value: parts.days },
+                        { label: "HRS", value: parts.hours },
+                        { label: "MIN", value: parts.minutes },
+                        { label: "SEC", value: parts.seconds },
+                      ];
+                      return cells.map((cell) => (
+                        <div key={cell.label} className="min-w-[52px] rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-1.5 text-center">
+                          <p className="text-[8px] font-semibold uppercase tracking-[0.15em] text-slate-400/90 leading-none mb-1">{cell.label}</p>
+                          <p className="text-[15px] font-bold tabular-nums text-slate-800 leading-none">{cell.value}</p>
+                        </div>
+                      ));
+                    })()
+                  ) : (
+                    ["DAYS", "HRS", "MIN", "SEC"].map((label) => (
+                      <div key={label} className="min-w-[52px] rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-1.5 text-center">
+                        <p className="text-[8px] font-semibold uppercase tracking-[0.15em] text-slate-400/90 leading-none mb-1">{label}</p>
+                        <p className="text-[15px] font-bold tabular-nums text-slate-800 leading-none">--</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="flex items-center gap-3">
                   <Button
-                    onClick={() => setShowAddMemberModal(true)}
+                    onClick={() => router.push("/dashboard")}
                     className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
                   >
-                    <Users size={16} />
-                    Add Member
+                    <LayoutDashboard size={16} />
+                    Dashboard
                   </Button>
-                )}
-                <Button
-                  onClick={() => {
-                    setNewTaskStatus("todo");
-                    setShowCreateTaskModal(true);
-                  }}
-                  className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-                >
-                  <Plus size={16} />
-                  Create Task
-                </Button>
+                  {canManageProject && (
+                    <Button
+                      onClick={() => setShowAddMemberModal(true)}
+                      className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                    >
+                      <Users size={16} />
+                      Add Member
+                    </Button>
+                  )}
+                  <Button
+                    onClick={() => {
+                      setNewTaskStatus("todo");
+                      setShowCreateTaskModal(true);
+                    }}
+                    className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                  >
+                    <Plus size={16} />
+                    Create Task
+                  </Button>
+                </div>
               </div>
             </div>
 
-            {/* TEAM SECTION - Inside same container */}
-            {!projectLoading && members.length > 0 ? (
+            {/* TEAM SECTION - Collapsible: header-only when collapsed */}
+            {!projectLoading && members.length > 0 && (
               <div className="border-t border-slate-200 pt-4">
-                <div className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+                <button
+                  type="button"
+                  onClick={() => setTeamExpanded((p) => !p)}
+                  className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 hover:text-slate-700 transition"
+                >
                   Team ({members.length})
-                </div>
-                <div className="flex flex-wrap gap-4">
-                  {members.map((member) => {
-                    const user = member.user;
-                    if (!user) return null;
-
-                    const isOwnerMember = member.user_id === project.owner_id;
-
-                    const initials = buildInitials(user.name, user.email);
-
-                    return (
-                      <div key={member.user_id} className="flex items-center gap-2">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-300 text-[10px] font-semibold text-slate-700">
-                          {initials}
+                  {teamExpanded
+                    ? <ChevronUp size={14} className="text-slate-400" />
+                    : <ChevronDown size={14} className="text-slate-400" />
+                  }
+                </button>
+                {teamExpanded && (
+                  <div className="mt-3 flex flex-wrap gap-4 animate-in fade-in slide-in-from-top-1 duration-200">
+                    {members.map((member) => {
+                      const user = member.user;
+                      if (!user) return null;
+                      const isOwnerMember = member.user_id === project.owner_id;
+                      return (
+                        <div key={member.user_id} className="flex items-center gap-2">
+                          <Avatar
+                            userId={user.id}
+                            name={user.name}
+                            email={user.email}
+                            avatarUrl={user.avatar_url}
+                            size="xs"
+                          />
+                          <span className="text-sm text-slate-700">
+                            {user.name ?? user.email ?? "Unknown user"}
+                            {isOwnerMember ? (
+                              <span className="ml-2 text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-md font-semibold">
+                                Lead
+                              </span>
+                            ) : user.job_role ? (
+                              <span className="ml-2 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-md">
+                                {user.job_role}
+                              </span>
+                            ) : null}
+                          </span>
                         </div>
-                        <span className="text-sm text-slate-700">
-                          {user.name ?? user.email ?? "Unknown user"}
-                          {isOwnerMember && (
-                            <span className="ml-2 text-xs text-blue-500 font-semibold">
-                              (Lead)
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ) : null}
+            )}
           </div>
         </div>
       ) : null}
+
+      {/* PIPELINE CONTROLS — Search + Sort + Filters */}
+      <div className="space-y-3">
+        {/* Search bar + filter toggle */}
+        <div className="flex items-center gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={boardSearch}
+              onChange={(e) => setBoardSearch(e.target.value)}
+              placeholder="Search tasks by title or assignee..."
+              className="w-full rounded-xl border border-slate-200 bg-white pl-9 pr-8 py-2.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-slate-300 focus:outline-none transition"
+            />
+            {boardSearch && (
+              <button type="button" onClick={() => setBoardSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowFilters((p) => !p)}
+            className={`flex items-center gap-1.5 rounded-xl border px-3.5 py-2.5 text-sm font-medium transition ${showFilters ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+          >
+            <SlidersHorizontal size={14} />
+            Filters
+            {(boardSort !== "default" || boardTimeFilter !== "all" || boardMemberFilter !== "all") && (
+              <span className="ml-1 h-2 w-2 rounded-full bg-blue-500" />
+            )}
+          </button>
+        </div>
+
+        {/* Filter/sort dropdowns — collapsible */}
+        {showFilters && (
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Sort By</label>
+              <select value={boardSort} onChange={(e) => setBoardSort(e.target.value as any)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
+                <option value="default">Default</option>
+                <option value="alpha">Alphabetical</option>
+                <option value="due">Due Date</option>
+                <option value="start">Start Date</option>
+                <option value="near_due">Near Due First</option>
+                <option value="overdue">Overdue First</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Time</label>
+              <select value={boardTimeFilter} onChange={(e) => setBoardTimeFilter(e.target.value as any)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
+                <option value="all">All Time</option>
+                <option value="today">Due Today</option>
+                <option value="week">Due This Week</option>
+                <option value="month">Due This Month</option>
+                <option value="overdue">Overdue</option>
+                <option value="near_due">Near Due (&lt;3d)</option>
+                <option value="completed">Completed Recently</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Member</label>
+              <select value={boardMemberFilter} onChange={(e) => setBoardMemberFilter(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
+                <option value="all">All Members</option>
+                {members.map((m) => (
+                  <option key={m.user_id} value={m.user_id}>{m.user?.name ?? m.user?.email ?? "Unknown"}</option>
+                ))}
+              </select>
+            </div>
+            {(boardSort !== "default" || boardTimeFilter !== "all" || boardMemberFilter !== "all") && (
+              <button type="button" onClick={() => { setBoardSort("default"); setBoardTimeFilter("all"); setBoardMemberFilter("all"); }} className="ml-auto text-xs text-blue-600 hover:text-blue-700 font-medium">
+                Clear Filters
+              </button>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* KANBAN BOARD */}
       <div className="overflow-x-auto">
         <div className="flex min-h-[500px] gap-6">
           {BOARD_COLUMNS.map((column) => {
-            const sortedTasks = [...columns[column.id]].sort((a, b) => {
-              const now = new Date();
+            const now = new Date();
+            const today = new Date(); today.setHours(23, 59, 59, 999);
+            const weekEnd = new Date(now); weekEnd.setDate(weekEnd.getDate() + 7);
+            const monthEnd = new Date(now); monthEnd.setMonth(monthEnd.getMonth() + 1);
 
-              const aFuture = a.start_date && new Date(a.start_date) > now;
-              const bFuture = b.start_date && new Date(b.start_date) > now;
+            // 1) Apply search filter
+            let filtered = columns[column.id].filter((t) => {
+              if (!boardSearch.trim()) return true;
+              const q = boardSearch.trim().toLowerCase();
+              const titleMatch = t.title?.toLowerCase().includes(q);
+              const nameMatch = t.assigneeName?.toLowerCase().includes(q) || t.assigneeEmail?.toLowerCase().includes(q);
+              const multiMatch = t.assignees?.some((a) => a.name?.toLowerCase().includes(q) || a.email?.toLowerCase().includes(q));
+              return titleMatch || nameMatch || multiMatch;
+            });
 
-              if (aFuture && !bFuture) return 1;
-              if (!aFuture && bFuture) return -1;
+            // 2) Apply member filter
+            if (boardMemberFilter !== "all") {
+              filtered = filtered.filter((t) =>
+                t.assigneeId === boardMemberFilter ||
+                t.assignees?.some((a) => a.id === boardMemberFilter)
+              );
+            }
 
-              return 0;
+            // 3) Apply time filter
+            if (boardTimeFilter !== "all") {
+              filtered = filtered.filter((t) => {
+                const due = t.end_date ? new Date(t.end_date) : null;
+                switch (boardTimeFilter) {
+                  case "today": return due && due <= today && due >= new Date(now.toDateString());
+                  case "week": return due && due <= weekEnd && due >= now;
+                  case "month": return due && due <= monthEnd && due >= now;
+                  case "overdue": return due && due < now && column.id !== "done";
+                  case "near_due": {
+                    if (!due || column.id === "done") return false;
+                    const diff = (due.getTime() - now.getTime()) / 86400000;
+                    return diff >= 0 && diff <= 3;
+                  }
+                  case "completed": return column.id === "done";
+                  default: return true;
+                }
+              });
+            }
+
+            // 4) Apply sort
+            const sorted = [...filtered].sort((a, b) => {
+              switch (boardSort) {
+                case "alpha": return (a.title ?? "").localeCompare(b.title ?? "");
+                case "due": {
+                  if (!a.end_date && !b.end_date) return 0;
+                  if (!a.end_date) return 1;
+                  if (!b.end_date) return -1;
+                  return new Date(a.end_date).getTime() - new Date(b.end_date).getTime();
+                }
+                case "start": {
+                  if (!a.start_date && !b.start_date) return 0;
+                  if (!a.start_date) return 1;
+                  if (!b.start_date) return -1;
+                  return new Date(a.start_date).getTime() - new Date(b.start_date).getTime();
+                }
+                case "near_due": {
+                  const aDue = a.end_date ? Math.abs(new Date(a.end_date).getTime() - now.getTime()) : Infinity;
+                  const bDue = b.end_date ? Math.abs(new Date(b.end_date).getTime() - now.getTime()) : Infinity;
+                  return aDue - bDue;
+                }
+                case "overdue": {
+                  const aOver = a.end_date && new Date(a.end_date) < now ? now.getTime() - new Date(a.end_date).getTime() : -Infinity;
+                  const bOver = b.end_date && new Date(b.end_date) < now ? now.getTime() - new Date(b.end_date).getTime() : -Infinity;
+                  return bOver - aOver;
+                }
+                default: {
+                  // Default: future start dates pushed to bottom
+                  const aFuture = a.start_date && new Date(a.start_date) > now;
+                  const bFuture = b.start_date && new Date(b.start_date) > now;
+                  if (aFuture && !bFuture) return 1;
+                  if (!aFuture && bFuture) return -1;
+                  return 0;
+                }
+              }
             });
 
             return (
@@ -1945,7 +2274,7 @@ export default function ProjectBoardPage({
                 key={column.id}
                 columnId={column.id}
                 title={column.title}
-                tasks={sortedTasks}
+                tasks={sorted}
                 isDragOver={dragOverColumn === column.id}
                 onColumnDragOver={setDragOverColumn}
                 onColumnDrop={onColumnDrop}
@@ -1976,20 +2305,17 @@ export default function ProjectBoardPage({
         {selectedTaskDetails ? (
           <div className="space-y-5 text-sm text-slate-700">
             <div className="space-y-2">
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0 flex-1">
-                  <p className="text-xl font-bold leading-tight text-slate-900 break-words line-clamp-2">{selectedTaskDetails.title}</p>
-                  <p className="mt-1 text-xs uppercase tracking-[0.15em] text-slate-500">{selectedTaskDetails.status}</p>
-                </div>
-                {canAddTaskUpdate ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsUpdateComposerOpen((prev) => !prev)}
-                    className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    + Add Update
-                  </button>
-                ) : null}
+              <div className="min-w-0">
+                <p className="text-xl font-bold leading-tight text-slate-900 break-words line-clamp-2">{selectedTaskDetails.title}</p>
+                <p className="mt-1 text-xs uppercase tracking-[0.15em] text-slate-500">{selectedTaskDetails.status}</p>
+              <div className="mt-2 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-1">Description</p>
+                {selectedTaskDetails.description ? (
+                  <p className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">{selectedTaskDetails.description}</p>
+                ) : (
+                  <p className="text-sm text-slate-400 italic">No description provided.</p>
+                )}
+              </div>
               </div>
               {/* Multi-assignee display */}
               <div>
@@ -2045,9 +2371,13 @@ export default function ProjectBoardPage({
                                   onClick={() => void addMemberToTask(user.id)}
                                   className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
                                 >
-                                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200 text-[10px] font-semibold text-slate-600">
-                                    {buildInitials(user.name, user.email)}
-                                  </div>
+                                  <Avatar
+                                    userId={user.id}
+                                    name={user.name}
+                                    email={user.email}
+                                    avatarUrl={user.avatar_url}
+                                    size="xs"
+                                  />
                                   <span>{user.name ?? user.email ?? "Unknown"}</span>
                                 </button>
                               );
@@ -2089,42 +2419,9 @@ export default function ProjectBoardPage({
                 </div>
               )}
               {!canAddTaskUpdate ? (
-                <p className="text-xs text-slate-500">Only assignee, project owner, or super admin can update this task.</p>
+                <p className="text-xs text-slate-500">Only project members can participate in task discussions.</p>
               ) : null}
             </div>
-
-            {canAddTaskUpdate && isUpdateComposerOpen ? (
-              <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                <textarea
-                  value={updateContent}
-                  onChange={(event) => setUpdateContent(event.target.value)}
-                  placeholder="What did you work on today?"
-                  className="min-h-[110px] w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
-                  disabled={isSavingUpdate}
-                />
-                <div className="flex justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUpdateComposerOpen(false);
-                      setUpdateContent("");
-                    }}
-                    className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
-                    disabled={isSavingUpdate}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void createTaskUpdate()}
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
-                    disabled={isSavingUpdate || updateContent.trim().length < 5}
-                  >
-                    {isSavingUpdate ? "Saving..." : "Save"}
-                  </button>
-                </div>
-              </div>
-            ) : null}
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
@@ -2151,104 +2448,51 @@ export default function ProjectBoardPage({
                 )}
               </div>
             </div>
-
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Work Updates</p>
-              {!canViewTaskUpdates ? (
-                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
-                  Updates are visible to project members only.
-                </div>
-              ) : taskUpdates.length === 0 ? (
-                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
-                  No updates yet.
-                </div>
-              ) : (
-                <div className="mt-3 max-h-[320px] overflow-y-auto pr-2">
-                  <div className="space-y-3">
-                  {taskUpdates.map((update) => {
-                    const canEdit = canAddTaskUpdate && (update.user_id === profile?.id || isProjectOwnerMember || isSuperAdmin);
-                    const initials = buildInitials(update.user?.name, update.user?.email);
-
-                    return (
-                      <div key={update.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex items-center gap-3">
-                            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-700">
-                              {initials}
-                            </div>
-                            <div>
-                              <p className="text-sm font-semibold text-slate-900">{update.user?.name || update.user?.email || "Unknown"}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-xs text-slate-500">{formatDateTime(update.created_at)}</p>
-                            {canEdit ? (
-                              <div className="mt-1 flex items-center justify-end gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingUpdateId(update.id);
-                                    setEditingUpdateContent(update.content);
-                                  }}
-                                  className="text-xs text-slate-500 transition hover:text-slate-700"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => void deleteTaskUpdate(update.id)}
-                                  className="text-xs text-red-500 transition hover:text-red-600"
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-
-                        {editingUpdateId === update.id ? (
-                          <div className="mt-3 space-y-2">
-                            <textarea
-                              value={editingUpdateContent}
-                              onChange={(event) => setEditingUpdateContent(event.target.value)}
-                              className="min-h-[96px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
-                              disabled={isSavingEdit}
-                            />
-                            <div className="flex justify-end gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingUpdateId(null);
-                                  setEditingUpdateContent("");
-                                }}
-                                className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
-                                disabled={isSavingEdit}
-                              >
-                                Cancel
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void saveTaskUpdateEdit()}
-                                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
-                                disabled={isSavingEdit || editingUpdateContent.trim().length === 0}
-                              >
-                                {isSavingEdit ? "Saving..." : "Save"}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{update.content}</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                  </div>
-                </div>
-              )}
-            </div>
           </div>
         ) : null}
       </Modal>
+
+      {/* Live Chat Panel — renders as independent side panel */}
+      <ChatPanel
+        isOpen={Boolean(selectedTaskDetails)}
+        onClose={closeTaskDetails}
+        taskTitle={selectedTaskDetails?.title ?? ""}
+        taskUpdates={taskUpdates}
+        members={members.map(m => ({ user_id: m.user_id, user: m.user ? { id: m.user?.id ?? m.user_id, name: m.user?.name ?? null, email: m.user?.email ?? null, avatar_url: m.user?.avatar_url ?? null } : null }))}
+        profileId={profile?.id ?? null}
+        canAddUpdate={canAddTaskUpdate}
+        canViewUpdates={canViewTaskUpdates}
+        isProjectOwnerMember={isProjectOwnerMember}
+        isSuperAdmin={isSuperAdmin}
+        onCreateUpdate={async (content) => {
+          if (!selectedTaskDetails || !profile?.id || !projectId) return;
+          await supabase.from("task_updates").insert({
+            task_id: selectedTaskDetails.id,
+            project_id: projectId,
+            user_id: profile.id,
+            content,
+          });
+          await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
+        }}
+        onEditUpdate={async (id, content) => {
+          await supabase.from("task_updates").update({ content }).eq("id", id);
+          await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
+        }}
+        onDeleteUpdate={(id) => void deleteTaskUpdate(id)}
+        onReply={async (parentId, content) => {
+          if (!selectedTaskDetails || !profile?.id || !projectId) return;
+          await supabase.from("task_updates").insert({
+            task_id: selectedTaskDetails.id,
+            project_id: projectId,
+            user_id: profile.id,
+            content,
+            reply_to: parentId,
+          });
+          await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
+        }}
+        isSavingUpdate={isSavingUpdate}
+      />
+
 
       {/* CREATE TASK MODAL */}
       <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => setShowCreateTaskModal(false)}>
@@ -2266,6 +2510,21 @@ export default function ProjectBoardPage({
               onChange={(e) => setNewTaskTitle(e.target.value)}
               disabled={isSubmitting}
               autoFocus
+            />
+          </div>
+
+          <div>
+            <label htmlFor="task-description" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              Description (Optional)
+            </label>
+            <textarea
+              id="task-description"
+              placeholder="Add a description..."
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none resize-none"
+              rows={3}
+              value={newTaskDescription}
+              onChange={(e) => setNewTaskDescription(e.target.value)}
+              disabled={isSubmitting}
             />
           </div>
 
@@ -2486,6 +2745,20 @@ export default function ProjectBoardPage({
                 onChange={(e) => setEditingTask({ ...editingTask, title: e.target.value })}
                 disabled={isSavingEdit2}
                 autoFocus
+              />
+            </div>
+            <div>
+              <label htmlFor="edit-task-description" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                Description
+              </label>
+              <textarea
+                id="edit-task-description"
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none resize-none"
+                rows={3}
+                placeholder="Add a description..."
+                value={editingTask.description ?? ""}
+                onChange={(e) => setEditingTask({ ...editingTask, description: e.target.value || null })}
+                disabled={isSavingEdit2}
               />
             </div>
             <div>

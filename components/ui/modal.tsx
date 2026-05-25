@@ -10,9 +10,10 @@ interface ModalProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  maxWidth?: string;
 }
 
-export default function Modal({ title, isOpen, onClose, children, footer }: ModalProps) {
+export default function Modal({ title, isOpen, onClose, children, footer, maxWidth }: ModalProps) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
@@ -42,14 +43,14 @@ export default function Modal({ title, isOpen, onClose, children, footer }: Moda
   return (
     <ModalPortal>
       <div
-        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
         role="dialog"
         aria-modal="true"
         aria-label={title}
         onClick={onClose}
       >
         <div
-          className="relative w-full max-w-lg rounded-xl bg-white shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
+          className={`relative w-full ${maxWidth || "max-w-lg"} rounded-xl bg-white shadow-2xl overflow-hidden flex flex-col max-h-[90vh]`}
           onClick={stopPropagation}
         >
           <div className="flex items-center justify-between px-6 pt-6 pb-2">

@@ -396,9 +396,9 @@ export default function DashboardPage() {
     <div className="space-y-8">
       <header className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.4em] text-slate-400">Dashboard</p>
-          <h1 className="text-3xl font-semibold text-slate-900">Projects</h1>
-          <p className="mt-2 text-sm text-slate-500">Browse all projects in your workspace.</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-400">Dashboard</p>
+          <h1 className="text-3xl font-semibold tracking-[-0.02em] text-slate-900">Projects</h1>
+          <p className="mt-2 text-[13px] text-slate-500">Browse all projects in your workspace.</p>
         </div>
         {currentUserId && (
           <Button
@@ -453,7 +453,7 @@ export default function DashboardPage() {
       >
         <div className="space-y-4">
           <div>
-            <label htmlFor="project-name" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="project-name" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Project Name
             </label>
             <input
@@ -468,7 +468,7 @@ export default function DashboardPage() {
           </div>
 
           <div>
-            <label htmlFor="project-description" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="project-description" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Description
             </label>
             <textarea
@@ -482,7 +482,7 @@ export default function DashboardPage() {
           </div>
 
           <div>
-            <label htmlFor="project-start-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="project-start-date" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Start Date
             </label>
             <input
@@ -496,7 +496,7 @@ export default function DashboardPage() {
           </div>
 
           <div>
-            <label htmlFor="project-end-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="project-end-date" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               End Date
             </label>
             <input
@@ -541,7 +541,7 @@ export default function DashboardPage() {
       >
         <div className="space-y-4">
           <div>
-            <label htmlFor="edit-project-name" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="edit-project-name" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Project Name
             </label>
             <input
@@ -556,7 +556,7 @@ export default function DashboardPage() {
           </div>
 
           <div>
-            <label htmlFor="edit-project-description" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="edit-project-description" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Description
             </label>
             <textarea
@@ -570,7 +570,7 @@ export default function DashboardPage() {
           </div>
 
           <div>
-            <label htmlFor="edit-project-end-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+            <label htmlFor="edit-project-end-date" className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               End Date
             </label>
             <input

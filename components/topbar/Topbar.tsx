@@ -3,6 +3,9 @@ import { LogOut } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
+import Avatar from "@/components/ui/Avatar";
+import NotificationPanel from "@/components/topbar/NotificationPanel";
+import ProfileModal from "@/components/topbar/ProfileModal";
 import { useAppData } from "@/components/providers/AppDataProvider";
 
 export default function Topbar() {
@@ -10,15 +13,6 @@ export default function Topbar() {
 
   const displayName = profile?.name ?? authUser?.email ?? "User";
   const displayRole = profile?.job_role ?? "";
-
-  const initials = useMemo(() => {
-    if (!profile?.name && !profile?.email) {
-      return "--";
-    }
-    const source = profile?.name ?? profile?.email ?? "";
-    const segments = source.trim().split(/\s+/).slice(0, 2);
-    return segments.map((segment) => (segment[0]?.toUpperCase() ?? "")).join("") || "--";
-  }, [profile?.email, profile?.name]);
 
   const role = (profile?.system_role ?? "").toLowerCase();
   const isAdmin = role.includes("admin");
@@ -37,6 +31,7 @@ export default function Topbar() {
     password: string;
   } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   const resetForm = useCallback(() => {
     setNewUser({ name: "", email: "", role: "user", job_role: "" });
@@ -102,6 +97,9 @@ export default function Topbar() {
             </Button>
           )}
 
+          {/* NOTIFICATION BELL */}
+          <NotificationPanel />
+
           {/* LOGOUT BUTTON */}
           <Button
             type="button"
@@ -113,13 +111,21 @@ export default function Topbar() {
             Logout
           </Button>
 
-          {/* AVATAR */}
-          <div className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700">
-            {initials}
-          </div>
+          {/* AVATAR — clickable to open profile */}
+          <Avatar
+            userId={profile?.id}
+            name={profile?.name}
+            email={profile?.email}
+            avatarUrl={profile?.avatar_url}
+            size="lg"
+            onClick={() => setIsProfileOpen(true)}
+          />
 
         </div>
       </header>
+
+      {/* PROFILE MODAL */}
+      <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
 
       {/* CREATE USER MODAL */}
       <Modal title="Create User" isOpen={isCreateUserOpen} onClose={() => { setIsCreateUserOpen(false); resetForm(); }}>

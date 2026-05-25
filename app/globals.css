@@ -20,6 +20,30 @@ body {
   background: var(--page-bg);
   color: #0f172a;
   font-family: var(--font-inter), "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Premium typography: tighter heading tracking, improved readability */
+h1, h2, h3 {
+  letter-spacing: -0.01em;
+}
+
+/* Tabular numbers for data-heavy UI */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Smoother transitions globally */
+button, a, input, select, textarea {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Improved table header appearance */
+th {
+  font-weight: 600;
 }
 
 .drag-placeholder {

@@ -12,6 +12,7 @@ type WorkspaceUser = {
   job_role: string | null;
   system_role: string | null;
   role: string | null;
+  avatar_url: string | null;
 };
 
 type ProjectSummary = {
@@ -35,6 +36,7 @@ type AppDataContextValue = {
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshProjects: () => Promise<void>;
+  refreshProfile: () => Promise<void>;
   createProject: (payload: { name: string; description: string }) => Promise<void>;
   deleteProject: (projectId: string) => Promise<void>;
 };
@@ -102,13 +104,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         job_role: null,
         system_role: null,
         role: null,
+        avatar_url: null,
       };
 
       try {
         await logSupabaseRequest({ operation: "users.select_profile", user_id: user.id });
         const { data: profileData, error: profileError } = await supabase
           .from("users")
-          .select("id, name, email, job_role, system_role")
+          .select("id, name, email, job_role, system_role, avatar_url")
           .eq("id", user.id)
           .single();
 
@@ -123,6 +126,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           job_role: profileData.job_role ?? null,
           system_role: profileData.system_role ?? null,
           role: profileData.system_role ?? null,
+          avatar_url: (profileData as Record<string, unknown>).avatar_url as string | null ?? null,
         };
       } catch (profileError) {
         logSupabaseError(profileError);
@@ -307,6 +311,13 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     router.push("/login");
   }, [router, supabase]);
 
+  const refreshProfile = useCallback(async () => {
+    const currentAuth = authUser;
+    if (!currentAuth) return;
+    const updated = await loadUserProfile(currentAuth);
+    setProfile(updated);
+  }, [authUser, loadUserProfile]);
+
   const createProject = useCallback(
     async ({ name, description }: { name: string; description: string }) => {
       if (!profile) {
@@ -454,6 +465,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       login,
       logout,
       refreshProjects,
+      refreshProfile,
       createProject,
       deleteProject,
     }),
@@ -467,6 +479,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       logout,
       profile,
       projects,
+      refreshProfile,
       refreshProjects,
       supabase,
     ],

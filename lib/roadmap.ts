@@ -179,3 +179,135 @@ export function getWeekLabelForDate(date: Date) {
   const weekStart = startOfWeek(date);
   return formatWeekLabel(weekStart, endOfWeek(weekStart));
 }
+
+// ── Month-level helpers ──────────────────────────────
+
+export type RoadmapMonth = {
+  start: Date;
+  end: Date;
+  label: string;
+  key: string;
+  weeksInMonth: RoadmapWeek[];
+};
+
+export function startOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), 1, 0, 0, 0, 0);
+}
+
+export function endOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59, 999);
+}
+
+export function formatMonthLabel(date: Date): string {
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+/** Get weeks within a single month */
+export function getWeeksInMonth(monthStart: Date): RoadmapWeek[] {
+  const weeks: RoadmapWeek[] = [];
+  const monthEnd = endOfMonth(monthStart);
+  let cursor = startOfWeek(new Date(monthStart));
+
+  while (cursor <= monthEnd) {
+    const weekEnd = endOfWeek(cursor);
+    weeks.push({
+      start: new Date(cursor),
+      end: weekEnd,
+      label: formatWeekLabel(cursor, weekEnd),
+    });
+    cursor = new Date(cursor);
+    cursor.setDate(cursor.getDate() + 7);
+  }
+  return weeks;
+}
+
+/** Build a range of months around today */
+export function getMonthRange(monthsBefore = 1, monthsAfter = 5): RoadmapMonth[] {
+  const today = new Date();
+  const months: RoadmapMonth[] = [];
+
+  for (let offset = -monthsBefore; offset <= monthsAfter; offset++) {
+    const d = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+    const s = startOfMonth(d);
+    const e = endOfMonth(d);
+    months.push({
+      start: s,
+      end: e,
+      label: formatMonthLabel(d),
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+      weeksInMonth: getWeeksInMonth(s),
+    });
+  }
+  return months;
+}
+
+// ── Quarter-level helpers ────────────────────────────
+
+export type RoadmapQuarter = {
+  start: Date;
+  end: Date;
+  label: string;
+  key: string;
+  months: RoadmapMonth[];
+};
+
+export function getQuarterRange(quartersBefore = 0, quartersAfter = 3): RoadmapQuarter[] {
+  const today = new Date();
+  const currentQ = Math.floor(today.getMonth() / 3);
+  const quarters: RoadmapQuarter[] = [];
+
+  for (let offset = -quartersBefore; offset <= quartersAfter; offset++) {
+    const q = currentQ + offset;
+    const year = today.getFullYear() + Math.floor(q / 4);
+    const qIndex = ((q % 4) + 4) % 4;
+    const startMonth = qIndex * 3;
+    const qStart = new Date(year, startMonth, 1, 0, 0, 0, 0);
+    const qEnd = new Date(year, startMonth + 3, 0, 23, 59, 59, 999);
+    const qLabel = `Q${qIndex + 1} ${year}`;
+
+    const months: RoadmapMonth[] = [];
+    for (let m = 0; m < 3; m++) {
+      const mDate = new Date(year, startMonth + m, 1);
+      months.push({
+        start: startOfMonth(mDate),
+        end: endOfMonth(mDate),
+        label: formatMonthLabel(mDate),
+        key: `${mDate.getFullYear()}-${String(mDate.getMonth() + 1).padStart(2, "0")}`,
+        weeksInMonth: getWeeksInMonth(startOfMonth(mDate)),
+      });
+    }
+
+    quarters.push({ start: qStart, end: qEnd, label: qLabel, key: `${year}-Q${qIndex + 1}`, months });
+  }
+  return quarters;
+}
+
+/** Calculate how far (0-1) a date falls within a span */
+export function getPositionInRange(date: Date, rangeStart: Date, rangeEnd: Date): number {
+  const total = rangeEnd.getTime() - rangeStart.getTime();
+  if (total <= 0) return 0;
+  const pos = (date.getTime() - rangeStart.getTime()) / total;
+  return Math.max(0, Math.min(1, pos));
+}
+
+/** Get task bar span as { left%, width% } within a date range */
+export function getTaskBarSpan(
+  taskStart: Date | null,
+  taskEnd: Date | null,
+  rangeStart: Date,
+  rangeEnd: Date
+): { left: number; width: number } | null {
+  if (!taskStart && !taskEnd) return null;
+  const effectiveStart = taskStart ?? taskEnd!;
+  const effectiveEnd = taskEnd ?? taskStart!;
+  if (effectiveEnd < rangeStart || effectiveStart > rangeEnd) return null;
+
+  const clampedStart = effectiveStart < rangeStart ? rangeStart : effectiveStart;
+  const clampedEnd = effectiveEnd > rangeEnd ? rangeEnd : effectiveEnd;
+
+  const left = getPositionInRange(clampedStart, rangeStart, rangeEnd) * 100;
+  const right = getPositionInRange(clampedEnd, rangeStart, rangeEnd) * 100;
+  const width = Math.max(right - left, 1.5); // min 1.5% so dots are visible
+
+  return { left, width };
+}

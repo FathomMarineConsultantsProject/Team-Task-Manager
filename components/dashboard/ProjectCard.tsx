@@ -79,8 +79,8 @@ export default function ProjectCard({
     >
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Project</p>
-          <h3 className="mt-2 text-xl font-semibold text-slate-900">{projectName}</h3>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-slate-400">Project</p>
+          <h3 className="mt-2 text-xl font-semibold tracking-[-0.01em] text-slate-900">{projectName}</h3>
         </div>
         <div className="flex items-center gap-2">
           {canEdit ? (
@@ -117,7 +117,7 @@ export default function ProjectCard({
           <span className="font-semibold text-slate-900">{memberCount}</span> members
         </p>
       </div>
-      <div className="mt-6 text-xs font-semibold uppercase tracking-[0.4em] text-emerald-600">
+      <div className="mt-6 text-[11px] font-semibold uppercase tracking-[0.35em] text-emerald-600">
         Open Board
       </div>
     </div>

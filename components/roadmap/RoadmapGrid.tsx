@@ -2,9 +2,10 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
-import { BarChart3, ChevronLeft, ChevronRight, LayoutGrid, Layers, Share2 } from "lucide-react";
+import { BarChart3, ChevronLeft, ChevronRight, LayoutGrid, Layers, Share2, Calendar, ZoomIn } from "lucide-react";
 import { useAppData } from "@/components/providers/AppDataProvider";
-import Modal from "@/components/ui/modal";
+import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
+import { STATUS_CONFIG, normalizeStatus } from "@/lib/statusConfig";
 import {
   formatWeekLabel,
   getAvailableWeeks,
@@ -13,9 +14,12 @@ import {
   getWeekDayIndex,
   isSameWeek,
   startOfWeek,
+  getMonthRange,
+  getTaskBarSpan,
   type RoadmapProject,
   type RoadmapTask,
   type RoadmapWeek,
+  type RoadmapMonth,
 } from "@/lib/roadmap";
 
 type ProjectRow = {
@@ -60,85 +64,6 @@ type RoadmapProjectRecord = RoadmapProject & {
   tasksInWeek: RoadmapTask[];
 };
 
-type SelectedTaskDetails = {
-  id: string;
-  projectId: string;
-  title: string;
-  status: string;
-  statusKey: string;
-  assignee: string;
-  createdAt: string;
-  createdByName: string;
-  projectName: string;
-  creator: {
-    id: string | null;
-    name: string | null;
-    email: string | null;
-  } | null;
-};
-
-type TaskLogEntry = {
-  id: string;
-  action: string;
-  from_status: string | null;
-  to_status: string | null;
-  created_at: string;
-  user_id: string | null;
-  user: {
-    id: string | null;
-    name: string | null;
-    email: string | null;
-  } | null;
-};
-
-type UserRow = {
-  id: string;
-  name: string | null;
-  email: string | null;
-};
-
-type TaskDetailsRow = {
-  id: string;
-  title: string | null;
-  created_by?: string | null;
-};
-
-type TaskLogRow = {
-  id: string;
-  action: string;
-  from_status: string | null;
-  to_status: string | null;
-  created_at: string;
-  user_id: string | null;
-};
-
-type TaskUpdateRow = {
-  id: string;
-  content: string | null;
-  created_at: string;
-  user_id: string | null;
-  users:
-  | {
-    name: string | null;
-    job_role: string | null;
-  }
-  | {
-    name: string | null;
-    job_role: string | null;
-  }[]
-  | null;
-};
-
-type TaskUpdateEntry = {
-  id: string;
-  content: string;
-  created_at: string;
-  user_id: string | null;
-  user: {
-    name: string | null;
-    job_role: string | null;
-  } | null;
-};
 
 const statusStyles: Record<string, { badge: string; label: string }> = {
   todo: { badge: "bg-gray-100 text-gray-600", label: "TODO" },
@@ -254,17 +179,15 @@ export default function RoadmapGrid() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>("all");
   const [currentWeekStart, setCurrentWeekStart] = useState<Date | null>(() => getStartOfWeek(new Date()));
   const [layout, setLayout] = useState<"gantt" | "kanban" | "epic">("gantt");
+  const [zoom, setZoom] = useState<"week" | "month">("week");
+  const [monthOffset, setMonthOffset] = useState(0);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [selectedTaskDetails, setSelectedTaskDetails] = useState<SelectedTaskDetails | null>(null);
-  const [logs, setLogs] = useState<TaskLogEntry[]>([]);
-  const [logsLoading, setLogsLoading] = useState(false);
-  const [taskUpdates, setTaskUpdates] = useState<TaskUpdateEntry[]>([]);
-  const [isUpdateComposerOpen, setIsUpdateComposerOpen] = useState(false);
-  const [updateContent, setUpdateContent] = useState("");
-  const [isSubmittingUpdate, setIsSubmittingUpdate] = useState(false);
   const didApplyQueryParams = useRef(false);
-  const taskId = selectedTaskDetails?.id ?? null;
-  const showUpdateButton = false;
+  const { openTaskDetails, renderTaskDetails } = useTaskDetailsWorkflow({
+    supabase,
+    profileId: profile?.id ?? null,
+    members: [],
+  });
 
   useEffect(() => {
     let isMounted = true;
@@ -667,23 +590,6 @@ export default function RoadmapGrid() {
     setCurrentWeekStart(desiredStart);
   };
 
-  const formatCreatedDate = (value: string | null) => {
-    if (!value) {
-      return "N/A";
-    }
-
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      return "N/A";
-    }
-
-    return date.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-    });
-  };
-
   const openRoadmapTaskDetails = (task: RoadmapTask, project: RoadmapProjectRecord) => {
     let statusKey = (task.status ?? "todo").toLowerCase();
 
@@ -699,16 +605,33 @@ export default function RoadmapGrid() {
       return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
     })();
 
-    setSelectedTaskDetails({
+    openTaskDetails({
       id: task.id,
       projectId: project.id,
       title: task.title ?? "Untitled task",
       status: styles.label,
-      statusKey,
       assignee: assigneeName,
-      createdAt: formatCreatedDate(task.created_at),
+      assignees:
+        task.assignees ??
+        (task.assigned_user
+          ? [
+              {
+                id:
+                  typeof task.assigned_user === "object" && !Array.isArray(task.assigned_user)
+                    ? (task.assigned_user as any).id
+                    : "",
+                name:
+                  typeof task.assigned_user === "object" && !Array.isArray(task.assigned_user)
+                    ? (task.assigned_user as any).name
+                    : null,
+              },
+            ]
+          : []),
+      createdAt: task.created_at ?? null,
       createdByName: "Unknown",
       projectName: project.name ?? "Untitled project",
+      startDate: task.start_date ?? null,
+      endDate: task.end_date ?? null,
       creator: null,
     });
   };
@@ -739,231 +662,6 @@ export default function RoadmapGrid() {
     const timeout = window.setTimeout(() => setToastMessage(null), 2200);
     return () => window.clearTimeout(timeout);
   }, [toastMessage]);
-
-  const loadTaskLogs = useCallback(async () => {
-    try {
-      setLogsLoading(true);
-
-      if (!taskId) {
-        setLogs([]);
-        return;
-      }
-
-      const { data: taskData, error: taskError } = await supabase
-        .from("tasks")
-        .select("*")
-        .eq("id", taskId)
-        .single();
-
-      if (taskError) {
-        console.error("Task details error:", taskError);
-      }
-
-      const taskDetails = (taskData as TaskDetailsRow | null) ?? null;
-      let createdByName = "Unknown";
-
-      if (taskDetails?.created_by) {
-        const { data: creator } = await supabase
-          .from("users")
-          .select("name")
-          .eq("id", taskDetails.created_by)
-          .single();
-
-        if (creator) {
-          createdByName = ((creator as { name: string | null }).name ?? "Unknown") || "Unknown";
-        }
-      }
-
-      setSelectedTaskDetails((prev) => {
-        if (!prev || prev.id !== taskId) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          createdByName,
-          creator: {
-            id: null,
-            name: createdByName,
-            email: null,
-          },
-        };
-      });
-
-      const { data: logsData, error: logsError } = await supabase
-        .from("task_logs")
-        .select("*")
-        .eq("task_id", taskId)
-        .order("created_at", { ascending: false });
-
-      if (logsError) {
-        console.error("Task logs error:", logsError);
-        setLogs([]);
-        return;
-      }
-
-      if (!logsData || logsData.length === 0) {
-        setLogs([]);
-        return;
-      }
-
-      const userIds = [...new Set((logsData as TaskLogRow[]).map((log) => log.user_id).filter(Boolean))];
-
-      let usersMap: Record<string, UserRow> = {};
-
-      if (userIds.length > 0) {
-        const { data: users } = await supabase
-          .from("users")
-          .select("id, name, email")
-          .in("id", userIds as string[]);
-
-        const safeUsers = (users as UserRow[] | null) || [];
-        usersMap = Object.fromEntries(safeUsers.map((u) => [u.id, u]));
-      }
-
-      const enrichedLogs = (logsData as TaskLogRow[]).map((log) => ({
-        ...log,
-        user: (log.user_id && usersMap[log.user_id]) || null,
-      }));
-
-      setLogs(enrichedLogs);
-    } catch (err) {
-      console.error("Unexpected logs error:", err);
-      setLogs([]);
-    } finally {
-      setLogsLoading(false);
-    }
-  }, [supabase, taskId]);
-
-  useEffect(() => {
-    if (taskId) {
-      void loadTaskLogs();
-    }
-  }, [taskId, loadTaskLogs]);
-
-  const loadTaskUpdates = useCallback(async () => {
-    try {
-      if (!taskId) {
-        setTaskUpdates([]);
-        return;
-      }
-
-      const { data: updatesData, error: updatesError } = await supabase
-        .from("task_updates")
-        .select(
-          `
-            id,
-            content,
-            created_at,
-            user_id,
-            users (
-              name,
-              job_role
-            )
-          `,
-        )
-        .eq("task_id", taskId)
-        .order("created_at", { ascending: false });
-
-      if (updatesError) {
-        setTaskUpdates([]);
-        return;
-      }
-
-      const normalized = ((updatesData as TaskUpdateRow[] | null | undefined) ?? []).map((update) => {
-        const userRelation = Array.isArray(update.users) ? update.users[0] ?? null : update.users ?? null;
-        return {
-          id: update.id,
-          content: update.content ?? "",
-          created_at: update.created_at,
-          user_id: update.user_id,
-          user: userRelation,
-        };
-      });
-
-      setTaskUpdates(normalized);
-    } catch {
-      setTaskUpdates([]);
-    }
-  }, [supabase, taskId]);
-
-  useEffect(() => {
-    if (taskId) {
-      void loadTaskUpdates();
-      return;
-    }
-
-    setTaskUpdates([]);
-    setIsUpdateComposerOpen(false);
-    setUpdateContent("");
-  }, [taskId, loadTaskUpdates]);
-
-  const handleAddUpdate = useCallback(async () => {
-    const trimmedContent = updateContent.trim();
-    if (!trimmedContent || !selectedTaskDetails || !profile?.id) {
-      return;
-    }
-
-    setIsSubmittingUpdate(true);
-
-    try {
-      const { error } = await supabase.from("task_updates").insert({
-        task_id: selectedTaskDetails.id,
-        project_id: selectedTaskDetails.projectId,
-        user_id: profile.id,
-        content: trimmedContent,
-      });
-
-      if (error) {
-        return;
-      }
-
-      setUpdateContent("");
-      setIsUpdateComposerOpen(false);
-      await loadTaskUpdates();
-    } catch {
-      // fail silently
-    } finally {
-      setIsSubmittingUpdate(false);
-    }
-  }, [loadTaskUpdates, profile?.id, selectedTaskDetails, supabase, updateContent]);
-
-  const formatStatusValue = (value: string | null | undefined) => {
-    if (!value) {
-      return "UNKNOWN";
-    }
-
-    return value.replace(/_/g, " ").toUpperCase();
-  };
-
-  const formatLogDate = (value: string) => {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      return "Unknown date";
-    }
-
-    return date.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  };
-
-  const describeLog = (log: TaskLogEntry) => {
-    if (log.action === "moved") {
-      return `Moved from ${formatStatusValue(log.from_status)} → ${formatStatusValue(log.to_status)}`;
-    }
-
-    if (log.action === "assigned") {
-      return "Assigned task";
-    }
-
-    if (log.action === "created") {
-      return "Task created";
-    }
-
-    return "Task updated";
-  };
 
   if (isLoading || isAuthLoading) {
     return (
@@ -1045,25 +743,6 @@ export default function RoadmapGrid() {
           <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
             <button
               type="button"
-              className={navigationButtonClass}
-              onClick={() => handleWeekShift(-1)}
-            >
-              <ChevronLeft className="h-4 w-4" />
-              Previous Week
-            </button>
-            <div className="inline-flex min-h-10 items-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">
-              {formatWeekLabel(currentWeek.start, currentWeek.end)}
-            </div>
-            <button
-              type="button"
-              className={navigationButtonClass}
-              onClick={() => handleWeekShift(1)}
-            >
-              Next Week
-              <ChevronRight className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
               className="inline-flex min-h-10 items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
               onClick={() => void handleShare()}
             >
@@ -1088,104 +767,100 @@ export default function RoadmapGrid() {
 
       <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white px-5 py-5 shadow-sm sm:px-6">
         <div className="flex items-center justify-between gap-4 border-b border-slate-100 pb-4">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Current week</p>
-            <p className="mt-1 text-xl font-bold text-slate-900">{formatWeekLabel(currentWeek.start, currentWeek.end)}</p>
+          <div className="flex items-center gap-4">
+            {/* Prev/Next navigation */}
+            {zoom === "week" && (
+              <>
+                <button type="button" className={navigationButtonClass} onClick={() => handleWeekShift(-1)}><ChevronLeft className="h-4 w-4" /></button>
+                <div className="text-center">
+                  <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Current week</p>
+                  <p className="mt-1 text-xl font-bold text-slate-900">{formatWeekLabel(currentWeek.start, currentWeek.end)}</p>
+                </div>
+                <button type="button" className={navigationButtonClass} onClick={() => handleWeekShift(1)}><ChevronRight className="h-4 w-4" /></button>
+              </>
+            )}
+            {zoom === "month" && (() => {
+              const now = new Date();
+              const targetDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+              const monthLabel = targetDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+              return (
+                <>
+                  <button type="button" className={navigationButtonClass} onClick={() => setMonthOffset(o => o - 1)}><ChevronLeft className="h-4 w-4" /></button>
+                  <div className="text-center">
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Monthly view</p>
+                    <p className="mt-1 text-xl font-bold text-slate-900">{monthLabel}</p>
+                  </div>
+                  <button type="button" className={navigationButtonClass} onClick={() => setMonthOffset(o => o + 1)}><ChevronRight className="h-4 w-4" /></button>
+                </>
+              );
+            })()}
           </div>
-          <div className="rounded-full bg-slate-50 px-4 py-2 text-sm font-medium text-slate-600">
-            {selectedProjectLabel}
+          <div className="flex items-center gap-2">
+            <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+              {(["week", "month"] as const).map((z) => (
+                <button key={z} type="button" onClick={() => setZoom(z)}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${zoom === z ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                >{z === "week" ? "Week" : "Month"}</button>
+              ))}
+            </div>
+            <div className="rounded-full bg-slate-50 px-4 py-2 text-sm font-medium text-slate-600">{selectedProjectLabel}</div>
           </div>
         </div>
 
+        {/* Layout tabs — always visible */}
+        {zoom === "week" && (
         <div className="mb-4 mt-4 flex flex-wrap gap-2">
           <button type="button" className={layoutTabClass(layout === "gantt")} onClick={() => setLayout("gantt")}>
-            <BarChart3 className="h-4 w-4 shrink-0" />
-            <span>Gantt Chart</span>
+            <BarChart3 className="h-4 w-4 shrink-0" /><span>Gantt Chart</span>
           </button>
           <button type="button" className={layoutTabClass(layout === "kanban")} onClick={() => setLayout("kanban")}>
-            <LayoutGrid className="h-4 w-4 shrink-0" />
-            <span>Kanban Swimlanes</span>
+            <LayoutGrid className="h-4 w-4 shrink-0" /><span>Kanban Swimlanes</span>
           </button>
           <button type="button" className={layoutTabClass(layout === "epic")} onClick={() => setLayout("epic")}>
-            <Layers className="h-4 w-4 shrink-0" />
-            <span>By Epic</span>
+            <Layers className="h-4 w-4 shrink-0" /><span>By Epic</span>
           </button>
         </div>
+        )}
 
-        {layout === "gantt" && (
+
+        {zoom === "week" && layout === "gantt" && (
         <div className="mt-5 grid min-w-[1180px] grid-cols-[190px_repeat(7,minmax(145px,1fr))] gap-2 text-xs text-slate-500">
           <div className="font-semibold text-slate-900">Project / Task</div>
-          {currentWeekDays.map((day) => (
-            (() => {
-              const dayStart = new Date(day.date);
-              dayStart.setHours(0, 0, 0, 0);
-              const dayStartTime = dayStart.getTime();
-              const isToday = dayStartTime === todayStartTime;
-
-              return (
-            <div
-              key={day.key}
-              className={[
-                "rounded-lg px-2 py-2 text-center",
-                isToday ? "bg-blue-50" : "",
-              ].join(" ")}
-            >
-              <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-400">{day.label}</div>
-              <div
-                className={[
-                  "mt-1 text-sm font-semibold",
-                  isToday ? "text-blue-700" : "text-slate-900",
-                ].join(" ")}
-              >
-                {day.dayNumber}
+          {currentWeekDays.map((day) => {
+            const dayStart = new Date(day.date);
+            dayStart.setHours(0, 0, 0, 0);
+            const isToday = dayStart.getTime() === todayStartTime;
+            return (
+              <div key={day.key} className={["rounded-lg px-2 py-2 text-center", isToday ? "bg-blue-50" : ""].join(" ")}>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-400">{day.label}</div>
+                <div className={["mt-1 text-sm font-semibold", isToday ? "text-blue-700" : "text-slate-900"].join(" ")}>{day.dayNumber}</div>
               </div>
-            </div>
-              );
-            })()
-          ))}
-
+            );
+          })}
           {visibleProjects.length === 0 ? (
             <>
               <div className="pt-2 text-sm font-semibold text-slate-900">No project activity</div>
-              <div className="col-span-7 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
-                No activity for this week
-              </div>
+              <div className="col-span-7 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">No activity for this week</div>
             </>
           ) : null}
-
           {visibleProjects.map((project) => {
             const projectRange = getProjectRange(project, currentWeek);
-
             return (
               <Fragment key={project.id}>
                 <div className="pt-2 text-sm font-semibold text-slate-900">{project.name ?? "Untitled project"}</div>
                 {currentWeekDays.map((day, index) => {
                   const dayTasks = project.tasksInWeek.filter((task) => {
                     const taskDate = getTaskDate(task);
-                    if (!taskDate || !isSameWeek(taskDate, currentWeek)) {
-                      return false;
-                    }
-
+                    if (!taskDate || !isSameWeek(taskDate, currentWeek)) return false;
                     return getWeekDayIndex(taskDate) === index;
                   });
                   const isInsideProjectRange = isDateWithinRange(day.date, projectRange.start, projectRange.end);
-
                   return (
-                    <div
-                      key={project.id + "-" + day.key}
-                      className={[
-                        "rounded-xl border border-dashed bg-transparent p-2",
-                        isInsideProjectRange ? "border-slate-200" : "border-slate-100 opacity-60",
-                      ].join(" ")}
-                    >
+                    <div key={project.id + "-" + day.key} className={["rounded-xl border border-dashed bg-transparent p-2", isInsideProjectRange ? "border-slate-200" : "border-slate-100 opacity-60"].join(" ")}>
                       <div className="space-y-2">
                         {dayTasks.map((task) => {
                           let statusKey = (task.status ?? "todo").toLowerCase();
-
-                          if (statusKey === "review") {
-                            statusKey = "in_review";
-                          }
-
+                          if (statusKey === "review") statusKey = "in_review";
                           const styles = statusStyles[statusKey] ?? statusStyles.todo;
                           const ganttAssigneeName = (() => {
                             const assignees = task.assignees ?? [];
@@ -1193,24 +868,14 @@ export default function RoadmapGrid() {
                             if (assignees.length === 1) return assignees[0].name ?? "Unknown";
                             return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
                           })();
-
                           return (
-                            <button
-                              key={task.id}
-                              type="button"
-                              className={[taskCardClass, "min-w-[140px] w-full text-left cursor-pointer"].join(" ")}
-                              onClick={() => openRoadmapTaskDetails(task, project)}
-                            >
+                            <button key={task.id} type="button" className={[taskCardClass, "min-w-[140px] w-full text-left cursor-pointer"].join(" ")} onClick={() => openRoadmapTaskDetails(task, project)}>
                               <div className="flex items-start justify-between gap-1">
                                 <div className="min-w-0">
-                                  <p className="line-clamp-2 text-sm font-medium leading-tight text-slate-900">
-                                    {task.title ?? "Untitled task"}
-                                  </p>
+                                  <p className="line-clamp-2 text-sm font-medium leading-tight text-slate-900">{task.title ?? "Untitled task"}</p>
                                   <p className="mt-1 text-[11px] font-normal leading-[1.3] text-slate-600">{ganttAssigneeName}</p>
                                 </div>
-                                <span className={"inline-flex max-w-fit whitespace-nowrap items-center rounded-full px-2 py-[2px] text-[10px] font-semibold leading-none uppercase tracking-[0.08em] " + styles.badge}>
-                                  {styles.label}
-                                </span>
+                                <span className={"inline-flex max-w-fit whitespace-nowrap items-center rounded-full px-2 py-[2px] text-[10px] font-semibold leading-none uppercase tracking-[0.08em] " + styles.badge}>{styles.label}</span>
                               </div>
                             </button>
                           );
@@ -1225,39 +890,18 @@ export default function RoadmapGrid() {
         </div>
         )}
 
-        {layout === "kanban" && (
+        {zoom === "week" && layout === "kanban" && (
           <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {Object.entries(kanbanGroups).map(([status, tasks]) => {
               const ui = STATUS_UI[status as keyof typeof STATUS_UI];
-
               return (
                 <div key={status}>
-                  <div className={`mb-3 rounded-md px-3 py-2 text-xs font-semibold ${ui?.header ?? ""}`}>
-                    {ui?.label ?? status.toUpperCase()}
-                  </div>
-
+                  <div className={`mb-3 rounded-md px-3 py-2 text-xs font-semibold ${ui?.header ?? ""}`}>{ui?.label ?? status.toUpperCase()}</div>
                   {tasks.map((task) => (
-                    <div
-                      key={task.id}
-                      onClick={() => {
-                        const project = visibleProjects.find(
-                          (p) => p.id === task.project_id || p.tasksInWeek.some((t) => t.id === task.id),
-                        );
-                        if (project) {
-                          openRoadmapTaskDetails(task, project);
-                        }
-                      }}
-                      className={`mb-3 cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:shadow-md border-l-4 ${ui?.border ?? "border-l-slate-400"}`}
-                    >
+                    <div key={task.id} onClick={() => { const project = visibleProjects.find((p) => p.id === task.project_id || p.tasksInWeek.some((t) => t.id === task.id)); if (project) openRoadmapTaskDetails(task, project); }} className={`mb-3 cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:shadow-md border-l-4 ${ui?.border ?? "border-l-slate-400"}`}>
                       <p className="text-sm font-medium text-slate-900 break-words line-clamp-2">{task.title ?? "Untitled task"}</p>
-
                       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-                        <span title={task.assignees?.map(u => u.name).filter(Boolean).join(", ") ?? ""}>{(() => {
-                          const assignees = task.assignees ?? [];
-                          if (assignees.length === 0) return task.assigned_user?.name || "Unassigned";
-                          if (assignees.length === 1) return assignees[0].name ?? "Unknown";
-                          return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`;
-                        })()}</span>
+                        <span>{(() => { const assignees = task.assignees ?? []; if (assignees.length === 0) return task.assigned_user?.name || "Unassigned"; if (assignees.length === 1) return assignees[0].name ?? "Unknown"; return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`; })()}</span>
                         <span className="text-[10px] opacity-70">{task.start_date ?? ""}</span>
                       </div>
                     </div>
@@ -1268,45 +912,28 @@ export default function RoadmapGrid() {
           </div>
         )}
 
-        {layout === "epic" && (
+        {zoom === "week" && layout === "epic" && (
           <div className="mt-5 space-y-4">
             {epicGroupsWithProgress.map((epic, epicIndex) => {
               const epicProject = visibleProjects[epicIndex];
-
               return (
                 <div key={`${epic.epicName ?? "epic"}-${epicIndex}`} className="rounded-xl border border-slate-200 p-4">
                   <h3 className="mb-3 font-semibold text-slate-900">{epic.epicName ?? "Untitled project"}</h3>
-
                   <div className="mb-3">
                     <div className="mb-1 flex justify-between text-xs text-gray-500">
-                      <span>
-                        {epic.completed}/{epic.total} done
-                      </span>
+                      <span>{epic.completed}/{epic.total} done</span>
                       <span>{epic.progress}%</span>
                     </div>
-
                     <div className="h-2 w-full rounded bg-slate-200">
                       <div className="h-2 rounded bg-blue-500" style={{ width: `${epic.progress}%` }} />
                     </div>
                   </div>
-
                   <div className="flex flex-wrap gap-2">
                     {epic.tasks.map((task) => {
                       const raw = task.status?.toLowerCase();
                       const statusChipKey = raw === "review" ? "in_review" : raw;
-
                       return (
-                        <div
-                          key={task.id}
-                          onClick={() => {
-                            if (epicProject) {
-                              openRoadmapTaskDetails(task, epicProject);
-                            }
-                          }}
-                          className={`cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 border-l-4 ${
-                            STATUS_UI[statusChipKey as keyof typeof STATUS_UI]?.border ?? "border-l-slate-400"
-                          }`}
-                        >
+                        <div key={task.id} onClick={() => { if (epicProject) openRoadmapTaskDetails(task, epicProject); }} className={`cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition hover:bg-slate-50 border-l-4 ${STATUS_UI[statusChipKey as keyof typeof STATUS_UI]?.border ?? "border-l-slate-400"}`}>
                           <span className="break-words line-clamp-2">{task.title ?? "Untitled task"}</span>
                         </div>
                       );
@@ -1317,152 +944,136 @@ export default function RoadmapGrid() {
             })}
           </div>
         )}
+
+        {/* ═══ MONTH VIEW — Calendar Grid ═══ */}
+        {zoom === "month" && (() => {
+          // Build the single current month based on offset
+          const now = new Date();
+          const targetDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+          const year = targetDate.getFullYear();
+          const month = targetDate.getMonth();
+          const firstDay = new Date(year, month, 1);
+          const lastDay = new Date(year, month + 1, 0);
+          const daysInMonth = lastDay.getDate();
+          const startDow = firstDay.getDay(); // 0=Sun
+
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+
+          const allTasks = selectedProjects.flatMap((p) => p.tasks.map((t) => ({ ...t, projectName: p.name, projectId: p.id })));
+
+          // Group tasks by date (use end_date first, then start_date, then created_at)
+          const tasksByDay = new Map<number, typeof allTasks>();
+          allTasks.forEach((task) => {
+            const dateStr = task.end_date ?? task.start_date ?? task.created_at;
+            if (!dateStr) return;
+            const d = new Date(dateStr);
+            if (d.getFullYear() === year && d.getMonth() === month) {
+              const day = d.getDate();
+              const existing = tasksByDay.get(day) ?? [];
+              existing.push(task);
+              tasksByDay.set(day, existing);
+            }
+          });
+
+          const totalTasks = allTasks.filter((t) => {
+            const dateStr = t.end_date ?? t.start_date ?? t.created_at;
+            if (!dateStr) return false;
+            const d = new Date(dateStr);
+            return d.getFullYear() === year && d.getMonth() === month;
+          }).length;
+
+          // Build calendar grid cells
+          const calendarCells: (number | null)[] = [];
+          for (let i = 0; i < startDow; i++) calendarCells.push(null);
+          for (let d = 1; d <= daysInMonth; d++) calendarCells.push(d);
+          while (calendarCells.length % 7 !== 0) calendarCells.push(null);
+
+          const dayNames = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+          const monthLabel = targetDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+          return (
+            <div className="mt-5">
+              {/* Month header with task count */}
+              <div className="mb-4 flex items-center justify-between">
+                <p className="text-xs text-slate-500">Tasks shown by due date</p>
+                <span className="text-xs text-slate-400">{totalTasks} tasks</span>
+              </div>
+
+              {/* Day-of-week header */}
+              <div className="grid grid-cols-7 border-b border-slate-200">
+                {dayNames.map((dn, i) => (
+                  <div key={dn} className={`px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-wider ${i === 0 || i === 6 ? "text-orange-400" : "text-slate-400"}`}>
+                    {dn}
+                  </div>
+                ))}
+              </div>
+
+              {/* Calendar grid */}
+              <div className="grid grid-cols-7">
+                {calendarCells.map((day, idx) => {
+                  if (day === null) {
+                    return <div key={`empty-${idx}`} className="min-h-[100px] border-b border-r border-slate-100 bg-slate-50/50" />;
+                  }
+
+                  const cellDate = new Date(year, month, day);
+                  cellDate.setHours(0, 0, 0, 0);
+                  const isToday = cellDate.getTime() === today.getTime();
+                  const isWeekend = cellDate.getDay() === 0 || cellDate.getDay() === 6;
+                  const dayTasks = tasksByDay.get(day) ?? [];
+
+                  return (
+                    <div
+                      key={`day-${day}`}
+                      className={[
+                        "min-h-[100px] border-b border-r border-slate-100 p-1.5 transition",
+                        isToday ? "bg-blue-50/60" : isWeekend ? "bg-slate-50/30" : "bg-white",
+                      ].join(" ")}
+                    >
+                      {/* Date number */}
+                      <div className={`mb-1 text-right ${isToday ? "font-bold text-blue-600" : isWeekend ? "text-orange-400 font-medium" : "text-slate-700 font-medium"}`}>
+                        <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? "bg-blue-600 text-white" : ""}`}>
+                          {day}
+                        </span>
+                      </div>
+
+                      {/* Tasks */}
+                      <div className="space-y-0.5">
+                        {dayTasks.slice(0, 4).map((task) => {
+                          const sKey = normalizeStatus(task.status);
+                          const cfg = STATUS_CONFIG[sKey];
+                          const isOverdue = task.end_date && new Date(task.end_date) < today && sKey !== "done";
+                          return (
+                            <div
+                              key={task.id}
+                              title={`${task.title ?? "Untitled"} • ${cfg.label}`}
+                              className={`cursor-pointer truncate rounded px-1.5 py-0.5 text-[10px] font-medium leading-tight transition hover:brightness-90 ${isOverdue ? "ring-1 ring-red-400" : ""}`}
+                              style={{ backgroundColor: cfg.barColor + "20", color: cfg.barColor, borderLeft: `2px solid ${cfg.barColor}` }}
+                              onClick={() => {
+                                const proj = selectedProjects.find((p) => p.id === (task as any).projectId);
+                                if (proj) openRoadmapTaskDetails(task, proj as RoadmapProjectRecord);
+                              }}
+                            >
+                              {task.title ?? "Untitled"}{isOverdue ? " ⚠" : ""}
+                            </div>
+                          );
+                        })}
+                        {dayTasks.length > 4 && (
+                          <p className="text-[9px] font-semibold text-slate-400 pl-1">+{dayTasks.length - 4} more</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
+
       </div>
 
-      <Modal
-        title="Task Details"
-        isOpen={Boolean(selectedTaskDetails)}
-        onClose={() => {
-          setSelectedTaskDetails(null);
-          setIsUpdateComposerOpen(false);
-          setUpdateContent("");
-        }}
-      >
-        {selectedTaskDetails && (
-          <div className="space-y-5 text-sm text-slate-700">
-            <div>
-              <div className="min-w-0">
-                <p className="text-xl font-bold leading-tight text-slate-900 break-words line-clamp-2">{selectedTaskDetails.title}</p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <span className={"inline-flex max-w-fit whitespace-nowrap items-center rounded-full px-2 py-[2px] text-[10px] font-semibold uppercase tracking-[0.08em] " + (statusStyles[selectedTaskDetails.statusKey]?.badge ?? statusStyles.todo.badge)}>
-                {selectedTaskDetails.status}
-              </span>
-              <span className="text-sm text-slate-600">{selectedTaskDetails.assignee}</span>
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Created date</p>
-                <p className="mt-1 text-slate-900">{selectedTaskDetails.createdAt}</p>
-              </div>
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Created by</p>
-                <p className="mt-1 text-slate-900">
-                  {selectedTaskDetails.createdByName || "Unknown"}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Project name</p>
-                <p className="mt-1 text-slate-900">{selectedTaskDetails.projectName}</p>
-              </div>
-            </div>
-
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
-              <div className="mt-3 space-y-0 max-h-[220px] overflow-y-auto pr-1">
-                {logsLoading ? (
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
-                    Loading activity...
-                  </div>
-                ) : logs.length === 0 ? (
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
-                    No activity yet
-                  </div>
-                ) : (
-                  logs.map((log, index) => (
-                    <div key={log.id} className="relative pl-7 pb-4">
-                      <span className="absolute left-0 top-1.5 h-2.5 w-2.5 rounded-full bg-slate-400" />
-                      {index < logs.length - 1 && <span className="absolute left-[4px] top-4 h-full w-px bg-slate-200" />}
-                      <p className="mt-1 text-sm text-slate-800">{describeLog(log)}</p>
-                      <p className="mt-0.5 text-xs text-slate-500">{log.user?.name || log.user?.email || "Unknown"} • {formatLogDate(log.created_at)}</p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Updates</p>
-
-              {showUpdateButton !== false && !isUpdateComposerOpen ? (
-                <button
-                  type="button"
-                  onClick={() => setIsUpdateComposerOpen(true)}
-                  className="mt-3 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-                >
-                  + Add Update
-                </button>
-              ) : null}
-
-              {showUpdateButton !== false && isUpdateComposerOpen ? (
-                <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <label htmlFor="task-update-content" className="sr-only">
-                    Task update content
-                  </label>
-                  <textarea
-                    id="task-update-content"
-                    value={updateContent}
-                    onChange={(event) => setUpdateContent(event.target.value)}
-                    placeholder="What did you work on today?"
-                    className="min-h-[110px] w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
-                    disabled={isSubmittingUpdate}
-                  />
-                  <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsUpdateComposerOpen(false);
-                        setUpdateContent("");
-                      }}
-                      className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
-                      disabled={isSubmittingUpdate}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleAddUpdate()}
-                      className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50"
-                      disabled={isSubmittingUpdate || !updateContent.trim()}
-                    >
-                      {isSubmittingUpdate ? "Saving..." : "Submit"}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {taskUpdates.length > 0 ? (
-                <div className="mt-4 max-h-[220px] overflow-y-auto pr-2 space-y-3">
-                  {taskUpdates.map((update) => {
-                    const formattedDate = new Date(update.created_at).toLocaleString(undefined, {
-                      day: "2-digit",
-                      month: "short",
-                      year: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    });
-
-                    return (
-                      <div key={update.id} className="rounded-lg border border-slate-200 bg-white px-3 py-3">
-                        <p className="whitespace-pre-wrap break-words text-sm text-slate-900">{update.content}</p>
-                        <p className="mt-2 text-xs text-slate-500">
-                          {update.user?.name || "Unknown"}
-                          {" • "}
-                          {formattedDate}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </div>
-
-          </div>
-        )}
-      </Modal>
+      {renderTaskDetails()}
     </div>
   );
 }

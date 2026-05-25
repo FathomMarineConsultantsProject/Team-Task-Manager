@@ -1,7 +1,7 @@
 'use client';
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, ListChecks, Map, Table2, Users } from "lucide-react";
+import { LayoutDashboard, ListChecks, Map, Table2, FileText, Users } from "lucide-react";
 import { useAppData } from "@/components/providers/AppDataProvider";
 
 const navLinks = [
@@ -9,9 +9,10 @@ const navLinks = [
   { label: "Backlog", href: "/backlog", icon: ListChecks },
   { label: "Roadmap", href: "/roadmap", icon: Map },
   { label: "Spreadsheet", href: "/spreadsheet", icon: Table2 },
+  { label: "Reports", href: "/dashboard/reports", icon: FileText },
 ];
 
-const linkBaseClass = "flex items-center justify-between rounded-2xl px-3 py-2 text-sm font-medium transition";
+const linkBaseClass = "flex items-center justify-between rounded-2xl px-3 py-2.5 text-[13px] font-medium transition";
 
 export default function Sidebar() {
   const pathname = usePathname() || "/dashboard";
@@ -30,8 +31,8 @@ export default function Sidebar() {
           TT
         </div>
         <div>
-          <p className="text-base font-semibold text-white">Team Task Manager</p>
-          <p className="text-xs text-slate-400">Signed in as {profile?.name ?? "--"}</p>
+          <p className="text-[15px] font-semibold tracking-[-0.01em] text-white">Team Task Manager</p>
+          <p className="text-[11px] text-slate-400">Signed in as {profile?.name ?? "--"}</p>
         </div>
       </div>
 
@@ -57,9 +58,9 @@ export default function Sidebar() {
       </nav>
 
       <div className="mt-auto rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-200">
-        <p className="text-[11px] uppercase tracking-[0.4em] text-slate-400">Workspace</p>
-        <p className="mt-2 text-base font-semibold text-white">{profile?.role === "admin" ? "Admin Access" : "Member Access"}</p>
-        <p className="mt-1 text-slate-400">Use the dashboard to create and manage projects.</p>
+        <p className="text-[10px] uppercase tracking-[0.35em] font-medium text-slate-400">Workspace</p>
+        <p className="mt-2 text-[15px] font-semibold tracking-[-0.01em] text-white">{profile?.role === "admin" ? "Admin Access" : "Member Access"}</p>
+        <p className="mt-1 text-[11px] leading-relaxed text-slate-400">Use the dashboard to create and manage projects.</p>
       </div>
     </aside>
   );

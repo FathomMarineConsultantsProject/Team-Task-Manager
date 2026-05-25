@@ -5,6 +5,7 @@ export type TaskDirection = "up" | "down" | "right";
 export type Task = {
   title: string;
   id: string;
+  description?: string | null;
   start_date?: string | null;
   end_date?: string | null;
   direction?: TaskDirection;
@@ -15,9 +16,10 @@ export type Task = {
   assigneeName?: string | null;
   assigneeEmail?: string | null;
   assigneeRole?: string | null;
+  avatarUrl?: string | null;
   canDrag?: boolean;
   updatesCount?: number;
-  assignees?: { id: string; name: string | null; email: string | null }[];
+  assignees?: { id: string; name: string | null; email: string | null; avatar_url?: string | null }[];
 };
 
 export type TaskUpdateSummary = {

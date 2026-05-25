@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { Sparkles } from "lucide-react";
 import Sidebar from "@/components/sidebar/Sidebar";
 import Topbar from "@/components/topbar/Topbar";
+import AiAssistantPanel from "@/components/ai/AiAssistantPanel";
 import { useAppData } from "@/components/providers/AppDataProvider";
 
 const LOGIN_ROUTE = "/login";
@@ -11,11 +13,82 @@ const LOGIN_ROUTE = "/login";
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { profile, isAuthLoading } = useAppData();
+  const { profile, supabase, isAuthLoading } = useAppData();
   const isLoginRoute = pathname === LOGIN_ROUTE;
   const routerRef = useRef(router);
   routerRef.current = router;
   const isLoggedIn = Boolean(profile?.id);
+  const [isAiOpen, setIsAiOpen] = useState(false);
+
+  // Extract project ID from URL if on a project board
+  const projectId = useMemo(() => {
+    // Match /dashboard/projects/:id or /project/:id/board
+    const dashMatch = pathname.match(/\/dashboard\/projects\/([^/]+)/);
+    if (dashMatch) return dashMatch[1];
+    const boardMatch = pathname.match(/\/project\/([^/]+)\/board/);
+    if (boardMatch) return boardMatch[1];
+    return null;
+  }, [pathname]);
+
+  // Load project context for AI
+  const [aiContext, setAiContext] = useState<{
+    projectName?: string;
+    projectId?: string;
+    members?: { name: string; id: string }[];
+    tasks?: { title: string; status: string; id: string; description?: string | null; end_date?: string | null }[];
+  } | undefined>(undefined);
+
+  const loadAiContext = useCallback(async () => {
+    if (!projectId || !supabase) {
+      setAiContext(undefined);
+      return;
+    }
+
+    try {
+      const [projectRes, membersRes, tasksRes] = await Promise.all([
+        supabase.from("projects").select("id, name").eq("id", projectId).single(),
+        supabase
+          .from("project_members")
+          .select("user_id, user:users(id, name, email)")
+          .eq("project_id", projectId),
+        supabase
+          .from("tasks")
+          .select("id, title, status, description, end_date")
+          .eq("project_id", projectId)
+          .order("created_at", { ascending: false })
+          .limit(50),
+      ]);
+
+      const projectName = (projectRes.data as { name: string } | null)?.name ?? "Unknown";
+      const memberRows = (membersRes.data ?? []) as { user_id: string; user: { id: string; name: string | null; email: string | null } | null }[];
+      const taskRows = (tasksRes.data ?? []) as { id: string; title: string | null; status: string | null; description?: string | null; end_date?: string | null }[];
+
+      setAiContext({
+        projectId,
+        projectName,
+        members: memberRows
+          .filter(m => m.user)
+          .map(m => ({
+            name: m.user!.name ?? m.user!.email ?? "Unknown",
+            id: m.user!.id,
+          })),
+        tasks: taskRows.map(t => ({
+          id: t.id,
+          title: t.title ?? "Untitled",
+          status: t.status ?? "todo",
+          description: t.description ?? null,
+          end_date: t.end_date ?? null,
+        })),
+      });
+    } catch (err) {
+      console.error("Failed to load AI context", err);
+      setAiContext(undefined);
+    }
+  }, [projectId, supabase]);
+
+  useEffect(() => {
+    void loadAiContext();
+  }, [loadAiContext]);
 
   useEffect(() => {
     if (isAuthLoading) {
@@ -56,10 +129,32 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen overflow-hidden bg-white text-slate-900">
       <Sidebar />
-      <div className="ml-[260px] flex h-screen flex-col overflow-hidden bg-white">
+      <div className={`ml-[260px] flex h-screen flex-col overflow-hidden bg-white transition-all ${isAiOpen ? "mr-[420px]" : ""}`}>
         <Topbar />
         <main className="flex-1 overflow-y-auto bg-white p-8">{children}</main>
       </div>
+
+      {/* AI Panel */}
+      <AiAssistantPanel
+        isOpen={isAiOpen}
+        onClose={() => setIsAiOpen(false)}
+        context={aiContext}
+        onTaskCreated={() => void loadAiContext()}
+        onCommentAdded={() => void loadAiContext()}
+        onTaskUpdated={() => void loadAiContext()}
+      />
+
+      {/* AI Toggle Floating Button — Black */}
+      {!isAiOpen && (
+        <button
+          type="button"
+          onClick={() => setIsAiOpen(true)}
+          className="fixed bottom-6 right-6 z-[9990] flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-xl transition-all hover:scale-105 hover:bg-slate-800 hover:shadow-2xl active:scale-95"
+          aria-label="Open AI Assistant"
+        >
+          <Sparkles size={22} />
+        </button>
+      )}
     </div>
   );
 }

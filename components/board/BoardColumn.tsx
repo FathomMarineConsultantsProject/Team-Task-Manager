@@ -42,9 +42,16 @@ export default function BoardColumn({
   canDelete = true,
   canEdit = false,
 }: BoardColumnProps) {
+  const columnAccent: Record<ColumnId, { ring: string; text: string; bg: string }> = {
+    todo: { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" },
+    inProgress: { ring: "border-blue-200", text: "text-blue-700", bg: "bg-blue-50/70" },
+    review: { ring: "border-amber-200", text: "text-amber-700", bg: "bg-amber-50/70" },
+    done: { ring: "border-emerald-200", text: "text-emerald-700", bg: "bg-emerald-50/70" },
+  };
+
   const columnRing = isDragOver
     ? "border-2 border-dashed border-slate-400 bg-white shadow-md"
-    : "border border-gray-200 bg-slate-50";
+    : `border border-slate-200 bg-gradient-to-b from-white to-slate-50 ${columnAccent[columnId].ring}`;
   const placeholderVisible = isDragOver || tasks.length === 0;
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
@@ -70,12 +77,14 @@ export default function BoardColumn({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onDragLeave={handleDragLeave}
-      className={`group flex w-[280px] shrink-0 flex-col rounded-xl ${columnRing} p-5 shadow-sm transition`}
+      className={`group flex w-[290px] shrink-0 flex-col rounded-2xl ${columnRing} p-4 shadow-[0_18px_35px_-30px_rgba(15,23,42,0.45)] transition`}
     >
-      <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.4em] text-gray-500">
-        <div className="text-sm font-semibold text-gray-900">{title}</div>
+      <div className="flex items-center justify-between rounded-xl px-2 py-2">
+        <div className={`text-xs font-semibold uppercase tracking-[0.35em] ${columnAccent[columnId].text}`}>
+          {title}
+        </div>
         <div className="flex items-center gap-3 text-gray-400">
-          <span className="rounded-full border border-gray-200 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-gray-500">
+          <span className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] ${columnAccent[columnId].ring} ${columnAccent[columnId].text} ${columnAccent[columnId].bg}`}>
             {tasks.length}
           </span>
           <button
@@ -87,7 +96,7 @@ export default function BoardColumn({
           </button>
         </div>
       </div>
-      <div className="mt-6 flex flex-1 flex-col gap-4">
+      <div className="mt-4 flex flex-1 flex-col gap-3">
         {tasks.map((task) => (
           <TaskCard
             key={task.id}
