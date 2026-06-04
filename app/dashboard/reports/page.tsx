@@ -24,6 +24,7 @@ import Avatar from "@/components/ui/Avatar";
 import { RenderMentionText } from "@/components/ui/MentionTextarea";
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
 import { normalizeStatus, STATUS_CONFIG } from "@/lib/statusConfig";
+import { getTaskBarSpan, startOfWeek, endOfWeek } from "@/lib/roadmap";
 import {
   computeKPIs,
   computeStatusDistribution,
@@ -34,7 +35,6 @@ import {
   type AnalyticsLog,
   type AnalyticsAssignee,
   type AnalyticsUser,
-  type ProjectKPIs,
 } from "@/lib/analytics";
 import {
   REPORT_STATUS,
@@ -151,6 +151,160 @@ type ActivityEvent = {
   content?: string; // for comment/reply types
 };
 
+type ReportTaskWithDetails = AnalyticsTask & {
+  title?: string | null;
+  description?: string | null;
+  project_id?: string;
+  updated_at?: string | null;
+};
+
+type ReportTaskItem = {
+  id: string;
+  title: string;
+  owner: string;
+  dueDate: string;
+  status: string;
+  statusKey: ReportStatusKey;
+  color: string;
+  projectName?: string;
+};
+
+type GanttPdfItem = ReportTaskItem & {
+  startValue: string | null;
+  endValue: string | null;
+  left: number;
+  width: number;
+};
+
+type DetailedTaskRegisterItem = ReportTaskItem & {
+  progress: number;
+  startDate: string;
+  timeLeft: string;
+  comments: number;
+  description: string;
+  priority: string;
+};
+
+type TeamContributionRow = {
+  userId: string;
+  name: string;
+  completed: number;
+  active: number;
+  overdue: number;
+  total: number;
+  utilization: number;
+};
+
+type ProjectLeadInfo = {
+  owner: string;
+  primaryLead: string;
+  supportingLeads: string[];
+};
+
+type ExecutiveReportData = {
+  projectName: string;
+  generatedAt: string;
+  leads: ProjectLeadInfo;
+  health: {
+    label: string;
+    riskLevel: "Low" | "Medium" | "High";
+    healthScore: number;
+    progressScore: number;
+    completionRate: number;
+    overdueCount: number;
+  };
+  kpis: {
+    total: number;
+    completed: number;
+    inProgress: number;
+    nearDue: number;
+    overdue: number;
+  };
+  statusDistribution: { label: string; count: number; color: string }[];
+  gantt: {
+    rangeStart: string;
+    rangeEnd: string;
+    currentWeekLeft: number | null;
+    tasks: GanttPdfItem[];
+  };
+  timeline: ReportTaskItem[];
+  team: TeamContributionRow[];
+  resource: {
+    averageUtilization: number;
+    overloaded: TeamContributionRow[];
+    underutilized: TeamContributionRow[];
+  };
+  risks: {
+    overdue: ReportTaskItem[];
+    nearDue: ReportTaskItem[];
+    stale: ReportTaskItem[];
+    inactive: ReportTaskItem[];
+  };
+  actions: DetailedTaskRegisterItem[];
+  breakdown: {
+    completed: ReportTaskItem[];
+    inProgress: ReportTaskItem[];
+    overdue: ReportTaskItem[];
+    upcoming: ReportTaskItem[];
+  };
+  taskRegister: DetailedTaskRegisterItem[];
+  recommendations: string[];
+};
+
+type UserWorkHistoryItem = ReportTaskItem & {
+  assignedDate: string;
+  completedDate: string;
+};
+
+type UserActivityItem = {
+  id: string;
+  type: string;
+  detail: string;
+  taskName: string;
+  createdAt: string;
+};
+
+type UserPerformanceReportData = {
+  userName: string;
+  projectName: string;
+  generatedAt: string;
+  summary: {
+    completionRate: number;
+    activeTasks: number;
+    overdueTasks: number;
+    nearDueTasks: number;
+    totalAssignments: number;
+  };
+  workHistory: UserWorkHistoryItem[];
+  responsibilities: {
+    active: ReportTaskItem[];
+    nearDue: ReportTaskItem[];
+    overdue: ReportTaskItem[];
+  };
+  contribution: {
+    completedTasks: number;
+    commentsAdded: number;
+    activityCount: number;
+    assignmentsHandled: number;
+  };
+  recentComments: UserActivityItem[];
+  activityTimeline: UserActivityItem[];
+  workload: {
+    utilizationScore: number;
+    taskVolume: number;
+    bottlenecks: string[];
+  };
+  assessment: {
+    strengths: string[];
+    concerns: string[];
+    recommendations: string[];
+  };
+};
+
+type GeneratedAiReport =
+  | { type: "project"; data: ExecutiveReportData }
+  | { type: "user"; data: UserPerformanceReportData };
+
 // ── KPI Card ────────────────────────────────────
 
 function KpiCard({
@@ -240,9 +394,804 @@ function getDocumentTimeLeft(task: ReportTask, status: ReportStatusKey) {
   return formatTimeDiff(remaining);
 }
 
-// ════════════════════════════════════════════════
-// ── MAIN COMPONENT ─────────────────────────────
-// ════════════════════════════════════════════════
+function getTaskPriority(status: ReportStatusKey) {
+  if (status === "overdue") return "High";
+  if (status === "near_due") return "Medium";
+  if (status === "in_progress") return "Normal";
+  return "Low";
+}
+
+function clampScore(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function formatReportDate(value: string | null | undefined) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function getTaskOwner(task: ReportTaskWithDetails, usersById: Map<string, AnalyticsUser>) {
+  const user = task.assigned_to ? usersById.get(task.assigned_to) : null;
+  return user?.name ?? user?.email ?? "Unassigned";
+}
+
+function toReportTaskItem(
+  task: ReportTaskWithDetails,
+  usersById: Map<string, AnalyticsUser>,
+  projectsById: Map<string, ProjectInfo>,
+): ReportTaskItem {
+  const statusKey = deriveReportStatus(task as ReportTask);
+  const status = REPORT_STATUS[statusKey];
+  return {
+    id: task.id,
+    title: task.title ?? "Untitled task",
+    owner: getTaskOwner(task, usersById),
+    dueDate: formatReportDate(task.end_date),
+    status: status.label,
+    statusKey,
+    color: status.color,
+    projectName: task.project_id ? projectsById.get(task.project_id)?.name ?? undefined : undefined,
+  };
+}
+
+function isStaleReportTask(task: ReportTaskWithDetails) {
+  if (deriveReportStatus(task as ReportTask) === "completed" || deriveReportStatus(task as ReportTask) === "done_early") return false;
+  const reference = task.updated_at ?? task.created_at;
+  if (!reference) return false;
+  const ageDays = (Date.now() - new Date(reference).getTime()) / 86400000;
+  return ageDays >= 14;
+}
+
+function isInactiveReportTask(task: ReportTaskWithDetails) {
+  if (deriveReportStatus(task as ReportTask) === "completed" || deriveReportStatus(task as ReportTask) === "done_early") return false;
+  if (!task.assigned_to) return true;
+  const reference = task.updated_at ?? task.created_at;
+  if (!reference) return false;
+  const ageDays = (Date.now() - new Date(reference).getTime()) / 86400000;
+  return ageDays >= 21;
+}
+
+function parseAiRecommendationText(value: string) {
+  const withoutTags = value
+    .replace(/<li[^>]*>/gi, "\n- ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+
+  return withoutTags
+    .split(/\n|(?:^|\s)[•-]\s+/)
+    .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+}
+
+function buildFallbackRecommendations(data: {
+  overdueCount: number;
+  nearDueCount: number;
+  staleCount: number;
+  overloadedUsers: number;
+  completionRate: number;
+}) {
+  const recommendations: string[] = [];
+  if (data.overdueCount > 0) recommendations.push("Prioritize overdue ownership review and resolve blocked tasks before adding new scope.");
+  if (data.nearDueCount > 0) recommendations.push("Run a near-due checkpoint within 24 hours and confirm owners, blockers, and delivery dates.");
+  if (data.staleCount > 0) recommendations.push("Refresh stale tasks with status updates, next actions, or closure decisions.");
+  if (data.overloadedUsers > 0) recommendations.push("Rebalance workload from overloaded users to available contributors.");
+  if (data.completionRate < 60) recommendations.push("Focus execution on the smallest set of high-impact tasks needed to lift completion rate.");
+  return recommendations.length ? recommendations : ["Maintain current delivery cadence and continue monitoring near-due and workload signals."];
+}
+
+function getRiskLevel(overdueCount: number, nearDueCount: number, staleCount: number): "Low" | "Medium" | "High" {
+  if (overdueCount >= 3 || staleCount >= 5) return "High";
+  if (overdueCount > 0 || nearDueCount >= 3 || staleCount > 0) return "Medium";
+  return "Low";
+}
+
+function parseReportDateValue(value: string | null | undefined) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function bestReportStartDate(task: ReportTaskWithDetails) {
+  return parseReportDateValue(task.start_date ?? task.created_at ?? task.updated_at ?? task.completed_at) ?? new Date();
+}
+
+function bestReportEndDate(task: ReportTaskWithDetails) {
+  const status = deriveReportStatus(task as ReportTask);
+  const fallback = task.end_date ?? task.completed_at ?? task.updated_at ?? task.start_date ?? task.created_at;
+  if (status === "completed" || status === "done_early") {
+    return parseReportDateValue(task.completed_at ?? fallback) ?? bestReportStartDate(task);
+  }
+  return parseReportDateValue(fallback) ?? bestReportStartDate(task);
+}
+
+function getProjectLeadInfo(
+  projectId: string,
+  projectMembers: { project_id: string; user_id: string; role?: string | null }[],
+  usersById: Map<string, AnalyticsUser>,
+  teamRows: TeamContributionRow[],
+): ProjectLeadInfo {
+  const members = projectMembers.filter((member) => member.project_id === projectId);
+  const named = (userId: string) => {
+    const user = usersById.get(userId);
+    return user?.name ?? user?.email ?? "Unknown";
+  };
+  const owners = members.filter((member) => ["owner", "creator"].includes((member.role ?? "").toLowerCase())).map((member) => named(member.user_id));
+  const leads = members.filter((member) => (member.role ?? "").toLowerCase() === "lead").map((member) => named(member.user_id));
+  const owner = owners[0] ?? teamRows[0]?.name ?? "Not assigned";
+  const primaryLead = leads[0] ?? owners[1] ?? owner;
+  const supportingLeads = [...leads.slice(1), ...owners.slice(1)].filter((name) => name !== primaryLead);
+  return { owner, primaryLead, supportingLeads: Array.from(new Set(supportingLeads)) };
+}
+
+function buildGanttPdfData(
+  tasks: ReportTaskWithDetails[],
+  usersById: Map<string, AnalyticsUser>,
+  projectsById: Map<string, ProjectInfo>,
+) {
+  const datedTasks = tasks
+    .map((task) => {
+      const start = bestReportStartDate(task);
+      const end = bestReportEndDate(task);
+      return { task, start, end };
+    })
+    .filter((item): item is { task: ReportTaskWithDetails; start: Date; end: Date } => Boolean(item.start && item.end));
+
+  if (datedTasks.length === 0) {
+    const today = new Date();
+    const start = startOfWeek(today);
+    const end = endOfWeek(start);
+    return { rangeStart: start.toISOString(), rangeEnd: end.toISOString(), currentWeekLeft: 0, tasks: [] as GanttPdfItem[] };
+  }
+
+  const minTime = Math.min(...datedTasks.map((item) => item.start.getTime()));
+  const maxTime = Math.max(...datedTasks.map((item) => item.end.getTime()));
+  const rangeStart = startOfWeek(new Date(minTime));
+  const rangeEnd = endOfWeek(new Date(maxTime));
+  const today = new Date();
+  const currentWeek = startOfWeek(today);
+  const spanMs = Math.max(1, rangeEnd.getTime() - rangeStart.getTime());
+  const currentWeekLeft = currentWeek >= rangeStart && currentWeek <= rangeEnd
+    ? Math.max(0, Math.min(100, ((currentWeek.getTime() - rangeStart.getTime()) / spanMs) * 100))
+    : null;
+
+  const ganttTasks = datedTasks
+    .map(({ task, start, end }) => {
+      const span = getTaskBarSpan(start, end, rangeStart, rangeEnd);
+      if (!span) return null;
+      const item: GanttPdfItem = {
+        ...toReportTaskItem(task, usersById, projectsById),
+        startValue: start.toISOString(),
+        endValue: end.toISOString(),
+        left: span.left,
+        width: span.width,
+      };
+      return item;
+    })
+    .filter((item): item is GanttPdfItem => item !== null)
+    .sort((left, right) => (parseReportDateValue(left.startValue)?.getTime() ?? 0) - (parseReportDateValue(right.startValue)?.getTime() ?? 0));
+
+  return {
+    rangeStart: rangeStart.toISOString(),
+    rangeEnd: rangeEnd.toISOString(),
+    currentWeekLeft,
+    tasks: ganttTasks,
+  };
+}
+
+function ReportSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm overflow-hidden">
+      <h2 className="text-base font-bold uppercase tracking-[0.14em] text-slate-600">{title}</h2>
+      <div className="mt-4">{children}</div>
+    </section>
+  );
+}
+
+function MiniMetric({ label, value, tone = "slate" }: { label: string; value: string | number; tone?: "slate" | "green" | "amber" | "red" | "blue" | "purple" }) {
+  const toneClass = {
+    slate: "bg-slate-50 text-slate-900 border-slate-200",
+    green: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    amber: "bg-amber-50 text-amber-700 border-amber-200",
+    red: "bg-red-50 text-red-700 border-red-200",
+    blue: "bg-blue-50 text-blue-700 border-blue-200",
+    purple: "bg-violet-50 text-violet-700 border-violet-200",
+  }[tone];
+
+  return (
+    <div className={`rounded-xl border px-4 py-3 ${toneClass}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-[0.16em] opacity-70">{label}</p>
+      <p className="mt-1.5 text-2xl font-bold tabular-nums">{value}</p>
+    </div>
+  );
+}
+
+function TaskTable({ tasks, emptyLabel = "No tasks" }: { tasks: ReportTaskItem[]; emptyLabel?: string }) {
+  if (tasks.length === 0) {
+    return <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">{emptyLabel}</div>;
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-slate-200">
+      <table className="w-full text-sm table-fixed">
+        <thead className="bg-slate-50">
+          <tr className="text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+            <th className="w-[40%] px-3 py-2">Task</th>
+            <th className="w-[20%] px-3 py-2">Owner</th>
+            <th className="w-[18%] px-3 py-2">Due</th>
+            <th className="w-[22%] px-3 py-2">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tasks.map((task) => (
+            <tr key={task.id} className="border-t border-slate-100">
+              <td className="px-3 py-2 font-medium text-slate-900 break-words" title={task.title}>{task.title}</td>
+              <td className="px-3 py-2 text-slate-600 truncate" title={task.owner}>{task.owner}</td>
+              <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{task.dueDate}</td>
+              <td className="px-3 py-2">
+                <span className="inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold" style={{ backgroundColor: `${task.color}18`, color: task.color }}>
+                  {task.status}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
+  const riskTone = report.health.riskLevel === "High" ? "red" : report.health.riskLevel === "Medium" ? "amber" : "green";
+  const healthDot = report.health.riskLevel === "High" ? "🔴" : report.health.riskLevel === "Medium" ? "🟡" : "🟢";
+  const healthLabel = report.health.riskLevel === "High" ? "At Risk" : report.health.riskLevel === "Medium" ? "Attention Required" : "Healthy";
+  const activeTasks = Math.max(0, report.kpis.total - report.kpis.completed);
+
+  return (
+    <div className="space-y-6">
+      {/* ── Cover Page ── */}
+      <div className="rounded-2xl border border-slate-800 bg-[#050816] p-8 text-white shadow-lg">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">Powered by</p>
+        <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">Fathom Marine Consultancy</p>
+        <p className="mt-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-500">Executive Reporting System</p>
+        <h2 className="mt-6 text-3xl font-bold tracking-tight">{report.projectName}</h2>
+        <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-slate-300">
+          <span>Owner: <strong className="text-white">{report.leads.owner}</strong></span>
+          <span className="text-slate-600">•</span>
+          <span>Primary Lead: <strong className="text-white">{report.leads.primaryLead}</strong></span>
+          <span className="text-slate-600">•</span>
+          <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
+          <span className="text-slate-600">•</span>
+          <span>Team: <strong className="text-white">{report.team.length} members</strong></span>
+        </div>
+        {report.leads.supportingLeads.length > 0 && (
+          <p className="mt-2 text-xs text-slate-400">
+            Supporting Leads: <span className="text-slate-200">{report.leads.supportingLeads.join(", ")}</span>
+          </p>
+        )}
+        <div className="mt-4 flex items-center gap-2">
+          <span className="text-lg">{healthDot}</span>
+          <span className="text-base font-bold text-white">{healthLabel}</span>
+        </div>
+        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          {([
+            ["Completion", `${report.health.completionRate}%`],
+            ["Active Tasks", activeTasks],
+            ["Overdue", report.kpis.overdue],
+            ["Risk Level", report.health.riskLevel],
+            ["Team Size", report.team.length],
+            ["Health Score", report.health.healthScore],
+          ] as [string, string | number][]).map(([label, value]) => (
+            <div key={label} className="rounded-lg bg-white/[0.07] px-3 py-2.5 text-center backdrop-blur-sm">
+              <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+              <p className="mt-1 text-lg font-bold">{value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── 1. Executive Summary ── */}
+      <ReportSection title="1. Executive Summary">
+        <div className="grid gap-3 md:grid-cols-6">
+          <MiniMetric label="Health" value={healthLabel} tone={riskTone} />
+          <MiniMetric label="Completion" value={`${report.health.completionRate}%`} tone="green" />
+          <MiniMetric label="Active" value={activeTasks} tone="blue" />
+          <MiniMetric label="Overdue" value={report.health.overdueCount} tone={report.health.overdueCount ? "red" : "green"} />
+          <MiniMetric label="Risk Level" value={report.health.riskLevel} tone={riskTone} />
+          <MiniMetric label="Team Size" value={report.team.length} tone="purple" />
+        </div>
+        <ul className="mt-4 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+          {report.recommendations.map((item, i) => (
+            <li key={`rec-${i}`} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 leading-relaxed">{item}</li>
+          ))}
+        </ul>
+      </ReportSection>
+
+      <ReportSection title="2. Project Health Dashboard">
+        <div className="grid gap-3 md:grid-cols-5">
+          <MiniMetric label="Total Tasks" value={report.kpis.total} />
+          <MiniMetric label="Completed" value={report.kpis.completed} tone="green" />
+          <MiniMetric label="In Progress" value={report.kpis.inProgress} tone="blue" />
+          <MiniMetric label="Near Due" value={report.kpis.nearDue} tone="amber" />
+          <MiniMetric label="Overdue" value={report.kpis.overdue} tone={report.kpis.overdue ? "red" : "green"} />
+        </div>
+        <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_320px]">
+          <div className="space-y-2">
+            {report.statusDistribution.map((status) => (
+              <div key={status.label}>
+                <div className="mb-1 flex justify-between text-xs text-slate-500">
+                  <span>{status.label}</span>
+                  <span>{status.count}</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full rounded-full" style={{ width: `${report.kpis.total ? (status.count / report.kpis.total) * 100 : 0}%`, backgroundColor: status.color }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <MiniMetric label="Health Score" value={report.health.healthScore} tone={riskTone} />
+            <MiniMetric label="Progress Score" value={report.health.progressScore} tone="blue" />
+          </div>
+        </div>
+      </ReportSection>
+
+      <ReportSection title="3. Timeline Section">
+        <div className="space-y-2">
+          {report.timeline.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No active timeline risks.</div>
+          ) : (
+            report.timeline.map((task) => (
+              <div key={task.id} className="grid items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 md:grid-cols-[180px_1fr_120px]">
+                <span className="text-xs font-semibold text-slate-500">{task.dueDate}</span>
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">{task.title}</p>
+                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                    <div className="h-full rounded-full" style={{ width: task.statusKey === "overdue" ? "100%" : task.statusKey === "near_due" ? "78%" : "52%", backgroundColor: task.color }} />
+                  </div>
+                </div>
+                <span className="text-xs font-semibold" style={{ color: task.color }}>{task.status}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </ReportSection>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <ReportSection title="4. Team Contribution">
+          <TaskTeamTable rows={report.team} />
+        </ReportSection>
+
+        <ReportSection title="5. Resource Utilization">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <MiniMetric label="Avg Utilization" value={`${report.resource.averageUtilization}%`} tone="blue" />
+            <MiniMetric label="Overloaded" value={report.resource.overloaded.length} tone={report.resource.overloaded.length ? "red" : "green"} />
+            <MiniMetric label="Underutilized" value={report.resource.underutilized.length} tone="amber" />
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Overloaded Users</p>
+              <UserList rows={report.resource.overloaded} emptyLabel="No overloaded users" />
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Underutilized Users</p>
+              <UserList rows={report.resource.underutilized} emptyLabel="No underutilized users" />
+            </div>
+          </div>
+        </ReportSection>
+      </div>
+
+      {/* ── 6. Gantt Timeline ── */}
+      <ReportSection title="6. Gantt Timeline">
+        {report.gantt.tasks.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No tasks with date ranges.</div>
+        ) : (() => {
+          const start = new Date(report.gantt.rangeStart).getTime();
+          const end = new Date(report.gantt.rangeEnd).getTime();
+          const span = Math.max(1, end - start);
+          const months: { label: string; left: number }[] = [];
+          const cursor = new Date(report.gantt.rangeStart);
+          cursor.setDate(1);
+          while (cursor.getTime() <= end) {
+            const pos = Math.max(0, Math.min(100, ((cursor.getTime() - start) / span) * 100));
+            months.push({ label: cursor.toLocaleDateString(undefined, { month: "short", year: "numeric" }), left: pos });
+            cursor.setMonth(cursor.getMonth() + 1);
+          }
+          return (
+            <div className="overflow-x-auto">
+              <div style={{ minWidth: 900 }}>
+                <div className="flex border-b border-slate-200 pb-1 mb-2">
+                  <div className="w-[220px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Task</div>
+                  <div className="w-[90px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Owner</div>
+                  <div className="w-[70px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Status</div>
+                  <div className="flex-1 relative" style={{ minWidth: 400 }}>
+                    {months.map((m) => (
+                      <span key={m.label} className="absolute text-[9px] font-semibold text-slate-400 -top-0.5" style={{ left: `${m.left}%` }}>{m.label}</span>
+                    ))}
+                  </div>
+                </div>
+                {report.gantt.tasks.map((task, i) => (
+                  <div key={task.id} className={`flex items-center py-1.5 ${i % 2 === 0 ? "bg-white" : "bg-slate-50/60"} border-b border-slate-100`}>
+                    <div className="w-[220px] shrink-0 px-2 text-xs font-medium text-slate-900 break-words leading-tight" title={task.title}>{task.title}</div>
+                    <div className="w-[90px] shrink-0 px-2 text-[11px] text-slate-500 truncate" title={task.owner}>{task.owner}</div>
+                    <div className="w-[70px] shrink-0 px-2">
+                      <span className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ backgroundColor: `${task.color}18`, color: task.color }}>{task.status}</span>
+                    </div>
+                    <div className="flex-1 relative h-5" style={{ minWidth: 400 }}>
+                      {report.gantt.currentWeekLeft !== null && i === 0 && (
+                        <div className="absolute top-0 bottom-0 w-px bg-slate-900 z-10" style={{ left: `${report.gantt.currentWeekLeft}%` }} />
+                      )}
+                      <div className="absolute rounded-sm h-3 top-1" style={{ left: `${Math.max(0, Math.min(99, task.left))}%`, width: `${Math.max(1.5, Math.min(100 - task.left, task.width))}%`, backgroundColor: task.color }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </ReportSection>
+
+      {/* ── 7. Risk Register ── */}
+      <ReportSection title="7. Risk Register">
+        {(() => {
+          const allRisks = [
+            ...report.risks.overdue.map(t => ({ ...t, impact: "High schedule impact", severity: "High" as const })),
+            ...report.risks.nearDue.map(t => ({ ...t, impact: "Near-term delivery risk", severity: "Medium" as const })),
+            ...report.risks.stale.map(t => ({ ...t, impact: "Stale execution signal", severity: "Medium" as const })),
+            ...report.risks.inactive.map(t => ({ ...t, impact: "Inactive ownership", severity: "Low" as const })),
+          ];
+          if (allRisks.length === 0) return <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No risks identified.</div>;
+          return (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm table-fixed min-w-[700px]">
+                <thead className="bg-slate-50">
+                  <tr className="text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                    <th className="w-[30%] px-3 py-2">Risk</th>
+                    <th className="w-[22%] px-3 py-2">Impact</th>
+                    <th className="w-[12%] px-3 py-2">Severity</th>
+                    <th className="w-[18%] px-3 py-2">Owner</th>
+                    <th className="w-[18%] px-3 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allRisks.map((r) => (
+                    <tr key={r.id} className="border-t border-slate-100">
+                      <td className="px-3 py-2 font-medium text-slate-900 break-words" title={r.title}>{r.title}</td>
+                      <td className="px-3 py-2 text-slate-600 text-xs">{r.impact}</td>
+                      <td className="px-3 py-2"><span className={`inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold ${r.severity === "High" ? "bg-red-50 text-red-700" : r.severity === "Medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{r.severity}</span></td>
+                      <td className="px-3 py-2 text-slate-600 truncate" title={r.owner}>{r.owner}</td>
+                      <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${r.color}18`, color: r.color }}>{r.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
+      </ReportSection>
+
+      {/* ── 8. Action Tracker ── */}
+      <ReportSection title="8. Action Tracker">
+        {report.actions.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No immediate actions.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm table-fixed min-w-[600px]">
+              <thead className="bg-slate-50">
+                <tr className="text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                  <th className="w-[35%] px-3 py-2">Action</th>
+                  <th className="w-[20%] px-3 py-2">Owner</th>
+                  <th className="w-[18%] px-3 py-2">Due Date</th>
+                  <th className="w-[15%] px-3 py-2">Status</th>
+                  <th className="w-[12%] px-3 py-2">Priority</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.actions.map((t) => (
+                  <tr key={t.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-medium text-slate-900 break-words" title={t.title}>{t.title}</td>
+                    <td className="px-3 py-2 text-slate-600 truncate" title={t.owner}>{t.owner}</td>
+                    <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{t.dueDate}</td>
+                    <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${t.color}18`, color: t.color }}>{t.status}</span></td>
+                    <td className="px-3 py-2"><span className={`inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold ${t.priority === "High" ? "bg-red-50 text-red-700" : t.priority === "Medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{t.priority}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </ReportSection>
+
+      {/* ── 9. Upcoming Milestones ── */}
+      <ReportSection title="9. Upcoming Milestones">
+        {report.timeline.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No upcoming milestones.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm table-fixed min-w-[500px]">
+              <thead className="bg-slate-50">
+                <tr className="text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                  <th className="w-[35%] px-3 py-2">Task</th>
+                  <th className="w-[20%] px-3 py-2">Owner</th>
+                  <th className="w-[18%] px-3 py-2">Due Date</th>
+                  <th className="w-[15%] px-3 py-2">Status</th>
+                  <th className="w-[12%] px-3 py-2">Progress</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.timeline.map((t) => (
+                  <tr key={t.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-medium text-slate-900 break-words" title={t.title}>{t.title}</td>
+                    <td className="px-3 py-2 text-slate-600 truncate" title={t.owner}>{t.owner}</td>
+                    <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{t.dueDate}</td>
+                    <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${t.color}18`, color: t.color }}>{t.status}</span></td>
+                    <td className="px-3 py-2">
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-full rounded-full" style={{ width: t.statusKey === "overdue" ? "100%" : t.statusKey === "near_due" ? "78%" : "52%", backgroundColor: t.color }} />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </ReportSection>
+
+      {/* ── 10. Detailed Task Register ── */}
+      <ReportSection title="10. Detailed Task Register">
+        {report.taskRegister.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No tasks in register.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[1000px]">
+              <thead className="bg-slate-50">
+                <tr className="text-left text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                  <th className="px-2 py-2 w-[18%]">Task</th>
+                  <th className="px-2 py-2 w-[10%]">Owner</th>
+                  <th className="px-2 py-2 w-[8%]">Status</th>
+                  <th className="px-2 py-2 w-[6%]">Prog</th>
+                  <th className="px-2 py-2 w-[9%]">Start</th>
+                  <th className="px-2 py-2 w-[9%]">Due</th>
+                  <th className="px-2 py-2 w-[8%]">Time Left</th>
+                  <th className="px-2 py-2 w-[5%]">Cmts</th>
+                  <th className="px-2 py-2 w-[7%]">Priority</th>
+                  <th className="px-2 py-2 w-[20%]">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.taskRegister.map((t) => (
+                  <tr key={t.id} className="border-t border-slate-100 align-top">
+                    <td className="px-2 py-1.5 font-medium text-slate-900 break-words leading-tight" title={t.title}>{t.title}</td>
+                    <td className="px-2 py-1.5 text-slate-600 truncate" title={t.owner}>{t.owner}</td>
+                    <td className="px-2 py-1.5"><span className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ backgroundColor: `${t.color}18`, color: t.color }}>{t.status}</span></td>
+                    <td className="px-2 py-1.5 text-slate-600 tabular-nums">{t.progress}%</td>
+                    <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{t.startDate}</td>
+                    <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{t.dueDate}</td>
+                    <td className="px-2 py-1.5 font-semibold" style={{ color: t.color }}>{t.timeLeft}</td>
+                    <td className="px-2 py-1.5 text-slate-500 tabular-nums text-center">{t.comments}</td>
+                    <td className="px-2 py-1.5 text-slate-600">{t.priority}</td>
+                    <td className="px-2 py-1.5 text-slate-500 break-words leading-tight">{t.description.length > 80 ? `${t.description.slice(0, 80)}…` : t.description}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </ReportSection>
+
+      {/* ── 11. AI Recommendations ── */}
+      <ReportSection title="11. AI Recommendations">
+        <div className="grid gap-3 md:grid-cols-2">
+          {report.recommendations.map((item, index) => (
+            <div key={`ai-${index}`} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 overflow-hidden">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Recommendation {index + 1}</p>
+              <p className="mt-1.5 text-sm font-medium leading-relaxed text-slate-800 break-words">{item}</p>
+            </div>
+          ))}
+        </div>
+      </ReportSection>
+    </div>
+  );
+}
+
+function TaskTeamTable({ rows }: { rows: TeamContributionRow[] }) {
+  if (rows.length === 0) return <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No team contribution data.</div>;
+  return (
+    <div className="overflow-hidden rounded-lg border border-slate-200">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+          <tr>
+            <th className="px-3 py-2">User</th>
+            <th className="px-3 py-2">Completed</th>
+            <th className="px-3 py-2">Active</th>
+            <th className="px-3 py-2">Overdue</th>
+            <th className="px-3 py-2">Utilization</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.userId} className="border-t border-slate-100">
+              <td className="px-3 py-2 font-medium text-slate-900">{row.name}</td>
+              <td className="px-3 py-2 text-emerald-700">{row.completed}</td>
+              <td className="px-3 py-2 text-blue-700">{row.active}</td>
+              <td className="px-3 py-2 text-red-700">{row.overdue}</td>
+              <td className="px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-100">
+                    <div className="h-full rounded-full bg-blue-500" style={{ width: `${row.utilization}%` }} />
+                  </div>
+                  <span className="text-xs text-slate-600">{row.utilization}%</span>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function UserList({ rows, emptyLabel }: { rows: TeamContributionRow[]; emptyLabel: string }) {
+  if (rows.length === 0) return <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-400">{emptyLabel}</p>;
+  return (
+    <div className="space-y-2">
+      {rows.map((row) => (
+        <div key={row.userId} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
+          <span className="text-sm font-medium text-slate-800">{row.name}</span>
+          <span className="text-xs font-semibold text-slate-500">{row.utilization}%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function UserPerformanceReport({ report }: { report: UserPerformanceReportData }) {
+  return (
+    <div className="space-y-5">
+      <div className="rounded-xl border border-[#2d1460]/20 bg-[#24124d] p-5 text-white shadow-sm">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-violet-200">User Performance Report</p>
+        <div className="mt-2 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight">{report.userName}</h2>
+            <p className="mt-1 text-sm text-violet-100">{report.projectName}</p>
+          </div>
+          <p className="text-xs text-violet-200">Generated {formatDate(report.generatedAt)}</p>
+        </div>
+      </div>
+
+      <ReportSection title="1. Executive Summary">
+        <div className="grid gap-3 md:grid-cols-5">
+          <MiniMetric label="Completion" value={`${report.summary.completionRate}%`} tone="green" />
+          <MiniMetric label="Active Tasks" value={report.summary.activeTasks} tone="blue" />
+          <MiniMetric label="Overdue" value={report.summary.overdueTasks} tone={report.summary.overdueTasks ? "red" : "green"} />
+          <MiniMetric label="Near Due" value={report.summary.nearDueTasks} tone="amber" />
+          <MiniMetric label="Assignments" value={report.summary.totalAssignments} />
+        </div>
+      </ReportSection>
+
+      <ReportSection title="2. Work History">
+        <div className="overflow-hidden rounded-lg border border-slate-200">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+              <tr>
+                <th className="px-3 py-2">Task</th>
+                <th className="px-3 py-2">Assigned Date</th>
+                <th className="px-3 py-2">Due Date</th>
+                <th className="px-3 py-2">Completed Date</th>
+                <th className="px-3 py-2">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.workHistory.map((task) => (
+                <tr key={task.id} className="border-t border-slate-100">
+                  <td className="px-3 py-2 font-medium text-slate-900">{task.title}</td>
+                  <td className="px-3 py-2 text-slate-600">{task.assignedDate}</td>
+                  <td className="px-3 py-2 text-slate-600">{task.dueDate}</td>
+                  <td className="px-3 py-2 text-slate-600">{task.completedDate}</td>
+                  <td className="px-3 py-2">
+                    <span className="inline-flex rounded-md px-2 py-0.5 text-[11px] font-semibold" style={{ backgroundColor: `${task.color}18`, color: task.color }}>
+                      {task.status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              {report.workHistory.length === 0 && (
+                <tr><td colSpan={5} className="px-3 py-4 text-center text-sm text-slate-400">No assignments found.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </ReportSection>
+
+      <ReportSection title="3. Current Responsibilities">
+        <div className="grid gap-4 lg:grid-cols-3">
+          <TaskTable tasks={report.responsibilities.active} emptyLabel="No active tasks" />
+          <TaskTable tasks={report.responsibilities.nearDue} emptyLabel="No near due tasks" />
+          <TaskTable tasks={report.responsibilities.overdue} emptyLabel="No overdue tasks" />
+        </div>
+      </ReportSection>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <ReportSection title="4. Contribution Metrics">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <MiniMetric label="Completed" value={report.contribution.completedTasks} tone="green" />
+            <MiniMetric label="Comments" value={report.contribution.commentsAdded} tone="blue" />
+            <MiniMetric label="Activity Count" value={report.contribution.activityCount} />
+            <MiniMetric label="Assignments" value={report.contribution.assignmentsHandled} />
+          </div>
+        </ReportSection>
+
+        <ReportSection title="5. Workload Analysis">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <MiniMetric label="Utilization" value={`${report.workload.utilizationScore}%`} tone={report.workload.utilizationScore >= 85 ? "red" : "blue"} />
+            <MiniMetric label="Task Volume" value={report.workload.taskVolume} />
+          </div>
+          <ul className="mt-4 space-y-2">
+            {report.workload.bottlenecks.map((item) => (
+              <li key={item} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{item}</li>
+            ))}
+          </ul>
+        </ReportSection>
+      </div>
+
+      <ReportSection title="6. Comments & Live Chat Activity">
+        <div className="space-y-2">
+          {report.recentComments.map((item) => (
+            <div key={item.id} className="rounded-lg border border-slate-200 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-slate-500">{formatReportDate(item.createdAt)}</span>
+                <span className="text-xs font-semibold text-slate-700">{item.taskName}</span>
+              </div>
+              <p className="mt-1 text-sm leading-relaxed text-slate-600 break-words">{item.detail}</p>
+            </div>
+          ))}
+          {report.recentComments.length === 0 && <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No recent comments from this user.</div>}
+        </div>
+      </ReportSection>
+
+      <ReportSection title="7. Activity Timeline">
+        <div className="space-y-2">
+          {report.activityTimeline.map((item) => (
+            <div key={item.id} className="grid gap-2 rounded-lg border border-slate-200 px-3 py-2 md:grid-cols-[130px_120px_1fr]">
+              <span className="text-xs font-semibold text-slate-500">{formatReportDate(item.createdAt)}</span>
+              <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">{item.type}</span>
+              <div>
+                <p className="text-sm font-semibold text-slate-900">{item.taskName}</p>
+                <p className="text-xs text-slate-500">{item.detail}</p>
+              </div>
+            </div>
+          ))}
+          {report.activityTimeline.length === 0 && <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No recent activity.</div>}
+        </div>
+      </ReportSection>
+
+      <ReportSection title="8. AI Assessment">
+        <div className="grid gap-4 lg:grid-cols-3">
+          <AssessmentList title="Strengths" items={report.assessment.strengths} />
+          <AssessmentList title="Concerns" items={report.assessment.concerns} />
+          <AssessmentList title="Recommendations" items={report.assessment.recommendations} />
+        </div>
+      </ReportSection>
+    </div>
+  );
+}
+
+function AssessmentList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div>
+      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">{title}</p>
+      <div className="space-y-2">
+        {items.map((item) => (
+          <div key={item} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{item}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function ReportsPage() {
   const { profile, supabase } = useAppData();
@@ -257,13 +1206,15 @@ export default function ReportsPage() {
   const [logs, setLogs] = useState<AnalyticsLog[]>([]);
   const [assignees, setAssignees] = useState<AnalyticsAssignee[]>([]);
   const [users, setUsers] = useState<AnalyticsUser[]>([]);
-  const [projectMembers, setProjectMembers] = useState<{ project_id: string; user_id: string }[]>([]);
+  const [projectMembers, setProjectMembers] = useState<{ project_id: string; user_id: string; role?: string | null }[]>([]);
 
   // Activity feed
   const [comments, setComments] = useState<EnrichedComment[]>([]);
 
   // AI report
-  const [aiReport, setAiReport] = useState<string | null>(null);
+  const [aiReport, setAiReport] = useState<GeneratedAiReport | null>(null);
+  const [aiReportType, setAiReportType] = useState<"user" | "project">("user");
+  const [aiReportError, setAiReportError] = useState<string | null>(null);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
 
   // Report status filter
@@ -317,7 +1268,7 @@ export default function ReportsPage() {
       const [tasksRes, logsRes, assigneesRes, usersRes, commentsRes, pmRes] = await Promise.all([
         supabase
           .from("tasks")
-          .select("id, status, assigned_to, start_date, end_date, created_at, completed_at, project_id, title, description")
+          .select("id, status, assigned_to, start_date, end_date, created_at, updated_at, completed_at, project_id, title, description")
           .in("project_id", projectIds),
         supabase
           .from("task_logs")
@@ -337,7 +1288,7 @@ export default function ReportsPage() {
           .limit(200),
         supabase
           .from("project_members")
-          .select("project_id, user_id")
+          .select("project_id, user_id, role")
           .in("project_id", projectIds),
       ]);
 
@@ -347,7 +1298,7 @@ export default function ReportsPage() {
       setAssignees((assigneesRes.data ?? []) as AnalyticsAssignee[]);
       const allUsers = (usersRes.data ?? []) as AnalyticsUser[];
       setUsers(allUsers);
-      setProjectMembers((pmRes.data ?? []) as { project_id: string; user_id: string }[]);
+      setProjectMembers((pmRes.data ?? []) as { project_id: string; user_id: string; role?: string | null }[]);
 
       // Enrich comments
       const usersById = new Map(allUsers.map((u) => [u.id, u]));
@@ -559,83 +1510,349 @@ export default function ReportsPage() {
     if (!profile?.id) return;
     setIsGeneratingAi(true);
     setAiReport(null);
+    setAiReportError(null);
 
     try {
       const projectName = aiProjectFilter === "all"
         ? "All Projects"
         : allProjects.find((p) => p.id === aiProjectFilter)?.name ?? "Unknown";
 
-      let aiTasks = tasks as (AnalyticsTask & { project_id?: string; title?: string; assigned_to?: string | null; description?: string | null })[];
+      let aiTasks = tasks as ReportTaskWithDetails[];
       if (aiProjectFilter !== "all") {
         aiTasks = aiTasks.filter((t: any) => t.project_id === aiProjectFilter);
       }
 
-      const aiKpis = computeKPIs(aiTasks);
-      const aiOverdue = getOverdueTasks(aiTasks, users);
-      const aiStatusDist = computeStatusDistribution(aiTasks);
+      if (aiReportType === "user") {
+        if (aiProjectFilter === "all" || aiUserFilter === "all") {
+          setAiReportError("Select a project and user to generate a User Performance Report.");
+          return;
+        }
 
-      let userInsight = "";
-      if (aiUserFilter !== "all") {
-        const selectedUser = users.find((u) => u.id === aiUserFilter);
-        const userTasks = aiTasks.filter((t: any) => t.assigned_to === aiUserFilter);
-        const userKpis = computeKPIs(userTasks);
-        userInsight = `\nFOCUS ON USER: ${selectedUser?.name ?? "Unknown"} — ${userKpis.total} tasks, ${userKpis.completed} done, ${userKpis.overdue} overdue`;
-      }
+        const selectedUser = users.find((u) => u.id === aiUserFilter) ?? null;
+        const userName = selectedUser?.name ?? selectedUser?.email ?? "Unknown user";
+        const assignedTaskIds = new Set(assignees.filter((item) => item.user_id === aiUserFilter).map((item) => item.task_id));
+        const userTasks = aiTasks.filter((task) => task.assigned_to === aiUserFilter || assignedTaskIds.has(task.id));
+        const projectsById = new Map(allProjects.map((p) => [p.id, p]));
+        const reportUsersById = new Map(users.map((u) => [u.id, u]));
+        const userTaskItems = userTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+        const userReportKpis = computeReportKPIs(userTasks as ReportTask[]);
+        const activeItems = userTaskItems.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
+        const nearDueItems = userTaskItems.filter((task) => task.statusKey === "near_due");
+        const overdueItems = userTaskItems.filter((task) => task.statusKey === "overdue");
+        const completedItems = userTaskItems.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early");
+        const projectTaskIds = new Set(aiTasks.map((task) => task.id));
+        const userComments = comments.filter((comment) => comment.userId === aiUserFilter && projectTaskIds.has(comment.taskId));
+        const userLogs = (logs as (AnalyticsLog & { task_id?: string })[]).filter((log) => log.user_id === aiUserFilter && (!log.task_id || projectTaskIds.has(log.task_id)));
+        const recentComments: UserActivityItem[] = userComments.map((comment) => ({
+          id: `comment-${comment.id}`,
+          type: "comment",
+          detail: comment.content,
+          taskName: comment.taskName,
+          createdAt: comment.createdAt,
+        }));
+        const activityTimeline: UserActivityItem[] = [
+          ...userLogs.map((log) => {
+            const task = aiTasks.find((item) => item.id === log.task_id);
+            return {
+              id: `log-${log.id}`,
+              type: log.action === "moved" && log.to_status === "done" ? "completion" : log.action,
+              detail: log.action === "moved" ? `${friendlyStatus(log.from_status)} -> ${friendlyStatus(log.to_status)}` : friendlyStatus(log.action),
+              taskName: task?.title ?? "Unknown task",
+              createdAt: log.created_at,
+            };
+          }),
+          ...userComments.map((comment) => ({
+            id: `comment-${comment.id}`,
+            type: "comment",
+            detail: comment.content,
+            taskName: comment.taskName,
+            createdAt: comment.createdAt,
+          })),
+        ].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()).slice(0, 24);
+        const workloadRows = computeWorkload(aiTasks, assignees, users);
+        const maxWorkload = Math.max(1, ...workloadRows.map((row) => row.total));
+        const userWorkload = workloadRows.find((row) => row.userId === aiUserFilter);
+        const utilizationScore = clampScore(((userWorkload?.total ?? userTasks.length) / maxWorkload) * 100);
+        const bottlenecks = [
+          overdueItems.length > 0 ? `${overdueItems.length} overdue task ownership item${overdueItems.length === 1 ? "" : "s"}.` : null,
+          nearDueItems.length > 0 ? `${nearDueItems.length} near-due task${nearDueItems.length === 1 ? "" : "s"} require checkpointing.` : null,
+          utilizationScore >= 85 ? "High utilization may create delivery bottlenecks." : null,
+          activeItems.length === 0 ? "No active responsibilities currently assigned." : null,
+        ].filter((item): item is string => Boolean(item));
+        const fallbackAssessment = {
+          strengths: [
+            completedItems.length > 0 ? `Completed ${completedItems.length} assigned task${completedItems.length === 1 ? "" : "s"}.` : "Maintains visible assignment coverage.",
+            userComments.length > 0 ? `Contributed ${userComments.length} live update${userComments.length === 1 ? "" : "s"}.` : "No comment volume risk detected from available data.",
+          ],
+          concerns: [
+            overdueItems.length > 0 ? "Overdue ownership needs executive attention." : "No overdue ownership detected.",
+            utilizationScore >= 85 ? "Workload concentration is high." : "Workload is within manageable range.",
+          ],
+          recommendations: buildFallbackRecommendations({
+            overdueCount: overdueItems.length,
+            nearDueCount: nearDueItems.length,
+            staleCount: 0,
+            overloadedUsers: utilizationScore >= 85 ? 1 : 0,
+            completionRate: userReportKpis.completionRate,
+          }),
+        };
+        let assessment = fallbackAssessment;
 
-      const overdueDetails = aiOverdue.slice(0, 5).map((t: any) => {
-        const desc = t.description ? ` — ${t.description}` : "";
-        return `${t.title ?? "Untitled"}(${t.daysOverdue}d)${desc}`;
-      }).join("; ");
+        try {
+          const prompt = `Generate a user performance assessment for a PMO report. Return sections named Strengths, Concerns, Recommendations with concise bullet points only.
+User: ${userName}
+Project: ${projectName}
+Completion: ${userReportKpis.completionRate}%
+Active tasks: ${activeItems.length}
+Overdue tasks: ${overdueItems.length}
+Near due tasks: ${nearDueItems.length}
+Comments added: ${userComments.length}
+Utilization: ${utilizationScore}%`;
+          const res = await fetch("/api/ai/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt }),
+          });
+          const data = await res.json();
+          if (typeof data?.content === "string") {
+            const parsed = parseAiRecommendationText(data.content);
+            if (parsed.length > 0) {
+              assessment = {
+                strengths: parsed.slice(0, 2).length ? parsed.slice(0, 2) : fallbackAssessment.strengths,
+                concerns: parsed.slice(2, 4).length ? parsed.slice(2, 4) : fallbackAssessment.concerns,
+                recommendations: parsed.slice(4, 7).length ? parsed.slice(4, 7) : fallbackAssessment.recommendations,
+              };
+            }
+          }
+        } catch (assessmentError) {
+          console.warn("AI user assessment unavailable", assessmentError);
+        }
 
-      const reportPrompt = `You are generating an executive project report. Do NOT respond with JSON. Do NOT use markdown ** or *** syntax. Respond ONLY with clean HTML.
-
-Use: <h2> for sections, <strong> for bold, <p> for text, <ul><li> for lists, <span style="color:#10b981"> for green, <span style="color:#f59e0b"> for amber, <span style="color:#ef4444"> for red.
-
-Sections: Executive Summary, Health Assessment, Key Metrics, Risks & Blockers, Completed, Pending, Team Insights, Recommendations.
-
-PROJECT: ${projectName}${userInsight}
-Total: ${aiKpis.total}, Done: ${aiKpis.completed} (${aiKpis.completionRate}%), In Progress: ${aiKpis.inProgress}, Review: ${aiKpis.inReview}, Overdue: ${aiKpis.overdue}, Near Due: ${aiKpis.nearDue}
-Status: ${aiStatusDist.map(s => `${s.label}:${s.count}`).join(', ')}
-Overdue: ${aiOverdue.slice(0, 5).map((t: any) => `${t.title ?? "Untitled"}(${t.daysOverdue}d)`).join('; ') || 'None'}
-Overdue Details (include descriptions): ${overdueDetails || 'None'}
-
-Be concise and professional.`;
-
-      const res = await fetch("/api/ai/report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: reportPrompt }),
-      });
-
-      const data = await res.json();
-
-      if (data.error) {
-        setAiReport(data.error);
+        setAiReport({
+          type: "user",
+          data: {
+            userName,
+            projectName,
+            generatedAt: new Date().toISOString(),
+            summary: {
+              completionRate: userReportKpis.completionRate,
+              activeTasks: activeItems.length,
+              overdueTasks: overdueItems.length,
+              nearDueTasks: nearDueItems.length,
+              totalAssignments: userTasks.length,
+            },
+            workHistory: userTasks.map((task) => ({
+              ...toReportTaskItem(task, reportUsersById, projectsById),
+              assignedDate: formatReportDate(task.created_at),
+              completedDate: formatReportDate(task.completed_at),
+            })),
+            responsibilities: {
+              active: activeItems,
+              nearDue: nearDueItems,
+              overdue: overdueItems,
+            },
+            contribution: {
+              completedTasks: completedItems.length,
+              commentsAdded: userComments.length,
+              activityCount: activityTimeline.length,
+              assignmentsHandled: userTasks.length,
+            },
+            recentComments,
+            activityTimeline,
+            workload: {
+              utilizationScore,
+              taskVolume: userTasks.length,
+              bottlenecks: bottlenecks.length ? bottlenecks : ["No major workload bottlenecks detected from available data."],
+            },
+            assessment,
+          },
+        });
         return;
       }
 
-      let content = data?.content ?? "";
-      if (typeof content === "string") {
-        const trimmed = content.trim();
-        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-          try { const p = JSON.parse(trimmed); content = p.message ?? p.content ?? trimmed; } catch { /* not JSON */ }
+      const aiReportKpis = computeReportKPIs(aiTasks as ReportTask[]);
+      const aiStatusDist = computeReportStatusDistribution(aiTasks as ReportTask[]);
+      const projectsById = new Map(allProjects.map((p) => [p.id, p]));
+      const reportUsersById = new Map(users.map((u) => [u.id, u]));
+      const taskItems = aiTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+      const gantt = buildGanttPdfData(aiTasks, reportUsersById, projectsById);
+      const overdueItems = taskItems.filter((task) => task.statusKey === "overdue");
+      const nearDueItems = taskItems.filter((task) => task.statusKey === "near_due");
+      const staleItems = aiTasks.filter(isStaleReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+      const inactiveItems = aiTasks.filter(isInactiveReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+      const completedItems = taskItems.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early");
+      const inProgressItems = taskItems.filter((task) => task.statusKey === "in_progress");
+      const upcomingItems = taskItems
+        .filter((task) => task.statusKey === "not_started" || task.statusKey === "near_due")
+        .filter((task) => task.statusKey !== "overdue");
+      const taskRegister: DetailedTaskRegisterItem[] = aiTasks.map((task) => {
+        const statusKey = deriveReportStatus(task as ReportTask);
+        return {
+          ...toReportTaskItem(task, reportUsersById, projectsById),
+          progress: getDocumentProgress(statusKey),
+          startDate: formatReportDate(task.start_date ?? task.created_at),
+          timeLeft: getDocumentTimeLeft(task as ReportTask, statusKey),
+          comments: commentCounts[task.id] ?? 0,
+          description: task.description?.trim() || "No description provided.",
+          priority: getTaskPriority(statusKey),
+        };
+      });
+
+      const workloadRows = computeWorkload(aiTasks, assignees, users);
+      const maxWorkload = Math.max(1, ...workloadRows.map((row) => row.total));
+      const teamRows: TeamContributionRow[] = workloadRows.map((row) => ({
+        userId: row.userId,
+        name: row.name,
+        completed: row.completed,
+        active: Math.max(0, row.total - row.completed),
+        overdue: row.overdue,
+        total: row.total,
+        utilization: clampScore((row.total / maxWorkload) * 100),
+      }));
+      const averageUtilization = teamRows.length
+        ? clampScore(teamRows.reduce((sum, row) => sum + row.utilization, 0) / teamRows.length)
+        : 0;
+      const overloaded = teamRows.filter((row) => row.utilization >= 85 && row.active > 0);
+      const underutilized = teamRows.filter((row) => row.utilization <= 35);
+      const riskLevel = getRiskLevel(overdueItems.length, nearDueItems.length, staleItems.length);
+      const healthScore = clampScore(
+        100 - overdueItems.length * 12 - nearDueItems.length * 5 - staleItems.length * 4 + aiReportKpis.completionRate * 0.25,
+      );
+      const progressScore = clampScore(aiReportKpis.completionRate);
+      const healthLabel = riskLevel === "High" ? "At Risk" : riskLevel === "Medium" ? "Watch" : "Healthy";
+      const leads = aiProjectFilter === "all"
+        ? {
+            owner: "Portfolio view",
+            primaryLead: teamRows[0]?.name ?? "Not assigned",
+            supportingLeads: teamRows.slice(1, 4).map((row) => row.name),
+          }
+        : getProjectLeadInfo(aiProjectFilter, projectMembers, reportUsersById, teamRows);
+      const actionItems = taskRegister.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
+
+      let recommendations = buildFallbackRecommendations({
+        overdueCount: overdueItems.length,
+        nearDueCount: nearDueItems.length,
+        staleCount: staleItems.length,
+        overloadedUsers: overloaded.length,
+        completionRate: aiReportKpis.completionRate,
+      });
+
+      try {
+        const selectedUser = aiUserFilter !== "all" ? users.find((u) => u.id === aiUserFilter) : null;
+        const reportPrompt = `Generate PMO executive recommendations only. Return 5 concise bullet recommendations, no introduction.
+Project: ${projectName}
+Focus user: ${selectedUser?.name ?? "All users"}
+Completion: ${aiReportKpis.completionRate}%
+Overdue tasks: ${overdueItems.length}
+Near due tasks: ${nearDueItems.length}
+Stale tasks: ${staleItems.length}
+Overloaded users: ${overloaded.map((u) => u.name).join(", ") || "None"}
+Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.owner})`).join("; ") || "None"}`;
+
+        const res = await fetch("/api/ai/report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: reportPrompt }),
+        });
+        const data = await res.json();
+        if (typeof data?.content === "string") {
+          const parsed = parseAiRecommendationText(data.content);
+          if (parsed.length > 0) {
+            recommendations = parsed;
+          }
         }
-        content = content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
-        content = content.replace(/^### (.*$)/gm, '<h3 style="font-size:15px;font-weight:600;color:#1e293b;margin:16px 0 8px">$1</h3>');
-        content = content.replace(/^## (.*$)/gm, '<h2 style="font-size:18px;font-weight:700;color:#0f172a;margin:20px 0 8px">$1</h2>');
-        content = content.replace(/^# (.*$)/gm, '<h2 style="font-size:20px;font-weight:700;color:#0f172a;margin:24px 0 10px">$1</h2>');
-        content = content.replace(/^- (.*$)/gm, '<li style="margin-left:16px;margin-bottom:4px;color:#334155">$1</li>');
-        content = content.replace(/\n\n/g, '<div style="margin-top:12px"></div>');
-        content = content.replace(/\n/g, "<br/>");
+      } catch (recommendationError) {
+        console.warn("AI recommendations unavailable", recommendationError);
       }
-      setAiReport(content || "Failed to generate report.");
+
+      setAiReport({
+        type: "project",
+        data: {
+          projectName,
+          generatedAt: new Date().toISOString(),
+          leads,
+          health: {
+            label: healthLabel,
+            riskLevel,
+            healthScore,
+            progressScore,
+            completionRate: aiReportKpis.completionRate,
+            overdueCount: overdueItems.length,
+          },
+          kpis: {
+            total: aiReportKpis.total,
+            completed: aiReportKpis.completed + aiReportKpis.doneEarly,
+            inProgress: aiReportKpis.inProgress,
+            nearDue: aiReportKpis.nearDue,
+            overdue: aiReportKpis.overdue,
+          },
+          statusDistribution: aiStatusDist,
+          gantt,
+          timeline: taskItems
+            .filter((task) => task.statusKey === "overdue" || task.statusKey === "near_due" || task.statusKey === "in_progress"),
+          team: teamRows,
+          resource: {
+            averageUtilization,
+            overloaded,
+            underutilized,
+          },
+          risks: {
+            overdue: overdueItems,
+            nearDue: nearDueItems,
+            stale: staleItems,
+            inactive: inactiveItems,
+          },
+          actions: actionItems,
+          breakdown: {
+            completed: completedItems,
+            inProgress: inProgressItems,
+            overdue: overdueItems,
+            upcoming: upcomingItems,
+          },
+          taskRegister,
+          recommendations,
+        },
+      });
     } catch (err) {
       console.error("AI report error", err);
-      setAiReport("Failed to generate report. Please try again.");
+      setAiReport(null);
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, allProjects, tasks, users]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers]);
+
+  const exportAiReportPdf = useCallback(async () => {
+    if (!aiReport) {
+      setAiReportError("Generate a report before exporting PDF.");
+      return;
+    }
+
+    setAiReportError(null);
+    try {
+      const response = await fetch("/api/reports/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(aiReport),
+      });
+
+      if (!response.ok) {
+        throw new Error("PDF export failed");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = aiReport.type === "project" ? "executive-report.pdf" : "user-performance-report.pdf";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      console.error("PDF export error", exportError);
+      setAiReportError("Could not export PDF. Please try again.");
+    }
+  }, [aiReport]);
 
   // ── Tab buttons ───────────────────────────────
   const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
@@ -868,7 +2085,7 @@ Be concise and professional.`;
                     </div>
                   ) : (
                     <div className="mt-3 flex-1 min-h-0 overflow-y-auto pr-1 space-y-2">
-                      {overdueTasks.slice(0, 15).map((t: any) => (
+                      {overdueTasks.map((t: any) => (
                         <div
                           key={t.id}
                           className="flex items-center justify-between rounded-lg border border-red-100 bg-red-50/50 px-3 py-2"
@@ -1166,40 +2383,80 @@ Be concise and professional.`;
           {/* ═══ AI REPORT TAB ═══ */}
           {activeTab === "ai" && (
             <div className="space-y-5">
-              <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm">
-                <p className="text-sm font-semibold text-slate-900 mb-4">AI Executive Report</p>
-                <div className="flex flex-wrap items-end gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Project</label>
-                    <select value={aiProjectFilter} onChange={(e) => setAiProjectFilter(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-slate-300">
-                      <option value="all">All Projects</option>
-                      {allProjects.map((p) => <option key={p.id} value={p.id}>{p.name ?? "Unknown"}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">User</label>
-                    <select value={aiUserFilter} onChange={(e) => setAiUserFilter(e.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-slate-300">
-                      <option value="all">All Users</option>
-                      {filteredAiUsers.map((u) => <option key={u.id} value={u.id}>{u.name ?? u.email ?? "Unknown"}</option>)}
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void generateAiReport()}
-                    disabled={isGeneratingAi}
-                    className="flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
-                  >
-                    {isGeneratingAi ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                    {isGeneratingAi ? "Generating..." : "Generate Report"}
-                  </button>
+              <div className="overflow-hidden rounded-2xl border border-[#2d1460]/20 bg-white shadow-sm">
+                <div className="bg-[#24124d] px-5 py-4 text-white">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-violet-200">AI Reporting System V2</p>
+                  <h2 className="mt-1 text-xl font-bold tracking-tight">PMO Report Builder</h2>
                 </div>
+                <div className="grid gap-4 p-5 xl:grid-cols-[240px_1fr]">
+                  <div>
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Report Type</p>
+                    <div className="grid gap-2">
+                      {[
+                        { id: "user", label: "User Performance" },
+                        { id: "project", label: "Project Executive" },
+                      ].map((type) => (
+                        <button
+                          key={type.id}
+                          type="button"
+                          onClick={() => {
+                            setAiReportType(type.id as "user" | "project");
+                            setAiReport(null);
+                            setAiReportError(null);
+                          }}
+                          className={`rounded-lg border px-3 py-2 text-left text-sm font-semibold transition ${
+                            aiReportType === type.id
+                              ? "border-[#381a78] bg-[#381a78] text-white"
+                              : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                          }`}
+                        >
+                          {type.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_auto_auto] xl:items-end">
+                    <div>
+                      <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">Project</label>
+                      <select value={aiProjectFilter} onChange={(e) => { setAiProjectFilter(e.target.value); setAiReport(null); setAiReportError(null); }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-[#381a78]">
+                        <option value="all">{aiReportType === "user" ? "Select Project" : "All Projects"}</option>
+                        {allProjects.map((p) => <option key={p.id} value={p.id}>{p.name ?? "Unknown"}</option>)}
+                      </select>
+                    </div>
+                    {aiReportType === "user" && (
+                      <div>
+                        <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">User</label>
+                        <select value={aiUserFilter} onChange={(e) => { setAiUserFilter(e.target.value); setAiReport(null); setAiReportError(null); }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-[#381a78]">
+                          <option value="all">Select User</option>
+                          {filteredAiUsers.map((u) => <option key={u.id} value={u.id}>{u.name ?? u.email ?? "Unknown"}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void generateAiReport()}
+                      disabled={isGeneratingAi}
+                      className="flex h-10 items-center justify-center gap-2 rounded-xl bg-[#2d1460] px-5 text-sm font-medium text-white transition hover:bg-[#381a78] disabled:opacity-50"
+                    >
+                      {isGeneratingAi ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                      {isGeneratingAi ? "Generating..." : "Generate Report"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={exportAiReportPdf}
+                      disabled={!aiReport}
+                      className="flex h-10 items-center justify-center rounded-xl border border-[#2d1460]/30 bg-white px-5 text-sm font-semibold text-[#2d1460] transition hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Export PDF
+                    </button>
+                  </div>
+                </div>
+                {aiReportError && <div className="border-t border-red-100 bg-red-50 px-5 py-3 text-sm font-medium text-red-700">{aiReportError}</div>}
               </div>
 
 
               {aiReport && (
-                <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm">
-                  <div className="prose prose-sm prose-slate max-w-none [&_h2]:text-lg [&_h2]:font-bold [&_h2]:text-slate-900 [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-slate-800 [&_h3]:mt-4 [&_h3]:mb-2 [&_strong]:font-semibold [&_li]:ml-4 [&_li]:text-slate-700" dangerouslySetInnerHTML={{ __html: aiReport }} />
-                </div>
+                aiReport.type === "project" ? <ExecutiveReport report={aiReport.data} /> : <UserPerformanceReport report={aiReport.data} />
               )}
             </div>
           )}
