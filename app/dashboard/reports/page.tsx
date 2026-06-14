@@ -1722,10 +1722,10 @@ Utilization: ${utilizationScore}%`;
       const healthLabel = riskLevel === "High" ? "At Risk" : riskLevel === "Medium" ? "Watch" : "Healthy";
       const leads = aiProjectFilter === "all"
         ? {
-            owner: "Portfolio view",
-            primaryLead: teamRows[0]?.name ?? "Not assigned",
-            supportingLeads: teamRows.slice(1, 4).map((row) => row.name),
-          }
+          owner: "Portfolio view",
+          primaryLead: teamRows[0]?.name ?? "Not assigned",
+          supportingLeads: teamRows.slice(1, 4).map((row) => row.name),
+        }
         : getProjectLeadInfo(aiProjectFilter, projectMembers, reportUsersById, teamRows);
       const actionItems = taskRegister.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
 
@@ -1928,11 +1928,10 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
-                active
+              className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${active
                   ? "bg-white text-slate-900 shadow-sm"
                   : "text-slate-500 hover:text-slate-700"
-              }`}
+                }`}
             >
               <Icon size={15} />
               {tab.label}
@@ -2404,11 +2403,10 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
                             setAiReport(null);
                             setAiReportError(null);
                           }}
-                          className={`rounded-lg border px-3 py-2 text-left text-sm font-semibold transition ${
-                            aiReportType === type.id
+                          className={`rounded-lg border px-3 py-2 text-left text-sm font-semibold transition ${aiReportType === type.id
                               ? "border-[#381a78] bg-[#381a78] text-white"
                               : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-                          }`}
+                            }`}
                         >
                           {type.label}
                         </button>

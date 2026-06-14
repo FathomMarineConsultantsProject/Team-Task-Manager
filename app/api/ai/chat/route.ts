@@ -11,6 +11,8 @@ type StructuredAiResponse = {
   partial_data?: Record<string, unknown>;
 };
 
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
+
 function tryParseJson(value: string): unknown | null {
   try {
     return JSON.parse(value);
@@ -45,6 +47,21 @@ function extractJsonFromText(text: string): unknown | null {
 
 function stripJsonCodeBlocks(text: string): string {
   return text.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
+}
+
+function stripUuidText(text: string): string {
+  return text.replace(UUID_PATTERN, "").replace(/\s+\)/g, ")").replace(/\(\s*\)/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
+function sanitizeStringFields(value: unknown): unknown {
+  if (typeof value === "string") return stripUuidText(value);
+  if (Array.isArray(value)) return value.map(sanitizeStringFields);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, sanitizeStringFields(nested)]),
+    );
+  }
+  return value;
 }
 
 function fallbackMessageForAction(action: string): string {
@@ -131,31 +148,31 @@ When a user asks you to create a task, extract these fields:
 - title (required): a clear, concise task title
 - description: short task description when provided or requested
 - status: one of "todo", "in_progress", "in_review", "done" (default: "todo")
-- assignee_id: the UUID of the person to assign (match name against project members). Use the ID, not the name.
+- assignee_ref: the member reference from PROJECT MEMBERS, or null
 - assignee_name: the display name of the matched assignee
 - start_date: YYYY-MM-DD format or null
 - end_date: YYYY-MM-DD format or null
 
 When a user asks you to update a task description, extract:
-- task_id: the ID of the matched task
-- task_name: which task to update (if task_id is missing, try to match by name)
+- task_ref: the task reference from EXISTING TASKS, or null
+- task_name: which task to update
 - description: the new description text
 
 When a user asks to add a comment/update, extract:
 - task_name: which task to comment on (fuzzy match against existing tasks)
-- task_id: the ID of the matched task
+- task_ref: the task reference from EXISTING TASKS, or null
 - content: the comment text
 
 RESPOND WITH VALID JSON ONLY. Use one of these formats:
 
 1. Task creation (when you have enough info):
-{"action": "create_task", "data": {"title": "...", "description": "...", "status": "todo", "assignee_id": "uuid-or-null", "assignee_name": "Name or null", "start_date": "YYYY-MM-DD or null", "end_date": "YYYY-MM-DD or null"}, "message": "I'll create this task for you."}
+{"action": "create_task", "data": {"title": "...", "description": "...", "status": "todo", "assignee_ref": "member_1-or-null", "assignee_name": "Name or null", "start_date": "YYYY-MM-DD or null", "end_date": "YYYY-MM-DD or null"}, "message": "I'll create this task for you."}
 
 2. Comment addition:
-{"action": "add_comment", "data": {"task_name": "...", "task_id": "uuid-or-null", "content": "..."}, "message": "I'll add this comment."}
+{"action": "add_comment", "data": {"task_name": "...", "task_ref": "task_1-or-null", "content": "..."}, "message": "I'll add this comment."}
 
 3. Description update:
-{"action": "update_description", "data": {"task_id": "uuid-or-null", "task_name": "...", "description": "..."}, "message": "I'll update the task description."}
+{"action": "update_description", "data": {"task_ref": "task_1-or-null", "task_name": "...", "description": "..."}, "message": "I'll update the task description."}
 
 4. If you need more information (PROACTIVELY ask about missing details):
 {"action": "clarify", "questions": ["What should the deadline be?", "Who should this be assigned to?"], "message": "I need a few more details before creating this task.", "partial_data": {"title": "...", "status": "todo"}}
@@ -165,10 +182,12 @@ RESPOND WITH VALID JSON ONLY. Use one of these formats:
 
 BEHAVIOR RULES:
 - If the user mentions a task title but no assignee or dates, ASK who to assign it to and what the deadline should be before creating
-- If you can match an assignee name to a project member, use their ID
+- If you can match an assignee name to a project member, use their member reference
+- When user says me, my tasks, assigned to me, my project, use CURRENT USER automatically and never ask for the user's name.
 - If dates are ambiguous, ask for clarification
 - Be proactive about filling in missing details
 - When creating tasks, show what column/status it will be in
+- Never include user IDs, task IDs, project IDs, database IDs, or UUIDs in message text
 - Keep responses concise and helpful`;
 }
 
@@ -189,8 +208,21 @@ export async function POST(req: Request) {
       context?: {
         projectName?: string;
         projectId?: string;
+        currentUser?: {
+          id: string;
+          name: string | null;
+          email: string | null;
+          role: string | null;
+        };
         members?: { name: string; id: string }[];
-        tasks?: { title: string; status: string; id: string; description?: string | null; end_date?: string | null }[];
+        tasks?: {
+          title: string;
+          status: string;
+          id: string;
+          description?: string | null;
+          end_date?: string | null;
+          assigned_to?: string | null;
+        }[];
       };
       history?: Message[];
     };
@@ -201,18 +233,39 @@ export async function POST(req: Request) {
 
     // Build context string — limit data to avoid token waste
     let contextStr = "";
+    const memberRefs = new Map<string, string>();
+    const taskRefs = new Map<string, string>();
+
     if (context) {
-      contextStr += `\n\nCURRENT PROJECT: "${context.projectName ?? "Unknown"}" (ID: ${context.projectId ?? "none"})\n`;
+      const currentUserName = context.currentUser?.name ?? context.currentUser?.email ?? "Unknown";
+
+      contextStr += `\n\nCURRENT PROJECT: "${context.projectName ?? "Unknown"}"\n`;
+      if (context.currentUser) {
+        contextStr += `\nCURRENT USER:\n- Name: ${currentUserName}\n- Email: ${context.currentUser.email ?? "Not listed"}\n- Role: ${context.currentUser.role ?? "Not specified"}\n`;
+      }
+
       if (context.members?.length) {
         const limitedMembers = context.members.slice(0, 15);
-        contextStr += `\nPROJECT MEMBERS (use these IDs for assignee_id):\n${limitedMembers.map(m => `- ${m.name} (id: ${m.id})`).join("\n")}\n`;
+        limitedMembers.forEach((member, index) => {
+          memberRefs.set(`member_${index + 1}`, member.id);
+        });
+        contextStr += `\nPROJECT MEMBERS (use these references for assignee_ref):\n${limitedMembers.map((m, index) => {
+          const currentMarker = m.id === context.currentUser?.id ? " (CURRENT USER)" : "";
+          return `- member_${index + 1}: ${m.name}${currentMarker}`;
+        }).join("\n")}\n`;
       }
       if (context.tasks?.length) {
         const limitedTasks = context.tasks.slice(0, 20);
-        contextStr += `\nEXISTING TASKS (use these IDs for task_id):\n${limitedTasks.map(t => {
+        const membersById = new Map((context.members ?? []).map((member) => [member.id, member.name]));
+        limitedTasks.forEach((task, index) => {
+          taskRefs.set(`task_${index + 1}`, task.id);
+        });
+        contextStr += `\nEXISTING TASKS (use these references for task_ref):\n${limitedTasks.map((t, index) => {
           const desc = t.description ? ` — ${t.description}` : "";
           const due = t.end_date ? ` (due ${t.end_date})` : "";
-          return `- "${t.title}" [${t.status}]${due} (id: ${t.id})${desc}`;
+          const assigneeName = t.assigned_to ? membersById.get(t.assigned_to) ?? "Assigned member" : "Unassigned";
+          const currentMarker = t.assigned_to && t.assigned_to === context.currentUser?.id ? " (assigned to CURRENT USER)" : "";
+          return `- task_${index + 1}: "${t.title}" [${t.status}]${due}; assignee: ${assigneeName}${currentMarker}${desc}`;
         }).join("\n")}\n`;
         if (context.tasks.length > 20) {
           contextStr += `(... and ${context.tasks.length - 20} more tasks)\n`;
@@ -236,6 +289,29 @@ export async function POST(req: Request) {
     );
 
     const normalized = normalizeStructuredResponse(result.content);
+
+    if (normalized.data?.assignee_ref && typeof normalized.data.assignee_ref === "string") {
+      normalized.data.assignee_id = memberRefs.get(normalized.data.assignee_ref) ?? null;
+      delete normalized.data.assignee_ref;
+    }
+
+    if (normalized.data?.assignee_id && typeof normalized.data.assignee_id === "string" && memberRefs.has(normalized.data.assignee_id)) {
+      normalized.data.assignee_id = memberRefs.get(normalized.data.assignee_id) ?? null;
+    }
+
+    if (normalized.data?.task_ref && typeof normalized.data.task_ref === "string") {
+      normalized.data.task_id = taskRefs.get(normalized.data.task_ref) ?? null;
+      delete normalized.data.task_ref;
+    }
+
+    if (normalized.data?.task_id && typeof normalized.data.task_id === "string" && taskRefs.has(normalized.data.task_id)) {
+      normalized.data.task_id = taskRefs.get(normalized.data.task_id) ?? null;
+    }
+
+    normalized.message = stripUuidText(normalized.message);
+    normalized.questions = sanitizeStringFields(normalized.questions) as string[] | undefined;
+    normalized.partial_data = sanitizeStringFields(normalized.partial_data) as Record<string, unknown> | undefined;
+
     return NextResponse.json({ result: normalized });
   } catch (err) {
     console.error("AI chat error:", err);

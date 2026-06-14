@@ -6,6 +6,8 @@ import Avatar from "@/components/ui/Avatar";
 import Button from "@/components/ui/button";
 import { useAppData } from "@/components/providers/AppDataProvider";
 
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
+
 type AiMessage = {
   id: string;
   role: "user" | "assistant";
@@ -20,18 +22,38 @@ type AiMessage = {
 type AiContext = {
   projectName?: string;
   projectId?: string;
+  currentUser?: {
+    id: string;
+    name: string | null;
+    email: string | null;
+    role: string | null;
+  };
   members?: { name: string; id: string }[];
-  tasks?: { title: string; status: string; id: string; description?: string | null; end_date?: string | null }[];
+  tasks?: {
+    title: string;
+    status: string;
+    id: string;
+    description?: string | null;
+    end_date?: string | null;
+    assigned_to?: string | null;
+  }[];
 };
 
 interface AiAssistantPanelProps {
   isOpen: boolean;
   onClose: () => void;
   context?: AiContext;
-  onTaskCreated?: () => void;
+  onTaskCreated?: (payload?: { projectId: string; taskId?: string }) => void;
   onCommentAdded?: () => void;
   onTaskUpdated?: () => void;
 }
+
+const WELCOME_MESSAGE: AiMessage = {
+  id: "welcome",
+  role: "assistant",
+  content:
+    "Hi! I'm your AI task assistant. I can help you:\n\n• **Create tasks** — \"Create a task to fix the login bug, assign to John, due next Friday\"\n• **Add comments** — \"Add a comment on the design review task saying we need mockups\"\n• **Answer questions** — \"What tasks are in progress?\"\n\nWhat would you like to do?",
+};
 
 /**
  * Defensively extract a structured AI result from potentially malformed data.
@@ -72,6 +94,52 @@ function extractJsonFromText(text: string): unknown | null {
 
 function stripJsonCodeBlocks(text: string): string {
   return text.replace(/```(?:json)?\s*[\s\S]*?```/gi, "").trim();
+}
+
+function stripUuidText(text: string): string {
+  return text.replace(UUID_PATTERN, "").replace(/\s+\)/g, ")").replace(/\(\s*\)/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
+function getChatStorageKey(userId?: string | null, projectId?: string | null): string | null {
+  if (!userId || !projectId) return null;
+  return `ai-chat:${userId}:${projectId}`;
+}
+
+function loadStoredMessages(key: string): AiMessage[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [WELCOME_MESSAGE];
+
+    const parsed = JSON.parse(raw) as AiMessage[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return [WELCOME_MESSAGE];
+
+    return parsed.map((message) => ({
+      ...message,
+      content: stripUuidText(String(message.content ?? "")),
+    }));
+  } catch {
+    return [WELCOME_MESSAGE];
+  }
+}
+
+function sanitizeMessageForStorage(message: AiMessage): AiMessage {
+  const data = message.data ? { ...message.data } : undefined;
+  if (data) {
+    delete data.assignee_id;
+    delete data.task_id;
+    delete data.project_id;
+    Object.keys(data).forEach((key) => {
+      if (typeof data[key] === "string") {
+        data[key] = stripUuidText(data[key]);
+      }
+    });
+  }
+
+  return {
+    ...message,
+    content: stripUuidText(message.content),
+    data,
+  };
 }
 
 function fallbackMessageForAction(action: string): string {
@@ -151,7 +219,7 @@ function sanitizeForHistory(content: string): string {
       return msg;
     }
   }
-  return stripJsonCodeBlocks(content) || content;
+  return stripUuidText(stripJsonCodeBlocks(content) || content);
 }
 
 export default function AiAssistantPanel({
@@ -163,20 +231,41 @@ export default function AiAssistantPanel({
   onTaskUpdated,
 }: AiAssistantPanelProps) {
   const { supabase, profile } = useAppData();
-  const [messages, setMessages] = useState<AiMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content:
-        "Hi! I'm your AI task assistant. I can help you:\n\n• **Create tasks** — \"Create a task to fix the login bug, assign to John, due next Friday\"\n• **Add comments** — \"Add a comment on the design review task saying we need mockups\"\n• **Answer questions** — \"What tasks are in progress?\"\n\nWhat would you like to do?",
-    },
-  ]);
+  const [messages, setMessages] = useState<AiMessage[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState<AiMessage | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const hasLoadedStoredMessagesRef = useRef(false);
+  const skipNextSaveRef = useRef(false);
+  const storageKey = getChatStorageKey(profile?.id, context?.projectId);
+
+  useEffect(() => {
+    hasLoadedStoredMessagesRef.current = false;
+
+    if (!storageKey) {
+      setMessages([WELCOME_MESSAGE]);
+      setPendingAction(null);
+      hasLoadedStoredMessagesRef.current = true;
+      return;
+    }
+
+    skipNextSaveRef.current = true;
+    setMessages(loadStoredMessages(storageKey));
+    setPendingAction(null);
+    hasLoadedStoredMessagesRef.current = true;
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!storageKey || !hasLoadedStoredMessagesRef.current) return;
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return;
+    }
+    localStorage.setItem(storageKey, JSON.stringify(messages.map(sanitizeMessageForStorage)));
+  }, [messages, storageKey]);
 
   // Auto-scroll
   useEffect(() => {
@@ -245,7 +334,7 @@ export default function AiAssistantPanel({
       const aiMsg: AiMessage = {
         id: `ai-${Date.now()}`,
         role: "assistant",
-        content: result.message,
+        content: stripUuidText(result.message),
         action: result.action,
         data: result.data,
         questions: result.questions,
@@ -313,16 +402,20 @@ export default function AiAssistantPanel({
         }
 
         const description = typeof d.description === "string" ? d.description.trim() : null;
-        const { error } = await supabase.from("tasks").insert({
-          title: d.title,
-          description: description || null,
-          status: d.status ?? "todo",
-          project_id: pid,
-          assigned_to: assigneeId ?? null,
-          start_date: d.start_date ?? null,
-          end_date: d.end_date ?? null,
-          created_by: profile.id,
-        });
+        const { data: createdTask, error } = await supabase
+          .from("tasks")
+          .insert({
+            title: d.title,
+            description: description || null,
+            status: d.status ?? "todo",
+            project_id: pid,
+            assigned_to: assigneeId ?? null,
+            start_date: d.start_date ?? null,
+            end_date: d.end_date ?? null,
+            created_by: profile.id,
+          })
+          .select("id")
+          .single();
 
         if (error) {
           console.error("Task creation error:", error);
@@ -339,7 +432,7 @@ export default function AiAssistantPanel({
           },
         ]);
         setPendingAction(null);
-        onTaskCreated?.();
+        onTaskCreated?.({ projectId: pid, taskId: createdTask?.id });
       } else if (pendingAction.action === "add_comment") {
         const d = pendingAction.data;
 
@@ -454,7 +547,7 @@ export default function AiAssistantPanel({
     } finally {
       setIsExecuting(false);
     }
-  }, [pendingAction, profile?.id, context, supabase, onTaskCreated, onCommentAdded]);
+  }, [pendingAction, profile?.id, context, supabase, onTaskCreated, onCommentAdded, onTaskUpdated]);
 
   const cancelAction = useCallback(() => {
     setPendingAction(null);
@@ -516,6 +609,7 @@ export default function AiAssistantPanel({
             >
               <div className="whitespace-pre-wrap" dangerouslySetInnerHTML={{
                 __html: msg.content
+                  .replace(UUID_PATTERN, "")
                   .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
                   .replace(/\n/g, "<br/>")
               }} />
@@ -527,7 +621,7 @@ export default function AiAssistantPanel({
                     Task Preview
                   </p>
                   <p className="mt-1 font-semibold">{String(msg.data.title ?? "")}</p>
-                  {msg.data.description && (
+                  {Boolean(msg.data.description) && (
                     <p className="mt-1 text-xs text-slate-600 whitespace-pre-wrap">
                       {String(msg.data.description)}
                     </p>
@@ -536,17 +630,17 @@ export default function AiAssistantPanel({
                     <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
                       {String(msg.data.status ?? "todo").replace(/_/g, " ").toUpperCase()}
                     </span>
-                    {(msg.data.assignee_name || msg.data.assignee_id) && (
+                    {Boolean(msg.data.assignee_name) && (
                       <span className="rounded-full bg-blue-50 px-2 py-0.5 text-blue-600">
-                        → {String(msg.data.assignee_name ?? "Assigned")}
+                        → {stripUuidText(String(msg.data.assignee_name ?? "Assigned"))}
                       </span>
                     )}
-                    {msg.data.start_date && (
+                    {Boolean(msg.data.start_date) && (
                       <span className="rounded-full bg-green-50 px-2 py-0.5 text-green-600">
                         Start: {String(msg.data.start_date)}
                       </span>
                     )}
-                    {msg.data.end_date && (
+                    {Boolean(msg.data.end_date) && (
                       <span className="rounded-full bg-amber-50 px-2 py-0.5 text-amber-600">
                         Due: {String(msg.data.end_date)}
                       </span>
@@ -562,7 +656,7 @@ export default function AiAssistantPanel({
                     Comment Preview
                   </p>
                   <p className="mt-1 text-xs text-slate-500">
-                    On: {String(msg.data.task_name ?? "")}
+                    On: {stripUuidText(String(msg.data.task_name ?? ""))}
                   </p>
                   <p className="mt-1 text-sm">{String(msg.data.content ?? "")}</p>
                 </div>
@@ -574,7 +668,7 @@ export default function AiAssistantPanel({
                     Description Update
                   </p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Task: {String(msg.data.task_name ?? msg.data.task_id ?? "")}
+                    Task: {stripUuidText(String(msg.data.task_name ?? "Selected task"))}
                   </p>
                   <p className="mt-1 text-sm whitespace-pre-wrap">{String(msg.data.description ?? "")}</p>
                 </div>

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Modal from "@/components/ui/modal";
 import ChatPanel from "@/components/ui/ChatPanel";
+import TaskAttachments from "@/components/tasks/TaskAttachments";
 
 export type TaskDetailsSeed = {
   id: string;
@@ -29,6 +30,8 @@ type TaskDetailsState = Required<Omit<TaskDetailsSeed, "assignees" | "assignee" 
   endDate: string | null;
   creator: { id: string | null; name: string | null; email: string | null } | null;
   description: string | null;
+  /** The user ID who created this task (loaded from DB) */
+  createdById: string | null;
 };
 
 type TaskDetailsRow = {
@@ -112,12 +115,17 @@ type ProjectMemberRow = {
 
 type SupabaseClient = {
   from: (table: string) => any;
+  storage: { from: (bucket: string) => any };
 };
 
 type WorkflowOptions = {
   supabase: SupabaseClient;
   profileId: string | null;
   members: TaskDetailMember[];
+  /** The owner_id of the project (used for attachment permissions) */
+  projectOwnerId?: string | null;
+  /** Whether the current user is an admin/super_admin */
+  isAdmin?: boolean;
 };
 
 const formatDateLabel = (value: string | null | undefined) => {
@@ -191,7 +199,7 @@ const describeLog = (log: TaskLogEntry) => {
   return "Task updated";
 };
 
-export function useTaskDetailsWorkflow({ supabase, profileId, members }: WorkflowOptions) {
+export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOwnerId, isAdmin }: WorkflowOptions) {
   const [selectedTaskDetails, setSelectedTaskDetails] = useState<TaskDetailsState | null>(null);
   const [taskLogs, setTaskLogs] = useState<TaskLogEntry[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -210,6 +218,28 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members }: Workflo
     });
     return [...merged.values()];
   }, [members, projectMembers]);
+
+  // ---- Attachment permission computation ----
+  const attachmentPermissions = useMemo(() => {
+    if (!profileId || !selectedTaskDetails) {
+      return { canUpload: false, canDeleteAll: false };
+    }
+
+    const isProjectOwner = Boolean(projectOwnerId && projectOwnerId === profileId);
+    const isProjectLead = isProjectOwner; // In this app, project owner = lead
+    const isTaskCreator = Boolean(selectedTaskDetails.createdById && selectedTaskDetails.createdById === profileId);
+    const isTaskAssignee =
+      selectedTaskDetails.assignees?.some((a) => a.id === profileId) ?? false;
+    const isAdminUser = isAdmin ?? false;
+
+    // Upload: Project Owner, Project Lead, Task Creator, Task Assignee
+    const canUpload = isProjectOwner || isProjectLead || isTaskCreator || isTaskAssignee || isAdminUser;
+
+    // Delete all: Project Owner, Project Lead (uploader can always delete their own — handled in component)
+    const canDeleteAll = isProjectOwner || isProjectLead || isAdminUser;
+
+    return { canUpload, canDeleteAll };
+  }, [profileId, selectedTaskDetails, projectOwnerId, isAdmin]);
 
   const closeTaskDetails = useCallback(() => {
     setSelectedTaskDetails(null);
@@ -231,6 +261,7 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members }: Workflo
       endDate: seed.endDate ?? null,
       creator: seed.creator ?? null,
       description: seed.description ?? null,
+      createdById: null, // Will be loaded from DB
     });
   }, []);
 
@@ -286,6 +317,7 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members }: Workflo
           startDate: taskDetails?.start_date ?? prev.startDate,
           endDate: taskDetails?.end_date ?? prev.endDate,
           projectId: taskDetails?.project_id ?? prev.projectId,
+          createdById: taskDetails?.created_by ?? prev.createdById,
         };
       });
 
@@ -599,6 +631,15 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members }: Workflo
                 </div>
               </div>
             </div>
+
+            {/* Attachments — with permissions */}
+            <TaskAttachments
+              supabase={supabase}
+              taskId={selectedTaskDetails.id}
+              profileId={profileId}
+              canUpload={attachmentPermissions.canUpload}
+              canDeleteAll={attachmentPermissions.canDeleteAll}
+            />
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>

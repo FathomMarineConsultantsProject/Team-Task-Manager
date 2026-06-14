@@ -34,8 +34,21 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [aiContext, setAiContext] = useState<{
     projectName?: string;
     projectId?: string;
+    currentUser?: {
+      id: string;
+      name: string | null;
+      email: string | null;
+      role: string | null;
+    };
     members?: { name: string; id: string }[];
-    tasks?: { title: string; status: string; id: string; description?: string | null; end_date?: string | null }[];
+    tasks?: {
+      title: string;
+      status: string;
+      id: string;
+      description?: string | null;
+      end_date?: string | null;
+      assigned_to?: string | null;
+    }[];
   } | undefined>(undefined);
 
   const loadAiContext = useCallback(async () => {
@@ -53,38 +66,60 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           .eq("project_id", projectId),
         supabase
           .from("tasks")
-          .select("id, title, status, description, end_date")
+          .select("id, title, status, description, end_date, assigned_to")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false })
           .limit(50),
       ]);
 
       const projectName = (projectRes.data as { name: string } | null)?.name ?? "Unknown";
-      const memberRows = (membersRes.data ?? []) as { user_id: string; user: { id: string; name: string | null; email: string | null } | null }[];
-      const taskRows = (tasksRes.data ?? []) as { id: string; title: string | null; status: string | null; description?: string | null; end_date?: string | null }[];
+      const memberRows = (membersRes.data ?? []) as unknown as {
+        user_id: string;
+        user: { id: string; name: string | null; email: string | null } | { id: string; name: string | null; email: string | null }[] | null;
+      }[];
+      const taskRows = (tasksRes.data ?? []) as {
+        id: string;
+        title: string | null;
+        status: string | null;
+        description?: string | null;
+        end_date?: string | null;
+        assigned_to?: string | null;
+      }[];
 
       setAiContext({
         projectId,
         projectName,
+        currentUser: profile
+          ? {
+              id: profile.id,
+              name: profile.name,
+              email: profile.email,
+              role: profile.job_role ?? profile.system_role ?? profile.role,
+            }
+          : undefined,
         members: memberRows
           .filter(m => m.user)
-          .map(m => ({
-            name: m.user!.name ?? m.user!.email ?? "Unknown",
-            id: m.user!.id,
-          })),
+          .map(m => {
+            const user = Array.isArray(m.user) ? m.user[0] : m.user;
+            return {
+              name: user?.name ?? user?.email ?? "Unknown",
+              id: user?.id ?? m.user_id,
+            };
+          }),
         tasks: taskRows.map(t => ({
           id: t.id,
           title: t.title ?? "Untitled",
           status: t.status ?? "todo",
           description: t.description ?? null,
           end_date: t.end_date ?? null,
+          assigned_to: t.assigned_to ?? null,
         })),
       });
     } catch (err) {
       console.error("Failed to load AI context", err);
       setAiContext(undefined);
     }
-  }, [projectId, supabase]);
+  }, [profile, projectId, supabase]);
 
   useEffect(() => {
     void loadAiContext();
@@ -139,7 +174,17 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         isOpen={isAiOpen}
         onClose={() => setIsAiOpen(false)}
         context={aiContext}
-        onTaskCreated={() => void loadAiContext()}
+        onTaskCreated={(payload) => {
+          void loadAiContext();
+
+          if (payload?.projectId) {
+            window.dispatchEvent(
+              new CustomEvent("ai-task-created", {
+                detail: payload,
+              }),
+            );
+          }
+        }}
         onCommentAdded={() => void loadAiContext()}
         onTaskUpdated={() => void loadAiContext()}
       />

@@ -2,7 +2,8 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X } from "lucide-react";
+import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown } from "lucide-react";
+import { useExportTasks } from "@/lib/useExportTasks";
 import BoardColumn from "@/components/board/BoardColumn";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
@@ -12,6 +13,9 @@ import MentionTextarea, { RenderMentionText, encodeMentionsForDatabase } from "@
 import type { ColumnId, Task } from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
 import { createEmptyColumns } from "@/lib/data";
+import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
+import type { PendingAttachment } from "@/components/tasks/CreateTaskAttachments";
+import TaskAttachments from "@/components/tasks/TaskAttachments";
 
 type DbTask = {
   id: string;
@@ -75,6 +79,7 @@ type TaskDetailsModalState = {
   startDate: string | null;
   endDate: string | null;
   assignees?: { id: string; name: string | null; email: string | null }[];
+  createdById?: string | null;
 };
 
 type TaskLogRow = {
@@ -305,6 +310,15 @@ export default function ProjectBoardPage({
   const [boardTimeFilter, setBoardTimeFilter] = useState<"all" | "today" | "week" | "month" | "overdue" | "near_due" | "completed">("all");
   const [boardMemberFilter, setBoardMemberFilter] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+
+  // Excel export hook
+  const { isExporting, handleExportTasks } = useExportTasks({
+    supabase,
+    projectId,
+    projectName: project?.name ?? null,
+    members: members.map((m) => ({ user_id: m.user_id, user: m.user })),
+  });
 
   const isOwner = Boolean(project?.owner_id && profile?.id && project.owner_id === profile.id);
   const isSuperAdmin = (profile?.system_role ?? "").toLowerCase() === "super_admin";
@@ -562,11 +576,12 @@ export default function ProjectBoardPage({
       let startDateValue: string | null = null;
       let endDateValue: string | null = null;
       let descriptionValue: string | null = null;
+      let createdByIdValue: string | null = null;
 
       try {
         const { data, error } = await supabase
           .from("tasks")
-          .select("created_at, start_date, end_date, description")
+          .select("created_at, start_date, end_date, description, created_by")
           .eq("id", taskId)
           .eq("project_id", projectId)
           .single();
@@ -576,12 +591,14 @@ export default function ProjectBoardPage({
           startDateValue = (data as any)?.start_date ?? null;
           endDateValue = (data as any)?.end_date ?? null;
           descriptionValue = (data as any)?.description ?? null;
+          createdByIdValue = (data as any)?.created_by ?? null;
         }
       } catch {
         createdAt = null;
         startDateValue = null;
         endDateValue = null;
         descriptionValue = null;
+        createdByIdValue = null;
       }
 
       setSelectedTaskDetails({
@@ -595,6 +612,7 @@ export default function ProjectBoardPage({
         startDate: startDateValue,
         endDate: endDateValue,
         assignees: task.assignees ?? [],
+        createdById: createdByIdValue,
       });
       setIsUpdateComposerOpen(false);
       setUpdateContent("");
@@ -706,6 +724,24 @@ export default function ProjectBoardPage({
       isMultiAssignee
     );
   }, [profile?.id, selectedTaskDetails, columns, isSuperAdmin, isProjectOwnerMember, canManageProject]);
+
+  // ---- Attachment permissions for Task Details ----
+  const canUploadAttachment = useMemo(() => {
+    if (!selectedTaskDetails || !profile?.id) return false;
+    // Project Owner, Project Lead, Task Creator, Task Assignee
+    if (isOwner || canManageProject || isSuperAdmin) return true;
+    if (selectedTaskDetails.createdById === profile.id) return true;
+    if (selectedTaskDetails.assigneeId === profile.id) return true;
+    if (selectedTaskDetails.assignees?.some((a) => a.id === profile.id)) return true;
+    return false;
+  }, [selectedTaskDetails, profile?.id, isOwner, canManageProject, isSuperAdmin]);
+
+  const canDeleteAllAttachments = useMemo(() => {
+    if (!profile?.id) return false;
+    // Project Owner, Project Lead
+    return isOwner || canManageProject || isSuperAdmin;
+  }, [profile?.id, isOwner, canManageProject, isSuperAdmin]);
+
 
   const createTaskUpdate = useCallback(async () => {
     const trimmed = updateContent.trim();
@@ -1030,6 +1066,57 @@ export default function ProjectBoardPage({
               ...prev[columnId],
             ],
           }));
+
+          // ---- Upload pending attachments ----
+          if (pendingAttachments.length > 0) {
+            const failedUploads: string[] = [];
+            for (const pending of pendingAttachments) {
+              try {
+                const timestamp = Date.now();
+                const safeName = pending.file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+                const storagePath = `${newTask.id}/${timestamp}_${safeName}`;
+
+                const { error: uploadErr } = await supabase.storage
+                  .from("task-attachments")
+                  .upload(storagePath, pending.file, {
+                    upsert: false,
+                    contentType: pending.file.type || "application/octet-stream",
+                  });
+
+                if (uploadErr) {
+                  failedUploads.push(pending.name);
+                  console.error("Attachment upload failed:", pending.name, uploadErr);
+                  continue;
+                }
+
+                const { error: insertErr } = await supabase
+                  .from("task_attachments")
+                  .insert({
+                    task_id: newTask.id,
+                    file_name: pending.file.name,
+                    storage_path: storagePath,
+                    mime_type: pending.file.type || "application/octet-stream",
+                    file_size: pending.file.size,
+                    uploaded_by: currentUserId,
+                  });
+
+                if (insertErr) {
+                  // Rollback storage
+                  await supabase.storage.from("task-attachments").remove([storagePath]);
+                  failedUploads.push(pending.name);
+                  console.error("Attachment metadata insert failed:", pending.name, insertErr);
+                }
+              } catch (attachErr) {
+                failedUploads.push(pending.name);
+                console.error("Attachment upload error:", pending.name, attachErr);
+              }
+            }
+
+            if (failedUploads.length > 0) {
+              alert(`Task created successfully, but some attachments failed to upload: ${failedUploads.join(", ")}`);
+            }
+          }
+          setPendingAttachments([]);
         }
       } catch (error) {
         console.error("Failed to create task:", error);
@@ -1039,7 +1126,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, selectedAdditionalAssignees],
+    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, selectedAdditionalAssignees, pendingAttachments, newTaskDescription],
   );
 
   const handleAddMember = useCallback(
@@ -1305,10 +1392,18 @@ export default function ProjectBoardPage({
       }
     };
 
+    const handleAiTaskCreated = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId?: string }>).detail;
+      if (detail?.projectId !== projectId) return;
+      void loadBoard();
+    };
+
+    window.addEventListener("ai-task-created", handleAiTaskCreated);
     void loadBoard();
 
     return () => {
       isMounted = false;
+      window.removeEventListener("ai-task-created", handleAiTaskCreated);
     };
   }, [canMoveTask, projectId, supabase]);
 
@@ -2044,6 +2139,14 @@ export default function ProjectBoardPage({
                     </Button>
                   )}
                   <Button
+                    onClick={() => void handleExportTasks()}
+                    disabled={isExporting}
+                    className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    <FileDown size={16} />
+                    {isExporting ? "Exporting…" : "Export Tasks"}
+                  </Button>
+                  <Button
                     onClick={() => {
                       setNewTaskStatus("todo");
                       setShowCreateTaskModal(true);
@@ -2423,6 +2526,15 @@ export default function ProjectBoardPage({
               ) : null}
             </div>
 
+            {/* Attachments */}
+            <TaskAttachments
+              supabase={supabase}
+              taskId={selectedTaskDetails.id}
+              profileId={profile?.id ?? null}
+              canUpload={canUploadAttachment}
+              canDeleteAll={canDeleteAllAttachments}
+            />
+
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
               <div className="mt-3 max-h-[200px] overflow-y-auto pr-2 space-y-0">
@@ -2495,7 +2607,7 @@ export default function ProjectBoardPage({
 
 
       {/* CREATE TASK MODAL */}
-      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => setShowCreateTaskModal(false)}>
+      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setPendingAttachments([]); }}>
         <div className="space-y-4">
           <div>
             <label htmlFor="task-title" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
@@ -2644,12 +2756,24 @@ export default function ProjectBoardPage({
               disabled={isSubmitting}
             />
           </div>
+
+          {/* Attachments */}
+          <div className="mt-4">
+            <CreateTaskAttachments
+              pendingFiles={pendingAttachments}
+              onFilesChange={setPendingAttachments}
+              disabled={isSubmitting}
+            />
+          </div>
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
           <Button
             variant="ghost"
-            onClick={() => setShowCreateTaskModal(false)}
+            onClick={() => {
+              setShowCreateTaskModal(false);
+              setPendingAttachments([]);
+            }}
             disabled={isSubmitting}
             className="rounded-lg px-4 py-2 text-sm font-semibold"
           >
