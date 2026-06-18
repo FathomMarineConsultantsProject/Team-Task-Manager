@@ -66,6 +66,15 @@ import {
 type ProjectInfo = { id: string; name: string | null; start_date?: string | null; created_at?: string | null };
 type TabId = "overview" | "board" | "doclist" | "activity" | "ai";
 
+const CLIENT_STATUS_COLORS = {
+  todo: "#6D4AF2",
+  inProgress: "#00B8D9",
+  inReview: "#F59E0B",
+  completed: "#16A34A",
+  overdue: "#EF4444",
+  nearDue: "#F97316",
+};
+
 // ── Activity feed types (kept from old reports) ──
 type CommentRow = {
   id: string;
@@ -138,6 +147,19 @@ function friendlyStatus(s: string | null | undefined): string {
   return STATUS_LABEL_MAP[s] ?? s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function clientPreviewStatusColor(statusKey: ReportStatusKey | string, statusLabel?: string) {
+  const normalizedLabel = (statusLabel ?? "").toLowerCase();
+  if (statusKey === "not_started") return CLIENT_STATUS_COLORS.todo;
+  if (statusKey === "in_progress") {
+    return normalizedLabel.includes("review") ? CLIENT_STATUS_COLORS.inReview : CLIENT_STATUS_COLORS.inProgress;
+  }
+  if (statusKey === "near_due") return CLIENT_STATUS_COLORS.nearDue;
+  if (statusKey === "done_early" || statusKey === "completed") return CLIENT_STATUS_COLORS.completed;
+  if (statusKey === "overdue") return CLIENT_STATUS_COLORS.overdue;
+  if (statusKey === "in_review" || normalizedLabel.includes("review")) return CLIENT_STATUS_COLORS.inReview;
+  return "#64748b";
+}
+
 type ActivityEvent = {
   id: string;
   type: "created" | "moved" | "assigned" | "comment" | "reply";
@@ -202,6 +224,7 @@ type ProjectLeadInfo = {
 };
 
 type ExecutiveReportData = {
+  audience: "internal" | "client";
   projectName: string;
   generatedAt: string;
   leads: ProjectLeadInfo;
@@ -221,6 +244,13 @@ type ExecutiveReportData = {
     overdue: number;
   };
   statusDistribution: { label: string; count: number; color: string }[];
+  statusSummary: {
+    todo: number;
+    inProgress: number;
+    inReview: number;
+    completed: number;
+    overdue: number;
+  };
   gantt: {
     rangeStart: string;
     rangeEnd: string;
@@ -302,7 +332,7 @@ type UserPerformanceReportData = {
 };
 
 type GeneratedAiReport =
-  | { type: "project"; data: ExecutiveReportData }
+  | { type: "project"; audience: "internal" | "client"; data: ExecutiveReportData }
   | { type: "user"; data: UserPerformanceReportData };
 
 // ── KPI Card ────────────────────────────────────
@@ -645,6 +675,8 @@ function TaskTable({ tasks, emptyLabel = "No tasks" }: { tasks: ReportTaskItem[]
 }
 
 function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
+  if (report.audience === "client") return <ClientExecutiveReport report={report} />;
+
   const riskTone = report.health.riskLevel === "High" ? "red" : report.health.riskLevel === "Medium" ? "amber" : "green";
   const healthDot = report.health.riskLevel === "High" ? "🔴" : report.health.riskLevel === "Medium" ? "🟡" : "🟢";
   const healthLabel = report.health.riskLevel === "High" ? "At Risk" : report.health.riskLevel === "Medium" ? "Attention Required" : "Healthy";
@@ -998,6 +1030,106 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
   );
 }
 
+function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
+  const progressSegments = [
+    { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
+    { label: "In Progress", value: report.statusSummary.inProgress, color: CLIENT_STATUS_COLORS.inProgress },
+    { label: "In Review", value: report.statusSummary.inReview, color: CLIENT_STATUS_COLORS.inReview },
+    { label: "Todo", value: report.statusSummary.todo, color: CLIENT_STATUS_COLORS.todo },
+    { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
+  ];
+  const total = Math.max(1, progressSegments.reduce((sum, segment) => sum + segment.value, 0));
+  const ganttLegend = [
+    ["Todo / Not Started", CLIENT_STATUS_COLORS.todo], ["In Progress", CLIENT_STATUS_COLORS.inProgress], ["In Review", CLIENT_STATUS_COLORS.inReview],
+    ["Completed", CLIENT_STATUS_COLORS.completed], ["Overdue", CLIENT_STATUS_COLORS.overdue], ["Near Due", CLIENT_STATUS_COLORS.nearDue],
+  ];
+  const statusRows = [
+    { label: "Todo", value: report.statusSummary.todo, color: CLIENT_STATUS_COLORS.todo },
+    { label: "In Progress", value: report.statusSummary.inProgress, color: CLIENT_STATUS_COLORS.inProgress },
+    { label: "In Review", value: report.statusSummary.inReview, color: CLIENT_STATUS_COLORS.inReview },
+    { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
+    { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-2xl border border-slate-800 bg-[#050816] p-8 text-white shadow-lg">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">Powered by</p>
+        <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">Fathom Marine Consultancy</p>
+        <p className="mt-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-500">Client Project Report</p>
+        <h2 className="mt-6 text-3xl font-bold tracking-tight">{report.projectName}</h2>
+        <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
+          <span>Owner: <strong className="text-white">{report.leads.owner}</strong></span>
+          <span>Lead: <strong className="text-white">{report.leads.primaryLead}</strong></span>
+          <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
+        </div>
+        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[["Total Tasks", report.kpis.total], ["Completed", report.kpis.completed], ["In Progress", report.statusSummary.inProgress], ["Overdue", report.kpis.overdue]].map(([label, value]) => (
+            <div key={label} className="rounded-lg bg-white/[0.07] px-3 py-2.5 text-center">
+              <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+              <p className="mt-1 text-lg font-bold">{value}</p>
+            </div>
+          ))}
+        </div>
+        <div className="mt-6 h-4 overflow-hidden rounded-full bg-white/10">
+          <div className="flex h-full">
+            {progressSegments.filter((segment) => segment.value > 0).map((segment) => (
+              <div key={segment.label} title={`${segment.label}: ${segment.value}`} style={{ width: `${segment.value / total * 100}%`, backgroundColor: segment.color }} />
+            ))}
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-300">
+          {progressSegments.map((segment) => <span key={segment.label}><span className="mr-1.5 inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: segment.color }} />{segment.label}: {segment.value}</span>)}
+        </div>
+      </div>
+
+      <ReportSection title="Client Status Summary">
+        <div className="grid gap-3 sm:grid-cols-5">
+          {statusRows.map((row) => (
+            <div key={row.label} className="rounded-lg border border-slate-200 bg-white p-3">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">{row.label}</p>
+              <p className="mt-1 text-lg font-bold" style={{ color: row.color }}>{row.value}</p>
+            </div>
+          ))}
+        </div>
+      </ReportSection>
+
+      <ReportSection title="Project Timeline">
+        {report.gantt.tasks.length === 0 ? <div className="text-sm text-slate-400">No tasks with date ranges.</div> : (
+          <div className="overflow-x-auto">
+            <div className="min-w-[760px]">
+              {report.gantt.tasks.map((task) => (
+                <div key={task.id} className="flex items-center border-b border-slate-100 py-2">
+                  <div className="w-[260px] shrink-0 break-words px-2 text-xs font-medium text-slate-900">{task.title}</div>
+                  <div className="relative h-5 flex-1 bg-slate-50">
+                    <div className="absolute top-1 h-3 rounded-sm" style={{ left: `${task.left}%`, width: `${Math.max(1.5, Math.min(100 - task.left, task.width))}%`, backgroundColor: clientPreviewStatusColor(task.statusKey, task.status) }} />
+                  </div>
+                </div>
+              ))}
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+                {ganttLegend.map(([label, color]) => <span key={label}><span className="mr-1.5 inline-block h-2 w-2" style={{ backgroundColor: color }} />{label}</span>)}
+              </div>
+            </div>
+          </div>
+        )}
+      </ReportSection>
+
+      <ReportSection title="Task Register">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] table-fixed text-xs">
+            <thead className="bg-slate-50 text-left text-[9px] font-semibold uppercase tracking-wider text-slate-400"><tr>
+              <th className="w-[36%] px-3 py-2">Task Name</th><th className="w-[13%] px-3 py-2">Status</th><th className="w-[10%] px-3 py-2">Progress</th><th className="w-[14%] px-3 py-2">Start Date</th><th className="w-[14%] px-3 py-2">Due Date</th><th className="w-[13%] px-3 py-2">Time Left</th>
+            </tr></thead>
+            <tbody>{report.taskRegister.map((task) => <tr key={task.id} className="border-t border-slate-100 align-top">
+              <td className="break-words px-3 py-2 font-medium text-slate-900">{task.title}</td><td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${clientPreviewStatusColor(task.statusKey, task.status)}18`, color: clientPreviewStatusColor(task.statusKey, task.status) }}>{task.status}</span></td><td className="px-3 py-2">{task.progress}%</td><td className="px-3 py-2">{task.startDate}</td><td className="px-3 py-2">{task.dueDate}</td><td className="px-3 py-2">{task.timeLeft}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </ReportSection>
+    </div>
+  );
+}
+
 function TaskTeamTable({ rows }: { rows: TeamContributionRow[] }) {
   if (rows.length === 0) return <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No team contribution data.</div>;
   return (
@@ -1214,6 +1346,7 @@ export default function ReportsPage() {
   // AI report
   const [aiReport, setAiReport] = useState<GeneratedAiReport | null>(null);
   const [aiReportType, setAiReportType] = useState<"user" | "project">("user");
+  const [reportAudience, setReportAudience] = useState<"internal" | "client">("internal");
   const [aiReportError, setAiReportError] = useState<string | null>(null);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
 
@@ -1675,6 +1808,15 @@ Utilization: ${utilizationScore}%`;
       const projectsById = new Map(allProjects.map((p) => [p.id, p]));
       const reportUsersById = new Map(users.map((u) => [u.id, u]));
       const taskItems = aiTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+      const statusSummary = aiTasks.reduce((summary, task) => {
+        const reportStatus = deriveReportStatus(task as ReportTask);
+        if (reportStatus === "overdue") summary.overdue += 1;
+        else if (reportStatus === "completed" || reportStatus === "done_early") summary.completed += 1;
+        else if (normalizeStatus(task.status) === "in_review") summary.inReview += 1;
+        else if (reportStatus === "in_progress" || reportStatus === "near_due") summary.inProgress += 1;
+        else summary.todo += 1;
+        return summary;
+      }, { todo: 0, inProgress: 0, inReview: 0, completed: 0, overdue: 0 });
       const gantt = buildGanttPdfData(aiTasks, reportUsersById, projectsById);
       const overdueItems = taskItems.filter((task) => task.statusKey === "overdue");
       const nearDueItems = taskItems.filter((task) => task.statusKey === "near_due");
@@ -1729,7 +1871,7 @@ Utilization: ${utilizationScore}%`;
         : getProjectLeadInfo(aiProjectFilter, projectMembers, reportUsersById, teamRows);
       const actionItems = taskRegister.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
 
-      let recommendations = buildFallbackRecommendations({
+      let recommendations = reportAudience === "client" ? [] : buildFallbackRecommendations({
         overdueCount: overdueItems.length,
         nearDueCount: nearDueItems.length,
         staleCount: staleItems.length,
@@ -1737,9 +1879,10 @@ Utilization: ${utilizationScore}%`;
         completionRate: aiReportKpis.completionRate,
       });
 
-      try {
-        const selectedUser = aiUserFilter !== "all" ? users.find((u) => u.id === aiUserFilter) : null;
-        const reportPrompt = `Generate PMO executive recommendations only. Return 5 concise bullet recommendations, no introduction.
+      if (reportAudience === "internal") {
+        try {
+          const selectedUser = aiUserFilter !== "all" ? users.find((u) => u.id === aiUserFilter) : null;
+          const reportPrompt = `Generate PMO executive recommendations only. Return 5 concise bullet recommendations, no introduction.
 Project: ${projectName}
 Focus user: ${selectedUser?.name ?? "All users"}
 Completion: ${aiReportKpis.completionRate}%
@@ -1749,25 +1892,28 @@ Stale tasks: ${staleItems.length}
 Overloaded users: ${overloaded.map((u) => u.name).join(", ") || "None"}
 Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.owner})`).join("; ") || "None"}`;
 
-        const res = await fetch("/api/ai/report", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: reportPrompt }),
-        });
-        const data = await res.json();
-        if (typeof data?.content === "string") {
-          const parsed = parseAiRecommendationText(data.content);
-          if (parsed.length > 0) {
-            recommendations = parsed;
+          const res = await fetch("/api/ai/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt: reportPrompt }),
+          });
+          const data = await res.json();
+          if (typeof data?.content === "string") {
+            const parsed = parseAiRecommendationText(data.content);
+            if (parsed.length > 0) {
+              recommendations = parsed;
+            }
           }
+        } catch (recommendationError) {
+          console.warn("AI recommendations unavailable", recommendationError);
         }
-      } catch (recommendationError) {
-        console.warn("AI recommendations unavailable", recommendationError);
       }
 
       setAiReport({
         type: "project",
+        audience: reportAudience,
         data: {
+          audience: reportAudience,
           projectName,
           generatedAt: new Date().toISOString(),
           leads,
@@ -1787,6 +1933,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
             overdue: aiReportKpis.overdue,
           },
           statusDistribution: aiStatusDist,
+          statusSummary,
           gantt,
           timeline: taskItems
             .filter((task) => task.statusKey === "overdue" || task.statusKey === "near_due" || task.statusKey === "in_progress"),
@@ -1819,7 +1966,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers]);
 
   const exportAiReportPdf = useCallback(async () => {
     if (!aiReport) {
@@ -2413,8 +2560,8 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
                       ))}
                     </div>
                   </div>
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_auto_auto] xl:items-end">
-                    <div>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="min-w-[220px] flex-1">
                       <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">Project</label>
                       <select value={aiProjectFilter} onChange={(e) => { setAiProjectFilter(e.target.value); setAiReport(null); setAiReportError(null); }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-[#381a78]">
                         <option value="all">{aiReportType === "user" ? "Select Project" : "All Projects"}</option>
@@ -2422,12 +2569,29 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
                       </select>
                     </div>
                     {aiReportType === "user" && (
-                      <div>
+                      <div className="min-w-[220px] flex-1">
                         <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">User</label>
                         <select value={aiUserFilter} onChange={(e) => { setAiUserFilter(e.target.value); setAiReport(null); setAiReportError(null); }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-[#381a78]">
                           <option value="all">Select User</option>
                           {filteredAiUsers.map((u) => <option key={u.id} value={u.id}>{u.name ?? u.email ?? "Unknown"}</option>)}
                         </select>
+                      </div>
+                    )}
+                    {aiReportType === "project" && (
+                      <div className="shrink-0">
+                        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Audience</p>
+                        <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-slate-50 p-1">
+                          {([['internal', 'Team'], ['client', 'Client']] as const).map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => { setReportAudience(value); setAiReport(null); setAiReportError(null); }}
+                              className={`rounded-md px-3 text-xs font-semibold transition ${reportAudience === value ? "bg-[#381a78] text-white shadow-sm" : "text-slate-600 hover:bg-white"}`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
                     <button
