@@ -221,6 +221,7 @@ type ProjectLeadInfo = {
   owner: string;
   primaryLead: string;
   supportingLeads: string[];
+  leadNames: string[];
 };
 
 type ExecutiveReportData = {
@@ -552,9 +553,18 @@ function getProjectLeadInfo(
   const owners = members.filter((member) => ["owner", "creator"].includes((member.role ?? "").toLowerCase())).map((member) => named(member.user_id));
   const leads = members.filter((member) => (member.role ?? "").toLowerCase() === "lead").map((member) => named(member.user_id));
   const owner = owners[0] ?? teamRows[0]?.name ?? "Not assigned";
-  const primaryLead = leads[0] ?? owners[1] ?? owner;
-  const supportingLeads = [...leads.slice(1), ...owners.slice(1)].filter((name) => name !== primaryLead);
-  return { owner, primaryLead, supportingLeads: Array.from(new Set(supportingLeads)) };
+  const leadNames = Array.from(new Set(leads.length > 0 ? leads : owner !== "Not assigned" ? [owner] : []));
+  const primaryLead = leadNames[0] ?? "Not assigned";
+  const supportingLeads = leadNames.slice(1);
+  return { owner, primaryLead, supportingLeads, leadNames };
+}
+
+function formatLeadDisplay(leads: ProjectLeadInfo) {
+  const names = leads.leadNames?.length ? leads.leadNames : [leads.primaryLead].filter((name) => name && name !== "Not assigned");
+  return {
+    label: names.length > 1 ? "Leads" : "Lead",
+    value: names.length > 0 ? names.join(", ") : "Not assigned",
+  };
 }
 
 function buildGanttPdfData(
@@ -681,6 +691,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
   const healthDot = report.health.riskLevel === "High" ? "🔴" : report.health.riskLevel === "Medium" ? "🟡" : "🟢";
   const healthLabel = report.health.riskLevel === "High" ? "At Risk" : report.health.riskLevel === "Medium" ? "Attention Required" : "Healthy";
   const activeTasks = Math.max(0, report.kpis.total - report.kpis.completed);
+  const leadDisplay = formatLeadDisplay(report.leads);
 
   return (
     <div className="space-y-6">
@@ -693,17 +704,12 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
         <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-slate-300">
           <span>Owner: <strong className="text-white">{report.leads.owner}</strong></span>
           <span className="text-slate-600">•</span>
-          <span>Primary Lead: <strong className="text-white">{report.leads.primaryLead}</strong></span>
+          <span>{leadDisplay.label}: <strong className="text-white">{leadDisplay.value}</strong></span>
           <span className="text-slate-600">•</span>
           <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
           <span className="text-slate-600">•</span>
           <span>Team: <strong className="text-white">{report.team.length} members</strong></span>
         </div>
-        {report.leads.supportingLeads.length > 0 && (
-          <p className="mt-2 text-xs text-slate-400">
-            Supporting Leads: <span className="text-slate-200">{report.leads.supportingLeads.join(", ")}</span>
-          </p>
-        )}
         <div className="mt-4 flex items-center gap-2">
           <span className="text-lg">{healthDot}</span>
           <span className="text-base font-bold text-white">{healthLabel}</span>
@@ -1050,6 +1056,7 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
     { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
   ];
+  const leadDisplay = formatLeadDisplay(report.leads);
 
   return (
     <div className="space-y-6">
@@ -1060,7 +1067,7 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         <h2 className="mt-6 text-3xl font-bold tracking-tight">{report.projectName}</h2>
         <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
           <span>Owner: <strong className="text-white">{report.leads.owner}</strong></span>
-          <span>Lead: <strong className="text-white">{report.leads.primaryLead}</strong></span>
+          <span>{leadDisplay.label}: <strong className="text-white">{leadDisplay.value}</strong></span>
           <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
         </div>
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -1867,6 +1874,7 @@ Utilization: ${utilizationScore}%`;
           owner: "Portfolio view",
           primaryLead: teamRows[0]?.name ?? "Not assigned",
           supportingLeads: teamRows.slice(1, 4).map((row) => row.name),
+          leadNames: teamRows.slice(0, 4).map((row) => row.name),
         }
         : getProjectLeadInfo(aiProjectFilter, projectMembers, reportUsersById, teamRows);
       const actionItems = taskRegister.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");

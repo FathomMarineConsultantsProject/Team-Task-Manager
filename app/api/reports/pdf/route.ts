@@ -43,6 +43,7 @@ type ProjectLeadInfo = {
   owner: string;
   primaryLead: string;
   supportingLeads: string[];
+  leadNames?: string[];
 };
 
 type ExecutiveReportData = {
@@ -251,6 +252,32 @@ function wrap(value: unknown, maxChars: number, maxLines = 2) {
   }
   if (line && lines.length < maxLines) lines.push(line);
   return lines.length ? lines : [""];
+}
+
+function getLeadNames(leads: ProjectLeadInfo) {
+  const names = leads.leadNames?.length
+    ? leads.leadNames
+    : [leads.primaryLead, ...leads.supportingLeads].filter((name) => name && name !== "Not assigned" && name !== "None listed");
+  return Array.from(new Set(names));
+}
+
+function formatLeadLine(leads: ProjectLeadInfo, maxChars = 82) {
+  const names = getLeadNames(leads);
+  const label = names.length > 1 ? "Leads" : "Lead";
+
+  if (names.length === 0) {
+    return `${label}: Not assigned`;
+  }
+
+  for (let count = names.length; count >= 1; count -= 1) {
+    const suffix = count < names.length ? ` + ${names.length - count} more` : "";
+    const line = `${label}: ${names.slice(0, count).join(", ")}${suffix}`;
+    if (line.length <= maxChars || count === 1) {
+      return line;
+    }
+  }
+
+  return `${label}: ${names[0]}`;
 }
 
 class Canvas {
@@ -770,14 +797,15 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   const statusTotal = statusRows.reduce((sum, item) => sum + item.value, 0);
 
   pdf.addPage((c, pageNo, pageCount) => {
+    const leadLines = wrap(formatLeadLine(report.leads), 76, 2);
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
     c.text("POWERED BY", M, 36, 9, "#a7b0d6", true);
     c.text("FATHOM MARINE CONSULTANCY", M, 52, 15, "#ffffff", true);
     c.text("CLIENT PROJECT REPORT", M, 102, 34, "#ffffff", true);
     c.text(report.projectName, M, 148, 18, "#c7d2fe", true);
     c.text(`Owner: ${report.leads.owner}`, M, 194, 12, "#dbeafe");
-    c.text(`Project Lead: ${report.leads.primaryLead}`, M, 214, 12, "#dbeafe");
-    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 234, 12, "#dbeafe");
+    c.textLines(leadLines, M, 214, 12, "#dbeafe", false, 15);
+    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 244, 12, "#dbeafe");
     const cards = [
       ["Total Tasks", report.kpis.total, CLIENT_STATUS_COLORS.todo],
       ["Completed", report.kpis.completed, CLIENT_STATUS_COLORS.completed],
@@ -919,6 +947,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
   const upcoming = report.timeline.filter((task) => task.statusKey === "near_due" || task.statusKey === "in_progress" || task.statusKey === "not_started");
 
   pdf.addPage((c, pageNo, pageCount) => {
+    const leadLines = wrap(formatLeadLine(report.leads), 76, 2);
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
     c.text("POWERED BY", M, 36, 9, "#a7b0d6", true);
     c.text("FATHOM MARINE CONSULTANCY", M, 52, 15, "#ffffff", true);
@@ -926,8 +955,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
     c.text(report.projectName, M, 148, 18, "#c7d2fe", true);
     c.text("Project Details", M, 184, 12, "#ffffff", true);
     c.text(`Owner: ${report.leads.owner}`, M, 206, 12, "#dbeafe");
-    c.text(`Primary Lead: ${report.leads.primaryLead}`, M, 224, 12, "#dbeafe");
-    c.text(`Supporting Leads: ${report.leads.supportingLeads.join(", ") || "None listed"}`, M, 242, 11, "#a7b0d6");
+    c.textLines(leadLines, M, 224, 12, "#dbeafe", false, 15);
     c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 262, 12, "#dbeafe");
     const cards = [
       ["Completion %", `${report.health.completionRate}%`, COLORS.green],
