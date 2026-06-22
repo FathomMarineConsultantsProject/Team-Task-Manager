@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown } from "lucide-react";
+import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus } from "lucide-react";
 import { useExportTasks } from "@/lib/useExportTasks";
 import BoardColumn from "@/components/board/BoardColumn";
 import Button from "@/components/ui/button";
@@ -32,6 +32,7 @@ type DbUser = {
   name: string | null;
   email: string | null;
   job_role: string | null;
+  system_role?: string | null;
   avatar_url: string | null;
 };
 
@@ -49,6 +50,7 @@ type DbProject = {
   }[] | null;
   project_members?: {
     user_id: string | null;
+    role: string | null;
     users: {
       id: string | null;
       email: string | null;
@@ -59,13 +61,14 @@ type DbProject = {
 type DbProjectMember = {
   user_id: string;
   role: string | null;
-  user: {
-    id: string;
-    name: string | null;
-    email: string | null;
-    job_role: string | null;
-    avatar_url: string | null;
-  } | null;
+    user: {
+      id: string;
+      name: string | null;
+      email: string | null;
+      job_role: string | null;
+      system_role?: string | null;
+      avatar_url: string | null;
+    } | null;
 };
 
 type TaskDetailsModalState = {
@@ -170,6 +173,8 @@ const STATUS_LABEL: Record<ColumnId, string> = {
   review: "IN REVIEW",
   done: "DONE",
 };
+
+const normalizeRole = (role: string | null | undefined) => (role ?? "").toLowerCase();
 
 const resolveColumn = (status: string | null | undefined): ColumnId => {
   if (!status) {
@@ -311,6 +316,11 @@ export default function ProjectBoardPage({
   const [boardMemberFilter, setBoardMemberFilter] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [managingMemberId, setManagingMemberId] = useState<string | null>(null);
+  const [projectTeamTab, setProjectTeamTab] = useState<"add" | "manage">("add");
+  const [teamMemberSearch, setTeamMemberSearch] = useState("");
+  const [openTeamMemberMenuId, setOpenTeamMemberMenuId] = useState<string | null>(null);
+  const [memberPendingRemoval, setMemberPendingRemoval] = useState<DbProjectMember | null>(null);
 
   // Excel export hook
   const { isExporting, handleExportTasks } = useExportTasks({
@@ -320,15 +330,33 @@ export default function ProjectBoardPage({
     members: members.map((m) => ({ user_id: m.user_id, user: m.user })),
   });
 
+  const systemRole = normalizeRole(profile?.system_role ?? profile?.role);
   const isOwner = Boolean(project?.owner_id && profile?.id && project.owner_id === profile.id);
-  const isSuperAdmin = (profile?.system_role ?? "").toLowerCase() === "super_admin";
-  const isAdmin = (profile?.system_role ?? profile?.role ?? "").toLowerCase() === "admin";
-  const canManageProject = isOwner || isAdmin;
+  const isProjectLead = Boolean(
+    profile?.id &&
+      members.some((member) => member.user_id === profile.id && normalizeRole(member.role) === "lead"),
+  );
+  const isSuperAdmin = systemRole === "super_admin";
+  const isAdmin = systemRole === "admin";
+  const canManageProject = isOwner || isAdmin || isSuperAdmin;
+  const canManageProjectMembers = isOwner || isProjectLead || isAdmin || isSuperAdmin;
   const isProjectMember = Boolean(profile?.id && members.some((member) => member.user_id === profile.id));
   const isProjectOwnerMember = Boolean(
     profile?.id &&
-      members.some((member) => member.user_id === profile.id && (member.role ?? "").toLowerCase() === "owner"),
+      members.some((member) => member.user_id === profile.id && normalizeRole(member.role) === "owner"),
   );
+  const managerCount = useMemo(() => {
+    const managerIds = new Set<string>();
+    if (project?.owner_id) {
+      managerIds.add(project.owner_id);
+    }
+    members.forEach((member) => {
+      if (normalizeRole(member.role) === "lead") {
+        managerIds.add(member.user_id);
+      }
+    });
+    return managerIds.size;
+  }, [members, project?.owner_id]);
   const canViewTaskUpdates = isProjectMember || canManageProject;
 
   useEffect(() => {
@@ -336,6 +364,16 @@ export default function ProjectBoardPage({
     const interval = setInterval(() => setTimerNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!openTeamMemberMenuId) {
+      return;
+    }
+
+    const closeMenu = () => setOpenTeamMemberMenuId(null);
+    document.addEventListener("click", closeMenu);
+    return () => document.removeEventListener("click", closeMenu);
+  }, [openTeamMemberMenuId]);
 
   const timerStart = useMemo(() => {
     const value = project?.start_date || project?.created_at || null;
@@ -359,6 +397,31 @@ export default function ProjectBoardPage({
       })
       .slice(0, 8);
   }, [directoryUsers, members, newMemberSearch]);
+
+  const filteredTeamMembers = useMemo(() => {
+    const search = teamMemberSearch.trim().toLowerCase();
+
+    if (!search) {
+      return members;
+    }
+
+    return members.filter((member) => {
+      const user = member.user;
+      const name = user?.name?.toLowerCase() ?? "";
+      const email = user?.email?.toLowerCase() ?? "";
+      const jobRole = user?.job_role?.toLowerCase() ?? "";
+      const systemRoleValue = user?.system_role?.toLowerCase() ?? "";
+      const memberRole = member.role?.toLowerCase() ?? "";
+
+      return (
+        name.includes(search) ||
+        email.includes(search) ||
+        jobRole.includes(search) ||
+        systemRoleValue.includes(search) ||
+        memberRole.includes(search)
+      );
+    });
+  }, [members, teamMemberSearch]);
 
   const canMoveTask = useCallback(
     (assignedTo: string | null, assignees?: { id: string }[], startDate?: string | null) => {
@@ -529,7 +592,7 @@ export default function ProjectBoardPage({
         try {
           const { data: usersData, error: usersError } = await supabase
             .from("users")
-            .select("id, name, email, job_role, avatar_url")
+            .select("id, name, email, job_role, system_role, avatar_url")
             .in("id", userIds);
 
           if (!usersError) {
@@ -885,10 +948,12 @@ export default function ProjectBoardPage({
               ),
               project_members(
                 user_id,
+                role,
                 users (
                   id,
                   name,
                   job_role,
+                  system_role,
                   email
                 )
               )
@@ -907,7 +972,7 @@ export default function ProjectBoardPage({
             `
               user_id,
               role,
-              user:users(id, name, email, job_role, avatar_url)
+              user:users(id, name, email, job_role, system_role, avatar_url)
             `,
           )
           .eq("project_id", projectId);
@@ -1135,10 +1200,9 @@ export default function ProjectBoardPage({
         return;
       }
 
-      // SECURITY: Only owner can add members
-      if (!canManageProject) {
-        alert("Only the project owner or admin can add members.");
-        console.warn("Unauthorized: Non-owner/non-admin attempted to add member");
+      if (!canManageProjectMembers) {
+        alert("Only the project owner, project lead, admin, or super admin can add members.");
+        console.warn("Unauthorized: Non-manager attempted to add member");
         return;
       }
 
@@ -1170,7 +1234,8 @@ export default function ProjectBoardPage({
           .select(
             `
               user_id,
-              user:users(id, name, email, job_role, avatar_url)
+              role,
+              user:users(id, name, email, job_role, system_role, avatar_url)
             `,
           )
           .eq("project_id", projectId);
@@ -1183,8 +1248,139 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, canManageProject],
+    [projectId, supabase, canManageProjectMembers],
   );
+
+  const handlePromoteMember = useCallback(
+    async (userId: string) => {
+      if (!userId || !projectId) {
+        return;
+      }
+
+      if (!canManageProjectMembers) {
+        alert("Only project managers can promote project leads.");
+        return;
+      }
+
+      setManagingMemberId(userId);
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+
+        if (!accessToken) {
+          alert("Please sign in again to manage project members.");
+          return;
+        }
+
+        const response = await fetch(`/api/projects/${projectId}/members/promote-lead`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ userId }),
+        });
+        const result = (await response.json()) as { error?: string };
+
+        if (!response.ok) {
+          throw new Error(result.error ?? "Failed to promote member to project lead.");
+        }
+
+        setMembers((current) =>
+          current.map((member) => (member.user_id === userId ? { ...member, role: "lead" } : member)),
+        );
+        setOpenTeamMemberMenuId(null);
+      } catch (error) {
+        console.error("Failed to promote member", error);
+        alert(error instanceof Error ? error.message : "Failed to promote member to project lead.");
+      } finally {
+        setManagingMemberId(null);
+      }
+    },
+    [projectId, supabase, canManageProjectMembers],
+  );
+
+  const handleRemoveMember = useCallback(
+    async (userId: string) => {
+      if (!userId || !projectId) {
+        return;
+      }
+
+      if (!canManageProjectMembers) {
+        alert("Only project managers can remove project members.");
+        return;
+      }
+
+      setManagingMemberId(userId);
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+
+        if (!accessToken) {
+          alert("Please sign in again to manage project members.");
+          return;
+        }
+
+        const response = await fetch(`/api/projects/${projectId}/members/${userId}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+        const result = (await response.json()) as { error?: string };
+
+        if (!response.ok) {
+          throw new Error(result.error ?? "Failed to remove member from project.");
+        }
+
+        setMembers((current) => current.filter((member) => member.user_id !== userId));
+        setSelectedAdditionalAssignees((current) => current.filter((user) => user.id !== userId));
+        if (newTaskAssignee === userId) {
+          setNewTaskAssignee("");
+        }
+        setBoardMemberFilter((current) => (current === userId ? "all" : current));
+        setColumns((current) => {
+          const next = createEmptyColumns();
+          (Object.keys(current) as ColumnId[]).forEach((columnId) => {
+            next[columnId] = current[columnId].map((task) => {
+              const updatedAssignees = task.assignees?.filter((assignee) => assignee.id !== userId);
+              return {
+                ...task,
+                assigneeId: task.assigneeId === userId ? null : task.assigneeId,
+                assigneeName: task.assigneeId === userId ? "Unassigned" : task.assigneeName,
+                assigneeRole: task.assigneeId === userId ? null : task.assigneeRole,
+                assignees: updatedAssignees,
+              };
+            });
+          });
+          return next;
+        });
+        setOpenTeamMemberMenuId(null);
+      } catch (error) {
+        console.error("Failed to remove member", error);
+        alert(error instanceof Error ? error.message : "Failed to remove member from project.");
+      } finally {
+        setManagingMemberId(null);
+        setMemberPendingRemoval(null);
+      }
+    },
+    [projectId, supabase, canManageProjectMembers, newTaskAssignee],
+  );
+
+  const requestRemoveMember = useCallback((member: DbProjectMember) => {
+    setMemberPendingRemoval(member);
+    setOpenTeamMemberMenuId(null);
+  }, []);
+
+  const confirmRemoveMember = useCallback(() => {
+    if (!memberPendingRemoval) {
+      return;
+    }
+
+    void handleRemoveMember(memberPendingRemoval.user_id);
+  }, [handleRemoveMember, memberPendingRemoval]);
 
   useEffect(() => {
     if (!showAddMemberModal) {
@@ -1196,7 +1392,7 @@ export default function ProjectBoardPage({
     const loadDirectoryUsers = async () => {
       const { data, error } = await supabase
         .from("users")
-        .select("id, name, email, job_role, avatar_url")
+        .select("id, name, email, job_role, system_role, avatar_url")
         .order("name", { ascending: true });
 
       if (error) {
@@ -1303,7 +1499,7 @@ export default function ProjectBoardPage({
         if (assignedIds.length > 0) {
           const { data: userRows, error: userError } = await supabase
             .from("users")
-            .select("id, name, email, job_role, avatar_url")
+            .select("id, name, email, job_role, system_role, avatar_url")
             .in("id", assignedIds);
 
           if (userError) {
@@ -1778,7 +1974,7 @@ export default function ProjectBoardPage({
       if (assignedIds.length > 0) {
         const { data: userRows, error: userError } = await supabase
           .from("users")
-          .select("id, name, email, job_role, avatar_url")
+          .select("id, name, email, job_role, system_role, avatar_url")
           .in("id", assignedIds);
 
         if (userError) {
@@ -1943,7 +2139,7 @@ export default function ProjectBoardPage({
         if (assignedIds.length > 0) {
           const { data: userRows, error: userError } = await supabase
             .from("users")
-            .select("id, name, email, job_role, avatar_url")
+            .select("id, name, email, job_role, system_role, avatar_url")
             .in("id", assignedIds);
 
           if (userError) {
@@ -2129,9 +2325,12 @@ export default function ProjectBoardPage({
                     <LayoutDashboard size={16} />
                     Dashboard
                   </Button>
-                  {canManageProject && (
+                  {canManageProjectMembers && (
                     <Button
-                      onClick={() => setShowAddMemberModal(true)}
+                      onClick={() => {
+                        setProjectTeamTab("add");
+                        setShowAddMemberModal(true);
+                      }}
                       className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
                     >
                       <Users size={16} />
@@ -2180,6 +2379,7 @@ export default function ProjectBoardPage({
                       const user = member.user;
                       if (!user) return null;
                       const isOwnerMember = member.user_id === project.owner_id;
+                      const isLeadMember = normalizeRole(member.role) === "lead";
                       return (
                         <div key={member.user_id} className="flex items-center gap-2">
                           <Avatar
@@ -2193,13 +2393,21 @@ export default function ProjectBoardPage({
                             {user.name ?? user.email ?? "Unknown user"}
                             {isOwnerMember ? (
                               <span className="ml-2 text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-md font-semibold">
+                                Owner
+                              </span>
+                            ) : isLeadMember ? (
+                              <span className="ml-2 text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded-md font-semibold">
                                 Lead
                               </span>
                             ) : user.job_role ? (
                               <span className="ml-2 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-md">
                                 {user.job_role}
                               </span>
-                            ) : null}
+                            ) : (
+                              <span className="ml-2 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-md">
+                                Member
+                              </span>
+                            )}
                           </span>
                         </div>
                       );
@@ -2789,66 +2997,218 @@ export default function ProjectBoardPage({
         </div>
       </Modal>
 
-      {/* ADD MEMBER MODAL */}
-      <Modal title="Add Project Member" isOpen={showAddMemberModal} onClose={() => setShowAddMemberModal(false)}>
-        <div className="space-y-4">
-          <div>
-            <label htmlFor="member-select" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-              Search Member by Name
-            </label>
-            <input
-              id="member-select"
-              type="text"
-              placeholder="Type member name"
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
-              value={newMemberSearch}
-              onChange={(e) => {
-                setNewMemberSearch(e.target.value);
-                setSelectedMember(null);
-              }}
-              disabled={isSubmitting}
-              autoFocus
-            />
-            <p className="mt-1 text-xs text-slate-500">Select a user by name. Role is shown in suggestions.</p>
-            {filteredUsers.length > 0 ? (
-              <div className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-                {filteredUsers.map((user) => (
-                  <div
-                    key={user.id}
-                    onClick={() => {
-                      setSelectedMember(user);
-                      setNewMemberSearch(user.name ?? user.email ?? "");
-                    }}
-                    className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100"
-                  >
-                    <span className="font-medium">{user.name ?? user.email ?? "Unknown"}</span>
-                    <span className="text-xs italic text-gray-400">{user.job_role ?? "user"}</span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {selectedMember ? (
-              <p className="mt-2 text-xs text-emerald-700">
-                Selected: {selectedMember.name ?? selectedMember.email ?? selectedMember.id} ({selectedMember.job_role ?? "user"})
-              </p>
-            ) : null}
+      {/* PROJECT TEAM MODAL */}
+      <Modal title="Project Team" isOpen={showAddMemberModal} onClose={() => setShowAddMemberModal(false)} maxWidth="max-w-4xl">
+        <div className="space-y-5">
+          <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+            <button
+              type="button"
+              onClick={() => setProjectTeamTab("add")}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${
+                projectTeamTab === "add" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Add Members
+            </button>
+            <button
+              type="button"
+              onClick={() => setProjectTeamTab("manage")}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${
+                projectTeamTab === "manage" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Manage Team
+            </button>
           </div>
+
+          {projectTeamTab === "add" ? (
+            <>
+              <div>
+                <label htmlFor="member-select" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                  Search Member by Name
+                </label>
+                <input
+                  id="member-select"
+                  type="text"
+                  placeholder="Type member name"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+                  value={newMemberSearch}
+                  onChange={(e) => {
+                    setNewMemberSearch(e.target.value);
+                    setSelectedMember(null);
+                  }}
+                  disabled={isSubmitting}
+                  autoFocus
+                />
+                <p className="mt-1 text-xs text-slate-500">Select a user by name. Role is shown in suggestions.</p>
+                {filteredUsers.length > 0 ? (
+                  <div className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                    {filteredUsers.map((user) => (
+                      <div
+                        key={user.id}
+                        onClick={() => {
+                          setSelectedMember(user);
+                          setNewMemberSearch(user.name ?? user.email ?? "");
+                        }}
+                        className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100"
+                      >
+                        <span className="font-medium">{user.name ?? user.email ?? "Unknown"}</span>
+                        <span className="text-xs italic text-gray-400">{user.job_role ?? user.system_role ?? "user"}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {selectedMember ? (
+                  <p className="mt-2 text-xs text-emerald-700">
+                    Selected: {selectedMember.name ?? selectedMember.email ?? selectedMember.id} ({selectedMember.job_role ?? selectedMember.system_role ?? "user"})
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex justify-end gap-3">
+                <Button
+                  variant="ghost"
+                  onClick={() => setShowAddMemberModal(false)}
+                  disabled={isSubmitting}
+                  className="rounded-lg px-4 py-2 text-sm font-semibold"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => handleAddMember(selectedMember?.id ?? "")}
+                  disabled={isSubmitting || !selectedMember?.id}
+                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {isSubmitting ? "Adding..." : "Add Member"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-3">
+              <div className="relative">
+                <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={teamMemberSearch}
+                  onChange={(e) => setTeamMemberSearch(e.target.value)}
+                  placeholder="Search team members..."
+                  className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+                />
+              </div>
+              <div className="max-h-[420px] overflow-y-auto rounded-xl border border-slate-200 bg-white">
+                {filteredTeamMembers.length === 0 ? (
+                  <div className="px-4 py-8 text-center text-sm text-slate-500">No team members found.</div>
+                ) : (
+                  filteredTeamMembers.map((member) => {
+                    const user = member.user;
+                    if (!user) return null;
+                    const isOwnerMember = member.user_id === project?.owner_id;
+                    const isLeadMember = normalizeRole(member.role) === "lead";
+                    const isCurrentUserMember = member.user_id === profile?.id;
+                    const isOnlyRemainingManager = isCurrentUserMember && managerCount <= 1 && (isOwnerMember || isLeadMember);
+                    const canPromoteMember = canManageProjectMembers && !isOwnerMember && !isLeadMember;
+                    const canRemoveMember = canManageProjectMembers && !isOwnerMember && !isOnlyRemainingManager;
+                    const hasMemberActions = canPromoteMember || canRemoveMember;
+                    const isMemberBusy = managingMemberId === member.user_id;
+                    const badgeLabel = isOwnerMember ? "Owner" : isLeadMember ? "Lead" : user.job_role ?? "Member";
+                    const badgeClass = isOwnerMember
+                      ? "bg-blue-50 text-blue-600"
+                      : isLeadMember
+                        ? "bg-emerald-50 text-emerald-700"
+                        : "bg-slate-100 text-slate-500";
+
+                    return (
+                      <div key={member.user_id} className="flex items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0">
+                        <Avatar
+                          userId={user.id}
+                          name={user.name}
+                          email={user.email}
+                          avatarUrl={user.avatar_url}
+                          size="sm"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-slate-900">{user.name ?? user.email ?? "Unknown user"}</p>
+                            <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${badgeClass}`}>
+                              {badgeLabel}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 truncate text-xs text-slate-500">{user.email ?? user.job_role ?? user.system_role ?? "No details"}</p>
+                        </div>
+                        {hasMemberActions && (
+                          <div className="relative" onClick={(event) => event.stopPropagation()}>
+                            <button
+                              type="button"
+                              aria-label={`Manage ${user.name ?? user.email ?? "team member"}`}
+                              title={`Manage ${user.name ?? user.email ?? "team member"}`}
+                              disabled={Boolean(managingMemberId)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setOpenTeamMemberMenuId((current) => (current === member.user_id ? null : member.user_id));
+                              }}
+                              className="rounded-md p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+                            >
+                              <MoreHorizontal size={16} />
+                            </button>
+                            {openTeamMemberMenuId === member.user_id && (
+                              <div
+                                className="absolute right-0 top-full z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                {canPromoteMember && (
+                                  <button
+                                    type="button"
+                                    disabled={isMemberBusy}
+                                    onClick={() => void handlePromoteMember(member.user_id)}
+                                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                                  >
+                                    <Crown size={14} />
+                                    Promote to Lead
+                                  </button>
+                                )}
+                                {canRemoveMember && (
+                                  <button
+                                    type="button"
+                                    disabled={isMemberBusy}
+                                    onClick={() => requestRemoveMember(member)}
+                                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-50"
+                                  >
+                                    <UserMinus size={14} />
+                                    Remove from Project
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
         </div>
+      </Modal>
+
+      <Modal title="Remove Project Member" isOpen={Boolean(memberPendingRemoval)} onClose={() => setMemberPendingRemoval(null)}>
+        <p className="text-sm leading-relaxed text-slate-600">
+          Remove this member from the project? They will be unassigned from tasks in this project.
+        </p>
         <div className="mt-6 flex justify-end gap-3">
           <Button
             variant="ghost"
-            onClick={() => setShowAddMemberModal(false)}
-            disabled={isSubmitting}
+            onClick={() => setMemberPendingRemoval(null)}
+            disabled={Boolean(managingMemberId)}
             className="rounded-lg px-4 py-2 text-sm font-semibold"
           >
             Cancel
           </Button>
           <Button
-            onClick={() => handleAddMember(selectedMember?.id ?? "")}
-            disabled={isSubmitting || !selectedMember?.id}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+            onClick={confirmRemoveMember}
+            disabled={Boolean(managingMemberId)}
+            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
           >
-            {isSubmitting ? "Adding..." : "Add Member"}
+            {managingMemberId ? "Removing..." : "Remove Member"}
           </Button>
         </div>
       </Modal>
