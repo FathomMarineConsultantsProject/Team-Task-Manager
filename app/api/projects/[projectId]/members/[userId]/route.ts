@@ -83,21 +83,12 @@ export async function DELETE(req: Request, { params }: RouteContext) {
       .eq("id", user.id)
       .maybeSingle<{ system_role: string | null }>();
 
-    const { data: currentMember } = await adminClient
-      .from("project_members")
-      .select("project_id, user_id, role")
-      .eq("project_id", projectId)
-      .eq("user_id", user.id)
-      .maybeSingle<MemberRow>();
-
     const systemRole = normalizeRole(profile?.system_role);
-    const isOwner = project.owner_id === user.id;
-    const isProjectLead = normalizeRole(currentMember?.role) === "lead";
     const isAdmin = systemRole === "admin";
     const isSuperAdmin = systemRole === "super_admin";
 
-    if (!isOwner && !isProjectLead && !isAdmin && !isSuperAdmin) {
-      return json({ error: "Only project owners, leads, admins, or super admins can remove project members." }, 403);
+    if (!isAdmin && !isSuperAdmin) {
+      return json({ error: "Only admins can remove project members." }, 403);
     }
 
     if (project.owner_id === userId) {

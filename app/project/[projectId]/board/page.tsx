@@ -219,6 +219,23 @@ const formatDateTime = (value: string | null) => {
   });
 };
 
+const formatProjectOverviewDate = (value: string | null | undefined) => {
+  if (!value) {
+    return "Not set";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Not set";
+  }
+
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+};
+
 const formatStatusValue = (value: string | null | undefined) => {
   if (!value) {
     return "UNKNOWN";
@@ -269,6 +286,7 @@ export default function ProjectBoardPage({
   // Modal state (new)
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
+  const [showProjectOverviewModal, setShowProjectOverviewModal] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskStatus, setNewTaskStatus] = useState<ColumnId>("todo");
   const [newTaskAssignee, setNewTaskAssignee] = useState("");
@@ -276,7 +294,7 @@ export default function ProjectBoardPage({
   const [endDate, setEndDate] = useState("");
   const [newTaskDescription, setNewTaskDescription] = useState("");
   const [newMemberSearch, setNewMemberSearch] = useState("");
-  const [selectedMember, setSelectedMember] = useState<DbUser | null>(null);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [taskUpdateCounts, setTaskUpdateCounts] = useState<Record<string, number>>({});
@@ -340,23 +358,12 @@ export default function ProjectBoardPage({
   const isAdmin = systemRole === "admin";
   const canManageProject = isOwner || isAdmin || isSuperAdmin;
   const canManageProjectMembers = isOwner || isProjectLead || isAdmin || isSuperAdmin;
+  const canRemoveProjectMembers = isAdmin || isSuperAdmin;
   const isProjectMember = Boolean(profile?.id && members.some((member) => member.user_id === profile.id));
   const isProjectOwnerMember = Boolean(
     profile?.id &&
       members.some((member) => member.user_id === profile.id && normalizeRole(member.role) === "owner"),
   );
-  const managerCount = useMemo(() => {
-    const managerIds = new Set<string>();
-    if (project?.owner_id) {
-      managerIds.add(project.owner_id);
-    }
-    members.forEach((member) => {
-      if (normalizeRole(member.role) === "lead") {
-        managerIds.add(member.user_id);
-      }
-    });
-    return managerIds.size;
-  }, [members, project?.owner_id]);
   const canViewTaskUpdates = isProjectMember || canManageProject;
 
   useEffect(() => {
@@ -1194,9 +1201,9 @@ export default function ProjectBoardPage({
     [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, selectedAdditionalAssignees, pendingAttachments, newTaskDescription],
   );
 
-  const handleAddMember = useCallback(
-    async (userId: string) => {
-      if (!userId || !projectId) {
+  const handleAddMembers = useCallback(
+    async () => {
+      if (!projectId) {
         return;
       }
 
@@ -1206,26 +1213,36 @@ export default function ProjectBoardPage({
         return;
       }
 
+      const existingMemberIds = new Set(members.map((member) => member.user_id));
+      const newUserIds = selectedMemberIds.filter((userId) => !existingMemberIds.has(userId));
+
+      if (newUserIds.length === 0) {
+        setSelectedMemberIds([]);
+        alert("Selected users are already members of this project.");
+        return;
+      }
+
       setIsSubmitting(true);
 
       try {
-        console.log("Adding user to project:", { userId, projectId });
+        console.log("Adding users to project:", { userIds: newUserIds, projectId });
 
-        // Add to project_members
-        const { error: memberError } = await supabase.from("project_members").insert({
-          project_id: projectId,
-          user_id: userId,
-          role: "member",
-        });
+        const { error: memberError } = await supabase.from("project_members").insert(
+          newUserIds.map((userId) => ({
+            project_id: projectId,
+            user_id: userId,
+            role: "member",
+          })),
+        );
 
         if (memberError) {
           console.error("Member insert error:", memberError);
           throw memberError;
         }
 
-        console.log("Member added successfully");
+        console.log("Members added successfully");
         setNewMemberSearch("");
-        setSelectedMember(null);
+        setSelectedMemberIds([]);
         setShowAddMemberModal(false);
 
         // Reload members
@@ -1248,7 +1265,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, canManageProjectMembers],
+    [projectId, supabase, canManageProjectMembers, members, selectedMemberIds],
   );
 
   const handlePromoteMember = useCallback(
@@ -1307,8 +1324,8 @@ export default function ProjectBoardPage({
         return;
       }
 
-      if (!canManageProjectMembers) {
-        alert("Only project managers can remove project members.");
+      if (!canRemoveProjectMembers) {
+        alert("Only admins can remove project members.");
         return;
       }
 
@@ -1366,7 +1383,7 @@ export default function ProjectBoardPage({
         setMemberPendingRemoval(null);
       }
     },
-    [projectId, supabase, canManageProjectMembers, newTaskAssignee],
+    [projectId, supabase, canRemoveProjectMembers, newTaskAssignee],
   );
 
   const requestRemoveMember = useCallback((member: DbProjectMember) => {
@@ -2277,10 +2294,15 @@ export default function ProjectBoardPage({
           <div className="space-y-4">
             {/* HEADER: Title + Description + Buttons */}
             <div className="flex items-start justify-between">
-              <div className="flex-1">
+              <button
+                type="button"
+                title="View project details"
+                onClick={() => setShowProjectOverviewModal(true)}
+                className="-m-2 flex-1 cursor-pointer rounded-lg p-2 text-left transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300"
+              >
                 <h1 className="text-4xl font-bold tracking-[-0.02em] text-slate-900">{project.name || "Untitled Project"}</h1>
                 {project.description ? (
-                  <p className="mt-1 text-sm text-slate-600">{project.description}</p>
+                  <p className="mt-1 text-sm text-slate-600 hover:underline">{project.description}</p>
                 ) : null}
                 {(project.start_date || project.end_date) && (
                   <p className="text-sm text-slate-500 mt-1">
@@ -2289,7 +2311,7 @@ export default function ProjectBoardPage({
                     {project.end_date && `• Due: ${new Date(project.end_date).toLocaleDateString()}`}
                   </p>
                 )}
-              </div>
+              </button>
               <div className="ml-8 flex flex-col items-end gap-2">
                 <div className="flex items-center gap-1.5 rounded-xl border border-slate-200/60 bg-white/80 px-3 py-2 shadow-[0_8px_24px_-16px_rgba(15,23,42,0.5)] backdrop-blur-sm -translate-y-2">
                   {(timerStart && timerNow !== null) ? (
@@ -2814,6 +2836,40 @@ export default function ProjectBoardPage({
       />
 
 
+      {/* PROJECT OVERVIEW MODAL */}
+      <Modal
+        title="Project Overview"
+        isOpen={showProjectOverviewModal}
+        onClose={() => setShowProjectOverviewModal(false)}
+        maxWidth="max-w-3xl"
+      >
+        {project ? (
+          <div className="space-y-5 pb-4">
+            <div>
+              <h3 className="text-3xl font-bold tracking-[-0.02em] text-slate-900">{project.name || "Untitled Project"}</h3>
+            </div>
+
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Description</p>
+              <div className="mt-2 max-h-[360px] overflow-y-auto whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-relaxed text-slate-700">
+                {project.description?.trim() || "No description provided."}
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Start Date</p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">{formatProjectOverviewDate(project.start_date)}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Due Date</p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">{formatProjectOverviewDate(project.end_date)}</p>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
       {/* CREATE TASK MODAL */}
       <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setPendingAttachments([]); }}>
         <div className="space-y-4">
@@ -2840,8 +2896,8 @@ export default function ProjectBoardPage({
             <textarea
               id="task-description"
               placeholder="Add a description..."
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none resize-none"
-              rows={3}
+              className="mt-1 w-full min-h-[96px] max-h-[280px] resize-y overflow-y-auto rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+              rows={4}
               value={newTaskDescription}
               onChange={(e) => setNewTaskDescription(e.target.value)}
               disabled={isSubmitting}
@@ -2998,7 +3054,15 @@ export default function ProjectBoardPage({
       </Modal>
 
       {/* PROJECT TEAM MODAL */}
-      <Modal title="Project Team" isOpen={showAddMemberModal} onClose={() => setShowAddMemberModal(false)} maxWidth="max-w-4xl">
+      <Modal
+        title="Project Team"
+        isOpen={showAddMemberModal}
+        onClose={() => {
+          setSelectedMemberIds([]);
+          setShowAddMemberModal(false);
+        }}
+        maxWidth="max-w-4xl"
+      >
         <div className="space-y-5">
           <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">
             <button
@@ -3035,50 +3099,67 @@ export default function ProjectBoardPage({
                   value={newMemberSearch}
                   onChange={(e) => {
                     setNewMemberSearch(e.target.value);
-                    setSelectedMember(null);
                   }}
                   disabled={isSubmitting}
                   autoFocus
                 />
-                <p className="mt-1 text-xs text-slate-500">Select a user by name. Role is shown in suggestions.</p>
+                <p className="mt-1 text-xs text-slate-500">Select one or more users by name. Role is shown in suggestions.</p>
                 {filteredUsers.length > 0 ? (
                   <div className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-                    {filteredUsers.map((user) => (
-                      <div
-                        key={user.id}
-                        onClick={() => {
-                          setSelectedMember(user);
-                          setNewMemberSearch(user.name ?? user.email ?? "");
-                        }}
-                        className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100"
-                      >
-                        <span className="font-medium">{user.name ?? user.email ?? "Unknown"}</span>
-                        <span className="text-xs italic text-gray-400">{user.job_role ?? user.system_role ?? "user"}</span>
-                      </div>
-                    ))}
+                    {filteredUsers.map((user) => {
+                      const isSelected = selectedMemberIds.includes(user.id);
+
+                      return (
+                        <label
+                          key={user.id}
+                          className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 hover:bg-gray-100"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              setSelectedMemberIds((current) =>
+                                current.includes(user.id)
+                                  ? current.filter((id) => id !== user.id)
+                                  : [...current, user.id],
+                              );
+                            }}
+                            disabled={isSubmitting}
+                            className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-900"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">{user.name ?? user.email ?? "Unknown"}</span>
+                          </span>
+                          <span className="text-xs italic text-gray-400">{user.job_role ?? user.system_role ?? "user"}</span>
+                        </label>
+                      );
+                    })}
                   </div>
                 ) : null}
-                {selectedMember ? (
+                {selectedMemberIds.length > 0 ? (
                   <p className="mt-2 text-xs text-emerald-700">
-                    Selected: {selectedMember.name ?? selectedMember.email ?? selectedMember.id} ({selectedMember.job_role ?? selectedMember.system_role ?? "user"})
+                    {selectedMemberIds.length} selected
                   </p>
                 ) : null}
               </div>
               <div className="flex justify-end gap-3">
                 <Button
                   variant="ghost"
-                  onClick={() => setShowAddMemberModal(false)}
+                  onClick={() => {
+                    setSelectedMemberIds([]);
+                    setShowAddMemberModal(false);
+                  }}
                   disabled={isSubmitting}
                   className="rounded-lg px-4 py-2 text-sm font-semibold"
                 >
                   Cancel
                 </Button>
                 <Button
-                  onClick={() => handleAddMember(selectedMember?.id ?? "")}
-                  disabled={isSubmitting || !selectedMember?.id}
+                  onClick={() => void handleAddMembers()}
+                  disabled={isSubmitting || selectedMemberIds.length === 0}
                   className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
                 >
-                  {isSubmitting ? "Adding..." : "Add Member"}
+                  {isSubmitting ? "Adding..." : "Add selected"}
                 </Button>
               </div>
             </>
@@ -3103,10 +3184,8 @@ export default function ProjectBoardPage({
                     if (!user) return null;
                     const isOwnerMember = member.user_id === project?.owner_id;
                     const isLeadMember = normalizeRole(member.role) === "lead";
-                    const isCurrentUserMember = member.user_id === profile?.id;
-                    const isOnlyRemainingManager = isCurrentUserMember && managerCount <= 1 && (isOwnerMember || isLeadMember);
                     const canPromoteMember = canManageProjectMembers && !isOwnerMember && !isLeadMember;
-                    const canRemoveMember = canManageProjectMembers && !isOwnerMember && !isOnlyRemainingManager;
+                    const canRemoveMember = canRemoveProjectMembers && !isOwnerMember;
                     const hasMemberActions = canPromoteMember || canRemoveMember;
                     const isMemberBusy = managingMemberId === member.user_id;
                     const badgeLabel = isOwnerMember ? "Owner" : isLeadMember ? "Lead" : user.job_role ?? "Member";
@@ -3237,8 +3316,8 @@ export default function ProjectBoardPage({
               </label>
               <textarea
                 id="edit-task-description"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none resize-none"
-                rows={3}
+                className="mt-1 w-full min-h-[96px] max-h-[280px] resize-y overflow-y-auto rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+                rows={4}
                 placeholder="Add a description..."
                 value={editingTask.description ?? ""}
                 onChange={(e) => setEditingTask({ ...editingTask, description: e.target.value || null })}

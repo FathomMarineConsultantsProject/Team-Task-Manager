@@ -63,7 +63,8 @@ import {
   Legend,
 } from "recharts";
 
-type ProjectInfo = { id: string; name: string | null; start_date?: string | null; created_at?: string | null };
+type ProjectInfo = { id: string; name: string | null; start_date?: string | null; created_at?: string | null; owner_id?: string | null };
+type ProjectMemberInfo = { project_id: string; user_id: string; role?: string | null };
 type TabId = "overview" | "board" | "doclist" | "activity" | "ai";
 
 const CLIENT_STATUS_COLORS = {
@@ -145,6 +146,49 @@ const STATUS_LABEL_MAP: Record<string, string> = {
 function friendlyStatus(s: string | null | undefined): string {
   if (!s) return "Unknown";
   return STATUS_LABEL_MAP[s] ?? s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function getProjectAllowedUserIds(
+  projectId: string,
+  projectMembers: ProjectMemberInfo[],
+  projects: ProjectInfo[],
+) {
+  const allowedUserIds = new Set(
+    projectMembers
+      .filter((member) => member.project_id === projectId)
+      .map((member) => member.user_id),
+  );
+  const ownerId = projects.find((project) => project.id === projectId)?.owner_id;
+  if (ownerId) {
+    allowedUserIds.add(ownerId);
+  }
+  return allowedUserIds;
+}
+
+function scopeProjectWorkloadInputs<TTask extends AnalyticsTask>(
+  tasks: TTask[],
+  assignees: AnalyticsAssignee[],
+  users: AnalyticsUser[],
+  projectId: string,
+  projectMembers: ProjectMemberInfo[],
+  projects: ProjectInfo[],
+) {
+  if (projectId === "all") {
+    return { tasks, assignees, users };
+  }
+
+  const allowedUserIds = getProjectAllowedUserIds(projectId, projectMembers, projects);
+  const scopedTasks = tasks.map((task) =>
+    task.assigned_to && !allowedUserIds.has(task.assigned_to)
+      ? { ...task, assigned_to: null }
+      : task,
+  );
+
+  return {
+    tasks: scopedTasks,
+    assignees: assignees.filter((assignee) => allowedUserIds.has(assignee.user_id)),
+    users: users.filter((user) => allowedUserIds.has(user.id)),
+  };
 }
 
 function clientPreviewStatusColor(statusKey: ReportStatusKey | string, statusLabel?: string) {
@@ -541,7 +585,7 @@ function bestReportEndDate(task: ReportTaskWithDetails) {
 
 function getProjectLeadInfo(
   projectId: string,
-  projectMembers: { project_id: string; user_id: string; role?: string | null }[],
+  projectMembers: ProjectMemberInfo[],
   usersById: Map<string, AnalyticsUser>,
   teamRows: TeamContributionRow[],
 ): ProjectLeadInfo {
@@ -1345,7 +1389,7 @@ export default function ReportsPage() {
   const [logs, setLogs] = useState<AnalyticsLog[]>([]);
   const [assignees, setAssignees] = useState<AnalyticsAssignee[]>([]);
   const [users, setUsers] = useState<AnalyticsUser[]>([]);
-  const [projectMembers, setProjectMembers] = useState<{ project_id: string; user_id: string; role?: string | null }[]>([]);
+  const [projectMembers, setProjectMembers] = useState<ProjectMemberInfo[]>([]);
 
   // Activity feed
   const [comments, setComments] = useState<EnrichedComment[]>([]);
@@ -1389,7 +1433,7 @@ export default function ReportsPage() {
       // Fetch projects
       const { data: projData } = await supabase
         .from("projects")
-        .select("id, name, start_date, created_at")
+        .select("id, name, start_date, created_at, owner_id")
         .eq("is_active", true)
         .order("name");
       const projects = (projData ?? []) as ProjectInfo[];
@@ -1438,7 +1482,7 @@ export default function ReportsPage() {
       setAssignees((assigneesRes.data ?? []) as AnalyticsAssignee[]);
       const allUsers = (usersRes.data ?? []) as AnalyticsUser[];
       setUsers(allUsers);
-      setProjectMembers((pmRes.data ?? []) as { project_id: string; user_id: string; role?: string | null }[]);
+      setProjectMembers((pmRes.data ?? []) as ProjectMemberInfo[]);
 
       // Enrich comments
       const usersById = new Map(allUsers.map((u) => [u.id, u]));
@@ -1511,7 +1555,14 @@ export default function ReportsPage() {
   // ── Compute KPIs ──────────────────────────────
   const kpis = useMemo(() => computeKPIs(filteredTasks), [filteredTasks]);
   const statusDist = useMemo(() => computeStatusDistribution(filteredTasks), [filteredTasks]);
-  const workload = useMemo(() => computeWorkload(filteredTasks, assignees, users), [filteredTasks, assignees, users]);
+  const overviewWorkloadScope = useMemo(
+    () => scopeProjectWorkloadInputs(filteredTasks, assignees, users, projectFilter, projectMembers, allProjects),
+    [filteredTasks, assignees, users, projectFilter, projectMembers, allProjects],
+  );
+  const workload = useMemo(
+    () => computeWorkload(overviewWorkloadScope.tasks, overviewWorkloadScope.assignees, overviewWorkloadScope.users),
+    [overviewWorkloadScope],
+  );
   const velocity = useMemo(() => computeVelocity(filteredLogs, 8), [filteredLogs]);
   const overdueTasks = useMemo(() => getOverdueTasks(filteredTasks, users), [filteredTasks, users]);
 
@@ -1638,13 +1689,9 @@ export default function ReportsPage() {
   // Filter users by project membership (Part 3)
   const filteredAiUsers = useMemo(() => {
     if (aiProjectFilter === "all") return users;
-    const memberIds = new Set(
-      projectMembers
-        .filter((pm) => pm.project_id === aiProjectFilter)
-        .map((pm) => pm.user_id)
-    );
+    const memberIds = getProjectAllowedUserIds(aiProjectFilter, projectMembers, allProjects);
     return users.filter((u) => memberIds.has(u.id));
-  }, [aiProjectFilter, users, projectMembers]);
+  }, [aiProjectFilter, users, projectMembers, allProjects]);
 
   const generateAiReport = useCallback(async () => {
     if (!profile?.id) return;
@@ -1661,6 +1708,7 @@ export default function ReportsPage() {
       if (aiProjectFilter !== "all") {
         aiTasks = aiTasks.filter((t: any) => t.project_id === aiProjectFilter);
       }
+      const aiWorkloadScope = scopeProjectWorkloadInputs(aiTasks, assignees, users, aiProjectFilter, projectMembers, allProjects);
 
       if (aiReportType === "user") {
         if (aiProjectFilter === "all" || aiUserFilter === "all") {
@@ -1709,7 +1757,7 @@ export default function ReportsPage() {
             createdAt: comment.createdAt,
           })),
         ].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()).slice(0, 24);
-        const workloadRows = computeWorkload(aiTasks, assignees, users);
+        const workloadRows = computeWorkload(aiWorkloadScope.tasks, aiWorkloadScope.assignees, aiWorkloadScope.users);
         const maxWorkload = Math.max(1, ...workloadRows.map((row) => row.total));
         const userWorkload = workloadRows.find((row) => row.userId === aiUserFilter);
         const utilizationScore = clampScore(((userWorkload?.total ?? userTasks.length) / maxWorkload) * 100);
@@ -1847,7 +1895,7 @@ Utilization: ${utilizationScore}%`;
         };
       });
 
-      const workloadRows = computeWorkload(aiTasks, assignees, users);
+      const workloadRows = computeWorkload(aiWorkloadScope.tasks, aiWorkloadScope.assignees, aiWorkloadScope.users);
       const maxWorkload = Math.max(1, ...workloadRows.map((row) => row.total));
       const teamRows: TeamContributionRow[] = workloadRows.map((row) => ({
         userId: row.userId,
