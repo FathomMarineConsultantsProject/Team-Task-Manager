@@ -1,54 +1,50 @@
-import { createClient } from "@supabase/supabase-js";
+import { isAdminRole, json, requireAdmin } from "@/lib/adminAuth";
 
 export async function POST(req: Request) {
-  const body = await req.json();
-  const { name, email, role, job_role } = body;
-
-  if (!name || !email) {
-    return new Response(JSON.stringify({ error: "Name and email are required" }), {
-      status: 400,
-    });
+  const context = await requireAdmin(req);
+  if (context instanceof Response) {
+    return context;
   }
 
-  const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  );
+  if (!isAdminRole(context.role)) {
+    return json({ error: "Admin access is required." }, 403);
+  }
+
+  const body = await req.json();
+  const { name, email, role, job_role } = body;
+  const requestedRole = typeof role === "string" ? role : "user";
+
+  if (!name || !email) {
+    return json({ error: "Name and email are required" }, 400);
+  }
+  if (!["user", "admin"].includes(requestedRole)) {
+    return json({ error: "Invalid system role" }, 400);
+  }
 
   const password = `${name.split(" ")[0]}@fmc`;
 
   const { data: authUser, error: authError } =
-    await supabaseAdmin.auth.admin.createUser({
+    await context.adminClient.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
     });
 
   if (authError) {
-    return new Response(JSON.stringify({ error: authError.message }), {
-      status: 400,
-    });
+    return json({ error: authError.message }, 400);
   }
 
-  const { error: dbError } = await supabaseAdmin.from("users").insert({
+  const { error: dbError } = await context.adminClient.from("users").insert({
     id: authUser.user.id,
     name,
     email,
-    system_role: role ?? "user",
+    system_role: requestedRole,
     job_role: job_role ?? "",
   });
 
   if (dbError) {
-    return new Response(JSON.stringify({ error: dbError.message }), {
-      status: 400,
-    });
+    return json({ error: dbError.message }, 400);
   }
 
-  return new Response(
-    JSON.stringify({
-      email,
-      password,
-    }),
-    { status: 200 },
-  );
+  return json({ email, password });
 }

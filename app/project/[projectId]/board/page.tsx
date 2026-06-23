@@ -2356,7 +2356,7 @@ export default function ProjectBoardPage({
                       className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
                     >
                       <Users size={16} />
-                      Add Member
+                      Team
                     </Button>
                   )}
                   <Button
@@ -3175,13 +3175,14 @@ export default function ProjectBoardPage({
                   className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
                 />
               </div>
-              <div className="max-h-[420px] overflow-y-auto rounded-xl border border-slate-200 bg-white">
+              <div className="relative min-h-[280px] overflow-visible rounded-xl border border-slate-200 bg-white">
                 {filteredTeamMembers.length === 0 ? (
                   <div className="px-4 py-8 text-center text-sm text-slate-500">No team members found.</div>
                 ) : (
-                  filteredTeamMembers.map((member) => {
+                  filteredTeamMembers.map((member, memberIndex) => {
                     const user = member.user;
                     if (!user) return null;
+                    const shouldOpenTeamMenuUpward = filteredTeamMembers.length <= 2 || memberIndex >= filteredTeamMembers.length - 2;
                     const isOwnerMember = member.user_id === project?.owner_id;
                     const isLeadMember = normalizeRole(member.role) === "lead";
                     const canPromoteMember = canManageProjectMembers && !isOwnerMember && !isLeadMember;
@@ -3230,7 +3231,9 @@ export default function ProjectBoardPage({
                             </button>
                             {openTeamMemberMenuId === member.user_id && (
                               <div
-                                className="absolute right-0 top-full z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg"
+                                className={`absolute right-0 z-50 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg ${
+                                  shouldOpenTeamMenuUpward ? "bottom-full mb-2" : "top-full mt-2"
+                                }`}
                                 onClick={(event) => event.stopPropagation()}
                               >
                                 {canPromoteMember && (
