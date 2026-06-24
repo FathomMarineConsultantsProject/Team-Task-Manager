@@ -185,6 +185,15 @@ const CLIENT_STATUS_COLORS = {
   nearDue: "#F97316",
 };
 
+const BRAND_NAME = "Fathhom Marine Consultants";
+const BRAND_NAME_UPPER = "FATHHOM MARINE CONSULTANTS";
+
+type ProjectManagerRecommendation = {
+  title: string;
+  color: string;
+  bullets: string[];
+};
+
 function clean(value: unknown) {
   return String(value ?? "")
     .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "")
@@ -383,7 +392,7 @@ class PdfDoc {
 
 function footer(c: Canvas, reportDate: string, pageNo: number, pageCount: number) {
   c.line(M, 562, PAGE_W - M, 562, COLORS.border);
-  c.text("Powered by Fathom Marine Consultancy", M, 569, 10, COLORS.muted, true);
+  c.text(`Powered by ${BRAND_NAME}`, M, 569, 10, COLORS.muted, true);
   c.text(`Generated ${formatDate(reportDate)}`, 342, 569, 10, COLORS.muted);
   c.text(`Page ${pageNo} of ${pageCount}`, PAGE_W - 96, 569, 10, COLORS.muted, true);
 }
@@ -571,6 +580,71 @@ function statusText(task: ReportTaskItem) {
   return `${task.status}${task.projectName ? ` / ${task.projectName}` : ""}`;
 }
 
+function buildClientRecommendationCards(report: ExecutiveReportData): ProjectManagerRecommendation[] {
+  const activeCount = Math.max(0, report.kpis.total - report.kpis.completed);
+  const inProgressCount = report.statusSummary?.inProgress ?? report.kpis.inProgress;
+  const nearDueCount = report.kpis.nearDue;
+  const overdueCount = report.kpis.overdue;
+  const completedCount = report.kpis.completed;
+  const completionRate = report.health.completionRate;
+  const missingDateCount = report.taskRegister.filter((task) => task.dueDate === "--" || task.dueDate === "Invalid Date").length;
+  const longDurationCount = report.gantt.tasks.filter((task) => {
+    const start = new Date(task.startValue ?? "").getTime();
+    const end = new Date(task.endValue ?? "").getTime();
+    return !Number.isNaN(start) && !Number.isNaN(end) && end - start >= 14 * 86400000;
+  }).length;
+  const upcomingCount = report.timeline.length;
+
+  const deliveryFocus: string[] = [];
+  if (inProgressCount > 0) {
+    deliveryFocus.push(`Complete the ${inProgressCount} active in-progress ${inProgressCount === 1 ? "deliverable" : "deliverables"} before expanding new workstreams, with the most advanced items closed first.`);
+  } else {
+    deliveryFocus.push(`Maintain delivery momentum by keeping completed work validated and any remaining open items visible in the task register.`);
+  }
+  deliveryFocus.push(`${completedCount} of ${report.kpis.total} tracked ${report.kpis.total === 1 ? "deliverable is" : "deliverables are"} complete, with ${activeCount} still requiring follow-through to protect the delivery plan.`);
+  deliveryFocus.push(`Use the ${completionRate}% completion position to focus the next review on closing measurable deliverables rather than adding unplanned scope.`);
+
+  const priorityActions: string[] = [];
+  if (nearDueCount > 0) {
+    priorityActions.push(`Review the ${nearDueCount} near-due ${nearDueCount === 1 ? "item" : "items"} first and confirm the owner, dependency status, and target completion date for each.`);
+  } else {
+    priorityActions.push(`Keep the next milestone review focused on upcoming deliverables so any date movement is identified before it becomes urgent.`);
+  }
+  if (overdueCount > 0) {
+    priorityActions.push(`Clear the ${overdueCount} overdue ${overdueCount === 1 ? "item" : "items"} by confirming recovery actions and revised dates before downstream milestones are affected.`);
+  }
+  priorityActions.push(`Keep the task register current by confirming status, due date, and completion evidence for priority items before the next client update.`);
+
+  const scheduleConfidence: string[] = [];
+  if (longDurationCount > 0) {
+    scheduleConfidence.push(`Confirm target completion dates for ${longDurationCount} longer-duration ${longDurationCount === 1 ? "Gantt item" : "Gantt items"} and split any broad activity into measurable deliverables if tracking is unclear.`);
+  } else {
+    scheduleConfidence.push(`The current Gantt timeline remains trackable when date changes are captured promptly and reflected in the task register.`);
+  }
+  if (missingDateCount > 0) {
+    scheduleConfidence.push(`Resolve ${missingDateCount} ${missingDateCount === 1 ? "task" : "tasks"} without clear scheduling information by adding confirmed owners and due dates.`);
+  } else {
+    scheduleConfidence.push(`Continue validating planned dates during each review so schedule confidence is based on current task-level information.`);
+  }
+  scheduleConfidence.push(`Communicate date changes early, including the impact on upcoming milestones and any client decision needed to preserve the timeline.`);
+
+  const clientNextSteps = [
+    `Maintain a weekly progress update using the Gantt timeline and task register as the source of truth for completed, active, and pending work.`,
+    `Confirm acceptance criteria for upcoming deliverables so completion can be recorded without delay once work is ready for review.`,
+    upcomingCount > 0
+      ? `Review the next ${Math.min(upcomingCount, 3)} upcoming ${upcomingCount === 1 ? "deliverable" : "deliverables"} with stakeholders and confirm whether any client input is needed.`
+      : `Review the next planned deliverables with stakeholders and confirm whether any client input is needed before work advances.`,
+    `Approve scope or date changes quickly once the impact on existing delivery commitments is visible.`,
+  ];
+
+  return [
+    { title: "Delivery Focus", color: COLORS.blue, bullets: deliveryFocus.slice(0, 4) },
+    { title: "Priority Actions", color: COLORS.orange, bullets: priorityActions.slice(0, 4) },
+    { title: "Schedule Confidence", color: COLORS.purple, bullets: scheduleConfidence.slice(0, 4) },
+    { title: "Client Next Steps", color: COLORS.green, bullets: clientNextSteps.slice(0, 4) },
+  ];
+}
+
 function estimatedTextWidth(value: unknown, size: number) {
   return clean(value).length * size * 0.56;
 }
@@ -594,6 +668,34 @@ function compactDuration(startValue: string | null, endValue: string | null) {
   if (Number.isNaN(start) || Number.isNaN(end)) return "";
   const days = Math.max(1, Math.ceil((end - start) / 86400000));
   return days >= 14 && days % 7 === 0 ? `${days / 7}w` : `${days}d`;
+}
+
+function drawGanttDurationLabel(
+  c: Canvas,
+  label: string,
+  barX: number,
+  barY: number,
+  barW: number,
+  timelineX: number,
+  timelineRight: number,
+  insideColor: string,
+  outsideColor: string,
+) {
+  if (!label) return;
+  const size = 7.5;
+  const labelW = estimatedTextWidth(label, size);
+  const textY = barY + 2;
+  if (barW >= labelW + 8) {
+    c.text(label, barX + 4, textY, size, insideColor, true);
+    return;
+  }
+  if (barX + barW + 4 + labelW <= timelineRight) {
+    c.text(label, barX + barW + 4, textY, size, outsideColor, true);
+    return;
+  }
+  if (barX - 4 - labelW >= timelineX) {
+    c.text(label, barX - 4 - labelW, textY, size, outsideColor, true);
+  }
 }
 
 function donutSegment(c: Canvas, cx: number, cy: number, outerR: number, innerR: number, startAngle: number, endAngle: number, color: string) {
@@ -797,15 +899,13 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   const statusTotal = statusRows.reduce((sum, item) => sum + item.value, 0);
 
   pdf.addPage((c, pageNo, pageCount) => {
-    const leadLines = wrap(formatLeadLine(report.leads), 76, 2);
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
     c.text("POWERED BY", M, 36, 9, "#a7b0d6", true);
-    c.text("FATHOM MARINE CONSULTANCY", M, 52, 15, "#ffffff", true);
+    c.text(BRAND_NAME_UPPER, M, 52, 15, "#ffffff", true);
     c.text("CLIENT PROJECT REPORT", M, 102, 34, "#ffffff", true);
     c.text(report.projectName, M, 148, 18, "#c7d2fe", true);
-    c.text(`Owner: ${report.leads.owner}`, M, 194, 12, "#dbeafe");
-    c.textLines(leadLines, M, 214, 12, "#dbeafe", false, 15);
-    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 244, 12, "#dbeafe");
+    c.text(`Owner: ${BRAND_NAME}`, M, 194, 12, "#dbeafe");
+    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 214, 12, "#dbeafe");
     const cards = [
       ["Total Tasks", report.kpis.total, CLIENT_STATUS_COLORS.todo],
       ["Completed", report.kpis.completed, CLIENT_STATUS_COLORS.completed],
@@ -882,9 +982,10 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
           const barW = Math.min(timelineRight - barX, Math.max(5, timelineW * width / 100));
           const color = clientStatusColor(task.statusKey, task.status);
           if (barW >= 2) {
-            c.rect(barX, rowTop + 11, barW, 13, color);
+            const barY = rowTop + 11;
+            c.rect(barX, barY, barW, 13, color);
             const duration = compactDuration(task.startValue, task.endValue);
-            if (duration && barW >= 24) c.text(duration, barX + 4, rowTop + 13, 7.5, "#ffffff", true);
+            drawGanttDurationLabel(c, duration, barX, barY, barW, timelineX, timelineRight, "#ffffff", COLORS.ink);
           }
         }
         rowTop += rowH + 2;
@@ -935,6 +1036,23 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
     });
   }
 
+  pdf.addPage((c, pageNo, pageCount) => {
+    clientSectionHeader(c, "Project Manager's Recommendation");
+    buildClientRecommendationCards(report).forEach((card, index) => {
+      const x = M + index * 195;
+      panel(c, x, 88, 178, 392, card.title);
+      c.rect(x, 114, 178, 5, card.color);
+      let textY = 142;
+      card.bullets.slice(0, 4).forEach((item) => {
+        const lines = wrap(item, 22, 4);
+        c.text("-", x + 12, textY, 9.5, card.color, true);
+        c.textLines(lines, x + 25, textY, 8.4, COLORS.ink, false, 11);
+        textY += lines.length * 11 + 16;
+      });
+    });
+    footer(c, report.generatedAt, pageNo, pageCount);
+  });
+
   return pdf.build();
 }
 
@@ -950,7 +1068,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
     const leadLines = wrap(formatLeadLine(report.leads), 76, 2);
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
     c.text("POWERED BY", M, 36, 9, "#a7b0d6", true);
-    c.text("FATHOM MARINE CONSULTANCY", M, 52, 15, "#ffffff", true);
+    c.text(BRAND_NAME_UPPER, M, 52, 15, "#ffffff", true);
     c.text("PROJECT EXECUTIVE REPORT", M, 102, 34, "#ffffff", true);
     c.text(report.projectName, M, 148, 18, "#c7d2fe", true);
     c.text("Project Details", M, 184, 12, "#ffffff", true);
@@ -1078,9 +1196,11 @@ function buildProjectPdf(report: ExecutiveReportData) {
           const width = Math.max(2, clamp(((clippedEnd - clippedStart) / spanMs) * 100, 1, 100 - left));
           const barX = timelineX + timelineW * left / 100;
           const barW = Math.max(5, timelineW * width / 100);
-          c.rect(barX, top + 10, barW, 10, statusColor(task.statusKey));
-          if (task.statusKey === "completed" || task.statusKey === "done_early") c.rect(barX, top + 10, barW, 10, COLORS.green);
+          const barY = top + 10;
+          c.rect(barX, barY, barW, 10, statusColor(task.statusKey));
+          if (task.statusKey === "completed" || task.statusKey === "done_early") c.rect(barX, barY, barW, 10, COLORS.green);
           c.rect(Math.min(timelineX + timelineW - 4, barX + barW - 3), top + 8, 6, 14, statusColor(task.statusKey));
+          drawGanttDurationLabel(c, duration === "--" ? "" : duration, barX, barY, barW, timelineX, timelineX + timelineW, "#ffffff", COLORS.ink);
         }
         rowTop += rowH + 2;
       });
@@ -1157,7 +1277,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
   }
 
   pdf.addPage((c, pageNo, pageCount) => {
-    sectionHeader(c, "AI Recommendations");
+    sectionHeader(c, "Project Manager's Recommendation");
     const columns = [
       { title: "Bottlenecks", items: report.recommendations.slice(0, 2), color: COLORS.red },
       { title: "Priority Actions", items: report.recommendations.slice(2, 4), color: COLORS.orange },
@@ -1183,7 +1303,7 @@ function buildUserPdf(report: UserPerformanceReportData) {
   pdf.addPage((c, pageNo, pageCount) => {
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
     c.text("POWERED BY", M, 36, 9, "#a7b0d6", true);
-    c.text("FATHOM MARINE CONSULTANCY", M, 52, 15, "#ffffff", true);
+    c.text(BRAND_NAME_UPPER, M, 52, 15, "#ffffff", true);
     c.text("USER PERFORMANCE REPORT", M, 102, 34, "#ffffff", true);
     c.text(`${report.userName} / ${report.projectName}`, M, 148, 18, "#c7d2fe", true);
     c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 184, 12, "#dbeafe");

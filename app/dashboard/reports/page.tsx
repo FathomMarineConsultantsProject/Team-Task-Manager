@@ -380,6 +380,14 @@ type GeneratedAiReport =
   | { type: "project"; audience: "internal" | "client"; data: ExecutiveReportData }
   | { type: "user"; data: UserPerformanceReportData };
 
+const BRAND_NAME = "Fathhom Marine Consultants";
+
+type ProjectManagerRecommendation = {
+  title: string;
+  color: string;
+  bullets: string[];
+};
+
 // ── KPI Card ────────────────────────────────────
 
 function KpiCard({
@@ -556,6 +564,71 @@ function buildFallbackRecommendations(data: {
   if (data.overloadedUsers > 0) recommendations.push("Rebalance workload from overloaded users to available contributors.");
   if (data.completionRate < 60) recommendations.push("Focus execution on the smallest set of high-impact tasks needed to lift completion rate.");
   return recommendations.length ? recommendations : ["Maintain current delivery cadence and continue monitoring near-due and workload signals."];
+}
+
+function buildClientRecommendationCards(report: ExecutiveReportData): ProjectManagerRecommendation[] {
+  const activeCount = Math.max(0, report.kpis.total - report.kpis.completed);
+  const inProgressCount = report.statusSummary.inProgress;
+  const nearDueCount = report.kpis.nearDue;
+  const overdueCount = report.kpis.overdue;
+  const completedCount = report.kpis.completed;
+  const completionRate = report.health.completionRate;
+  const missingDateCount = report.taskRegister.filter((task) => task.dueDate === "--" || task.dueDate === "Invalid Date").length;
+  const longDurationCount = report.gantt.tasks.filter((task) => {
+    const start = new Date(task.startValue ?? "").getTime();
+    const end = new Date(task.endValue ?? "").getTime();
+    return !Number.isNaN(start) && !Number.isNaN(end) && end - start >= 14 * 86400000;
+  }).length;
+  const upcomingCount = report.timeline.length;
+
+  const deliveryFocus: string[] = [];
+  if (inProgressCount > 0) {
+    deliveryFocus.push(`Complete the ${inProgressCount} active in-progress ${inProgressCount === 1 ? "deliverable" : "deliverables"} before expanding new workstreams, with the most advanced items closed first.`);
+  } else {
+    deliveryFocus.push("Maintain delivery momentum by keeping completed work validated and any remaining open items visible in the task register.");
+  }
+  deliveryFocus.push(`${completedCount} of ${report.kpis.total} tracked ${report.kpis.total === 1 ? "deliverable is" : "deliverables are"} complete, with ${activeCount} still requiring follow-through to protect the delivery plan.`);
+  deliveryFocus.push(`Use the ${completionRate}% completion position to focus the next review on closing measurable deliverables rather than adding unplanned scope.`);
+
+  const priorityActions: string[] = [];
+  if (nearDueCount > 0) {
+    priorityActions.push(`Review the ${nearDueCount} near-due ${nearDueCount === 1 ? "item" : "items"} first and confirm the owner, dependency status, and target completion date for each.`);
+  } else {
+    priorityActions.push("Keep the next milestone review focused on upcoming deliverables so any date movement is identified before it becomes urgent.");
+  }
+  if (overdueCount > 0) {
+    priorityActions.push(`Clear the ${overdueCount} overdue ${overdueCount === 1 ? "item" : "items"} by confirming recovery actions and revised dates before downstream milestones are affected.`);
+  }
+  priorityActions.push("Keep the task register current by confirming status, due date, and completion evidence for priority items before the next client update.");
+
+  const scheduleConfidence: string[] = [];
+  if (longDurationCount > 0) {
+    scheduleConfidence.push(`Confirm target completion dates for ${longDurationCount} longer-duration ${longDurationCount === 1 ? "Gantt item" : "Gantt items"} and split any broad activity into measurable deliverables if tracking is unclear.`);
+  } else {
+    scheduleConfidence.push("The current Gantt timeline remains trackable when date changes are captured promptly and reflected in the task register.");
+  }
+  if (missingDateCount > 0) {
+    scheduleConfidence.push(`Resolve ${missingDateCount} ${missingDateCount === 1 ? "task" : "tasks"} without clear scheduling information by adding confirmed owners and due dates.`);
+  } else {
+    scheduleConfidence.push("Continue validating planned dates during each review so schedule confidence is based on current task-level information.");
+  }
+  scheduleConfidence.push("Communicate date changes early, including the impact on upcoming milestones and any client decision needed to preserve the timeline.");
+
+  const clientNextSteps = [
+    "Maintain a weekly progress update using the Gantt timeline and task register as the source of truth for completed, active, and pending work.",
+    "Confirm acceptance criteria for upcoming deliverables so completion can be recorded without delay once work is ready for review.",
+    upcomingCount > 0
+      ? `Review the next ${Math.min(upcomingCount, 3)} upcoming ${upcomingCount === 1 ? "deliverable" : "deliverables"} with stakeholders and confirm whether any client input is needed.`
+      : "Review the next planned deliverables with stakeholders and confirm whether any client input is needed before work advances.",
+    "Approve scope or date changes quickly once the impact on existing delivery commitments is visible.",
+  ];
+
+  return [
+    { title: "Delivery Focus", color: "#2563eb", bullets: deliveryFocus.slice(0, 4) },
+    { title: "Priority Actions", color: "#f59e0b", bullets: priorityActions.slice(0, 4) },
+    { title: "Schedule Confidence", color: "#6c4ff6", bullets: scheduleConfidence.slice(0, 4) },
+    { title: "Client Next Steps", color: "#16a34a", bullets: clientNextSteps.slice(0, 4) },
+  ];
 }
 
 function getRiskLevel(overdueCount: number, nearDueCount: number, staleCount: number): "Low" | "Medium" | "High" {
@@ -742,7 +815,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
       {/* ── Cover Page ── */}
       <div className="rounded-2xl border border-slate-800 bg-[#050816] p-8 text-white shadow-lg">
         <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">Powered by</p>
-        <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">Fathom Marine Consultancy</p>
+        <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">{BRAND_NAME}</p>
         <p className="mt-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-500">Executive Reporting System</p>
         <h2 className="mt-6 text-3xl font-bold tracking-tight">{report.projectName}</h2>
         <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-slate-300">
@@ -1065,8 +1138,8 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
         )}
       </ReportSection>
 
-      {/* ── 11. AI Recommendations ── */}
-      <ReportSection title="11. AI Recommendations">
+      {/* ── 11. Project Manager's Recommendation ── */}
+      <ReportSection title="11. Project Manager's Recommendation">
         <div className="grid gap-3 md:grid-cols-2">
           {report.recommendations.map((item, index) => (
             <div key={`ai-${index}`} className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 overflow-hidden">
@@ -1100,18 +1173,16 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
     { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
   ];
-  const leadDisplay = formatLeadDisplay(report.leads);
-
+  const recommendationCards = buildClientRecommendationCards(report);
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-slate-800 bg-[#050816] p-8 text-white shadow-lg">
         <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">Powered by</p>
-        <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">Fathom Marine Consultancy</p>
+        <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">{BRAND_NAME}</p>
         <p className="mt-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-500">Client Project Report</p>
         <h2 className="mt-6 text-3xl font-bold tracking-tight">{report.projectName}</h2>
         <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
-          <span>Owner: <strong className="text-white">{report.leads.owner}</strong></span>
-          <span>{leadDisplay.label}: <strong className="text-white">{leadDisplay.value}</strong></span>
+          <span>Owner: <strong className="text-white">{BRAND_NAME}</strong></span>
           <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
         </div>
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -1175,6 +1246,27 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
               <td className="break-words px-3 py-2 font-medium text-slate-900">{task.title}</td><td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${clientPreviewStatusColor(task.statusKey, task.status)}18`, color: clientPreviewStatusColor(task.statusKey, task.status) }}>{task.status}</span></td><td className="px-3 py-2">{task.progress}%</td><td className="px-3 py-2">{task.startDate}</td><td className="px-3 py-2">{task.dueDate}</td><td className="px-3 py-2">{task.timeLeft}</td>
             </tr>)}</tbody>
           </table>
+        </div>
+      </ReportSection>
+
+      <ReportSection title="Project Manager's Recommendation">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {recommendationCards.map((card) => (
+            <div key={card.title} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <div className="bg-[#24124d] px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-white">{card.title}</p>
+              </div>
+              <div className="h-1" style={{ backgroundColor: card.color }} />
+              <ul className="space-y-2.5 px-3 py-3 text-xs leading-relaxed text-slate-700">
+                {card.bullets.map((item) => (
+                  <li key={item} className="flex gap-2">
+                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: card.color }} />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
       </ReportSection>
     </div>
@@ -1927,7 +2019,7 @@ Utilization: ${utilizationScore}%`;
         : getProjectLeadInfo(aiProjectFilter, projectMembers, reportUsersById, teamRows);
       const actionItems = taskRegister.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
 
-      let recommendations = reportAudience === "client" ? [] : buildFallbackRecommendations({
+      let recommendations = buildFallbackRecommendations({
         overdueCount: overdueItems.length,
         nearDueCount: nearDueItems.length,
         staleCount: staleItems.length,
