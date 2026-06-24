@@ -473,6 +473,43 @@ function wrapCell(value: unknown, maxChars: number, maxLines = 2) {
   return lines;
 }
 
+function safeWrapText(value: unknown, maxChars: number, maxLines = 3) {
+  const text = clean(value)
+    .replace(/[_/\\]+/g, " ")
+    .replace(/-/g, " - ");
+  const words = text.split(" ").filter(Boolean).flatMap((word) => {
+    if (word.length <= maxChars) return [word];
+    const chunks: string[] = [];
+    for (let index = 0; index < word.length; index += maxChars) {
+      chunks.push(word.slice(index, index + maxChars));
+    }
+    return chunks;
+  });
+  const lines: string[] = [];
+  let line = "";
+  let consumedWords = 0;
+
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+      if (lines.length >= maxLines) break;
+    } else {
+      line = next;
+    }
+    consumedWords += 1;
+  }
+
+  if (line && lines.length < maxLines) lines.push(line);
+  if (lines.length === 0) lines.push("");
+  if (consumedWords < words.length) {
+    const last = lines.length - 1;
+    lines[last] = `${lines[last].slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+  }
+  return lines;
+}
+
 function miniTableDynamicRows(c: Canvas, x: number, y: number, widths: number[], headers: string[], rows: unknown[][], baseRowH = 28, maxBottom = 540) {
   const total = widths.reduce((sum, width) => sum + width, 0);
   c.rect(x, y, total, baseRowH, "#24124d");
@@ -767,14 +804,19 @@ function clientTaskDateMs(value: string | null | undefined, fallback: number) {
   return Number.isNaN(time) ? fallback : time;
 }
 
-function clientCompletionSortMs(task: DetailedTaskRegisterItem) {
-  const datedTask = task as DetailedTaskRegisterItem & {
-    completedAt?: string | null;
-    completed_at?: string | null;
-    updatedAt?: string | null;
-    updated_at?: string | null;
-  };
-  return clientTaskDateMs(datedTask.completedAt ?? datedTask.completed_at ?? datedTask.updatedAt ?? datedTask.updated_at, Number.NaN);
+function clientKanbanSortValue(task: DetailedTaskRegisterItem, index: number) {
+  const dueTime = clientTaskDateMs(task.dueDate, Number.NaN);
+  if (Number.isNaN(dueTime)) return { rank: 3, time: Number.POSITIVE_INFINITY, index };
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const soon = new Date(today);
+  soon.setDate(soon.getDate() + 30);
+  const todayMs = today.getTime();
+  const soonMs = soon.getTime();
+
+  if (dueTime >= todayMs && dueTime <= soonMs) return { rank: 0, time: dueTime, index };
+  if (dueTime < todayMs) return { rank: 1, time: dueTime, index };
+  return { rank: 2, time: dueTime, index };
 }
 
 function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKanbanColumn[] {
@@ -798,26 +840,9 @@ function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKan
   });
 
   columns.forEach((column) => {
-    if (column.key === "completed") {
-      column.tasks = column.tasks
-        .map((task, index) => ({ task, index, sortDate: clientCompletionSortMs(task) }))
-        .sort((a, b) => {
-          if (Number.isNaN(a.sortDate) && Number.isNaN(b.sortDate)) return a.index - b.index;
-          if (Number.isNaN(a.sortDate)) return 1;
-          if (Number.isNaN(b.sortDate)) return -1;
-          return b.sortDate - a.sortDate;
-        })
-        .map((row) => row.task);
-      return;
-    }
-
     column.tasks = column.tasks
-      .map((task, index) => ({
-        task,
-        index,
-        sortDate: clientTaskDateMs(task.dueDate, Number.POSITIVE_INFINITY),
-      }))
-      .sort((a, b) => a.sortDate - b.sortDate || a.index - b.index)
+      .map((task, index) => ({ task, sort: clientKanbanSortValue(task, index) }))
+      .sort((a, b) => a.sort.rank - b.sort.rank || a.sort.time - b.sort.time || a.sort.index - b.sort.index)
       .map((row) => row.task);
   });
 
@@ -826,36 +851,42 @@ function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKan
 
 function buildClientKanbanPage(pdf: PdfDoc, report: ExecutiveReportData) {
   const columns = groupTasksForClientKanban(report.taskRegister ?? []);
-  pdf.addPage((c, pageNo, pageCount) => {
-    clientSectionHeader(c, "Client Kanban Summary");
-    const columnGap = 10;
-    const columnY = 86;
-    const columnH = 430;
-    const columnW = (PAGE_W - M * 2 - columnGap * 4) / 5;
+  const batchSize = 5;
+  const batchCount = Math.max(1, ...columns.map((column) => Math.ceil(column.tasks.length / batchSize)));
+  Array.from({ length: batchCount }, (_, batchIndex) => batchIndex).forEach((batchIndex) => {
+    pdf.addPage((c, pageNo, pageCount) => {
+      clientSectionHeader(c, batchIndex === 0 ? "Client Kanban Summary" : "Client Kanban Summary Continued");
+      const columnGap = 10;
+      const columnY = 86;
+      const columnH = 430;
+      const columnW = (PAGE_W - M * 2 - columnGap * 4) / 5;
+      if (batchCount > 1) {
+        c.text(`Page batch ${batchIndex + 1} of ${batchCount}`, M, 70, 9, COLORS.muted, true);
+      }
 
-    columns.forEach((column, index) => {
-      const x = M + index * (columnW + columnGap);
-      c.rect(x, columnY, columnW, columnH, "#f8fafc", COLORS.border);
-      c.rect(x, columnY, columnW, 5, column.color);
-      c.textLines(wrap(column.title, 18, 2), x + 8, columnY + 18, 8.5, COLORS.ink, true, 10);
-      c.rect(x + columnW - 36, columnY + 14, 24, 18, column.color);
-      c.text(column.tasks.length, x + columnW - 28, columnY + 18, 9, "#ffffff", true);
+      columns.forEach((column, index) => {
+        const x = M + index * (columnW + columnGap);
+        c.rect(x, columnY, columnW, columnH, "#f8fafc", COLORS.border);
+        c.rect(x, columnY, columnW, 5, column.color);
+        c.textLines(wrap(column.title, 18, 2), x + 8, columnY + 18, 8.5, COLORS.ink, true, 10);
+        c.rect(x + columnW - 36, columnY + 14, 24, 18, column.color);
+        c.text(column.tasks.length, x + columnW - 28, columnY + 18, 9, "#ffffff", true);
 
-      const visibleTasks = column.tasks.slice(0, 5);
-      visibleTasks.forEach((task, taskIndex) => {
-        const cardY = columnY + 56 + taskIndex * 64;
-        const titleLines = wrap(task.title, 23, 2);
-        c.rect(x + 8, cardY, columnW - 16, 54, COLORS.panel, COLORS.border);
-        c.textLines(titleLines, x + 14, cardY + 10, 7.5, COLORS.ink, true, 9);
-        if (task.dueDate && task.dueDate !== "--") c.text(`Due ${task.dueDate}`, x + 14, cardY + 40, 7, COLORS.muted);
+        const visibleTasks = column.tasks.slice(batchIndex * batchSize, (batchIndex + 1) * batchSize);
+        if (visibleTasks.length === 0) {
+          c.text("No tasks", x + 14, columnY + 84, 8.5, COLORS.muted, true);
+        }
+        visibleTasks.forEach((task, taskIndex) => {
+          const cardY = columnY + 56 + taskIndex * 72;
+          const titleLines = safeWrapText(task.title, 21, 3);
+          c.rect(x + 8, cardY, columnW - 16, 62, COLORS.panel, COLORS.border);
+          c.textLines(titleLines, x + 14, cardY + 9, 7.2, COLORS.ink, true, 8.5);
+          c.text(`Due: ${task.dueDate && task.dueDate !== "--" ? task.dueDate : "Not set"}`, x + 14, cardY + 49, 7, COLORS.muted);
+        });
       });
 
-      if (column.tasks.length > 5) {
-        c.text(`+${column.tasks.length - 5} more`, x + 12, columnY + 390, 8, column.color, true);
-      }
+      footer(c, report.generatedAt, pageNo, pageCount);
     });
-
-    footer(c, report.generatedAt, pageNo, pageCount);
   });
 }
 
