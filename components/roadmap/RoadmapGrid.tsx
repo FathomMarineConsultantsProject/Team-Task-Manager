@@ -25,6 +25,7 @@ import {
 type ProjectRow = {
   id: string;
   name: string | null;
+  owner_id: string | null;
   start_date: string | null;
   end_date: string | null;
   is_completed: boolean | null;
@@ -57,6 +58,7 @@ type TaskRow = {
 };
 
 type RoadmapProjectRecord = RoadmapProject & {
+  owner_id: string | null;
   start_date: string | null;
   end_date: string | null;
   is_completed: boolean;
@@ -68,6 +70,7 @@ type RoadmapProjectRecord = RoadmapProject & {
 const statusStyles: Record<string, { badge: string; label: string }> = {
   todo: { badge: "bg-gray-100 text-gray-600", label: "TODO" },
   in_progress: { badge: "bg-blue-100 text-blue-600", label: "IN PROGRESS" },
+  draft_review: { badge: "border border-cyan-300 bg-cyan-100 text-cyan-700", label: "DRAFT REVIEW" },
   in_review: {
     badge: "border border-purple-300 bg-purple-100 text-purple-700",
     label: "IN REVIEW",
@@ -85,6 +88,11 @@ const STATUS_UI = {
     label: "IN PROGRESS",
     header: "bg-blue-100 text-blue-700",
     border: "border-l-blue-500",
+  },
+  draft_review: {
+    label: "DRAFT REVIEW",
+    header: "bg-cyan-100 text-cyan-700",
+    border: "border-l-cyan-500",
   },
   in_review: {
     label: "IN REVIEW",
@@ -347,6 +355,7 @@ export default function RoadmapGrid() {
           .map<RoadmapProjectRecord>((project) => ({
             id: project.id,
             name: project.name,
+            owner_id: project.owner_id ?? null,
             start_date: project.start_date ?? null,
             end_date: project.end_date ?? null,
             is_completed: project.is_completed === true,
@@ -503,6 +512,7 @@ export default function RoadmapGrid() {
     const groups = {
       todo: [] as RoadmapTask[],
       in_progress: [] as RoadmapTask[],
+      draft_review: [] as RoadmapTask[],
       in_review: [] as RoadmapTask[],
       done: [] as RoadmapTask[],
     };
@@ -630,6 +640,7 @@ export default function RoadmapGrid() {
       createdAt: task.created_at ?? null,
       createdByName: "Unknown",
       projectName: project.name ?? "Untitled project",
+      projectOwnerId: project.owner_id ?? null,
       startDate: task.start_date ?? null,
       endDate: task.end_date ?? null,
       creator: null,
@@ -891,7 +902,7 @@ export default function RoadmapGrid() {
         )}
 
         {zoom === "week" && layout === "kanban" && (
-          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
             {Object.entries(kanbanGroups).map(([status, tasks]) => {
               const ui = STATUS_UI[status as keyof typeof STATUS_UI];
               return (

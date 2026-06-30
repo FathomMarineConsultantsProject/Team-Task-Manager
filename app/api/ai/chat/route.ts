@@ -147,7 +147,7 @@ Use task descriptions in summaries, comparisons, and analysis when available.
 When a user asks you to create a task, extract these fields:
 - title (required): a clear, concise task title
 - description: short task description when provided or requested
-- status: one of "todo", "in_progress", "in_review", "done" (default: "todo")
+- status: one of "todo", "in_progress", "draft_review", "in_review", "done" (default: "todo")
 - assignee_ref: the member reference from PROJECT MEMBERS, or null
 - assignee_name: the display name of the matched assignee
 - start_date: YYYY-MM-DD format or null

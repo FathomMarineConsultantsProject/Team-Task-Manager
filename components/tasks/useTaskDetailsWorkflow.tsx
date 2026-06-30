@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Modal from "@/components/ui/modal";
 import ChatPanel from "@/components/ui/ChatPanel";
 import TaskAttachments from "@/components/tasks/TaskAttachments";
+import TaskDependencies from "@/components/tasks/TaskDependencies";
+import ModalPortal from "@/components/ModalPortal";
 
 export type TaskDetailsSeed = {
   id: string;
@@ -15,6 +17,7 @@ export type TaskDetailsSeed = {
   createdAt?: string | null;
   createdByName?: string | null;
   projectName: string;
+  projectOwnerId?: string | null;
   startDate?: string | null;
   endDate?: string | null;
   creator?: { id: string | null; name: string | null; email: string | null } | null;
@@ -26,6 +29,7 @@ type TaskDetailsState = Required<Omit<TaskDetailsSeed, "assignees" | "assignee" 
   assignees: { id: string; name: string | null; email?: string | null }[];
   createdAt: string | null;
   createdByName: string | null;
+  projectOwnerId: string | null;
   startDate: string | null;
   endDate: string | null;
   creator: { id: string | null; name: string | null; email: string | null } | null;
@@ -41,6 +45,7 @@ type TaskDetailsRow = {
   start_date: string | null;
   end_date: string | null;
   project_id: string | null;
+  projects?: { owner_id: string | null } | { owner_id: string | null }[] | null;
 };
 
 type TaskLogRow = {
@@ -93,10 +98,17 @@ type TaskUpdateEntry = {
   user: { id: string; name: string | null; email: string | null; avatar_url: string | null } | null;
 };
 
-type TaskDetailMember = { user_id: string; user: { id: string; name: string | null; email: string | null; avatar_url?: string | null } | null };
+type TaskDetailMember = {
+  user_id: string;
+  role?: string | null;
+  project_id?: string | null;
+  user: { id: string; name: string | null; email: string | null; avatar_url?: string | null } | null;
+};
 
 type ProjectMemberRow = {
+  project_id?: string | null;
   user_id: string | null;
+  role?: string | null;
   user:
     | {
         id: string;
@@ -126,6 +138,9 @@ type WorkflowOptions = {
   projectOwnerId?: string | null;
   /** Whether the current user is an admin/super_admin */
   isAdmin?: boolean;
+  canAddUpdate?: boolean;
+  canViewUpdates?: boolean;
+  onTaskUpdated?: () => void | Promise<void>;
 };
 
 const formatDateLabel = (value: string | null | undefined) => {
@@ -199,7 +214,16 @@ const describeLog = (log: TaskLogEntry) => {
   return "Task updated";
 };
 
-export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOwnerId, isAdmin }: WorkflowOptions) {
+export function useTaskDetailsWorkflow({
+  supabase,
+  profileId,
+  members,
+  projectOwnerId,
+  isAdmin,
+  canAddUpdate = true,
+  canViewUpdates = true,
+  onTaskUpdated,
+}: WorkflowOptions) {
   const [selectedTaskDetails, setSelectedTaskDetails] = useState<TaskDetailsState | null>(null);
   const [taskLogs, setTaskLogs] = useState<TaskLogEntry[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -225,8 +249,14 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
       return { canUpload: false, canDeleteAll: false };
     }
 
-    const isProjectOwner = Boolean(projectOwnerId && projectOwnerId === profileId);
-    const isProjectLead = isProjectOwner; // In this app, project owner = lead
+    const taskProjectOwnerId = selectedTaskDetails.projectOwnerId ?? projectOwnerId ?? null;
+    const isProjectOwner = Boolean(taskProjectOwnerId && taskProjectOwnerId === profileId);
+    const isProjectLead = chatMembers.some(
+      (member) =>
+        member.user_id === profileId &&
+        (!selectedTaskDetails.projectId || !member.project_id || member.project_id === selectedTaskDetails.projectId) &&
+        ["lead", "owner"].includes((member.role ?? "").toLowerCase()),
+    );
     const isTaskCreator = Boolean(selectedTaskDetails.createdById && selectedTaskDetails.createdById === profileId);
     const isTaskAssignee =
       selectedTaskDetails.assignees?.some((a) => a.id === profileId) ?? false;
@@ -239,7 +269,9 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
     const canDeleteAll = isProjectOwner || isProjectLead || isAdminUser;
 
     return { canUpload, canDeleteAll };
-  }, [profileId, selectedTaskDetails, projectOwnerId, isAdmin]);
+  }, [profileId, selectedTaskDetails, projectOwnerId, isAdmin, chatMembers]);
+
+  const canManageDependencies = attachmentPermissions.canUpload;
 
   const closeTaskDetails = useCallback(() => {
     setSelectedTaskDetails(null);
@@ -257,13 +289,14 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
       createdAt: seed.createdAt ?? null,
       createdByName: seed.createdByName ?? null,
       projectName: seed.projectName,
+      projectOwnerId: seed.projectOwnerId ?? projectOwnerId ?? null,
       startDate: seed.startDate ?? null,
       endDate: seed.endDate ?? null,
       creator: seed.creator ?? null,
       description: seed.description ?? null,
       createdById: null, // Will be loaded from DB
     });
-  }, []);
+  }, [projectOwnerId]);
 
   const loadTaskLogs = useCallback(async () => {
     try {
@@ -276,7 +309,7 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
 
       const { data: taskData, error: taskError } = await supabase
         .from("tasks")
-        .select("created_by, description, title, start_date, end_date, project_id")
+        .select("created_by, description, title, start_date, end_date, project_id, projects(owner_id)")
         .eq("id", taskId)
         .single();
 
@@ -285,6 +318,7 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
       }
 
       const taskDetails = (taskData as TaskDetailsRow | null) ?? null;
+      const projectRelation = Array.isArray(taskDetails?.projects) ? taskDetails?.projects[0] ?? null : taskDetails?.projects ?? null;
       let createdByName = "Unknown";
 
       if (taskDetails?.created_by) {
@@ -317,6 +351,7 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
           startDate: taskDetails?.start_date ?? prev.startDate,
           endDate: taskDetails?.end_date ?? prev.endDate,
           projectId: taskDetails?.project_id ?? prev.projectId,
+          projectOwnerId: projectRelation?.owner_id ?? prev.projectOwnerId,
           createdById: taskDetails?.created_by ?? prev.createdById,
         };
       });
@@ -384,7 +419,7 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
 
       const { data, error } = await supabase
         .from("project_members")
-        .select("user_id, user:users(id, name, email, avatar_url)")
+        .select("project_id, user_id, role, user:users(id, name, email, avatar_url)")
         .eq("project_id", projectId);
 
       if (error) {
@@ -398,11 +433,13 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
         .map((member) => {
           const user = Array.isArray(member.user) ? member.user[0] ?? null : member.user ?? null;
           return {
+            project_id: member.project_id ?? projectId,
             user_id: member.user_id ?? user?.id ?? "",
+            role: member.role ?? null,
             user,
           };
         })
-        .filter((member): member is TaskDetailMember => Boolean(member.user_id));
+        .filter((member) => Boolean(member.user_id));
 
       if (isMounted) {
         setProjectMembers(normalized);
@@ -499,11 +536,12 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
           content,
         });
         await loadTaskUpdates();
+        await onTaskUpdated?.();
       } finally {
         setIsSubmittingUpdate(false);
       }
     },
-    [loadTaskUpdates, profileId, selectedTaskDetails, supabase],
+    [loadTaskUpdates, onTaskUpdated, profileId, selectedTaskDetails, supabase],
   );
 
   const handleEditUpdate = useCallback(
@@ -512,11 +550,12 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
       try {
         await supabase.from("task_updates").update({ content }).eq("id", id);
         await loadTaskUpdates();
+        await onTaskUpdated?.();
       } finally {
         setIsSubmittingUpdate(false);
       }
     },
-    [loadTaskUpdates, supabase],
+    [loadTaskUpdates, onTaskUpdated, supabase],
   );
 
   const handleDeleteUpdate = useCallback(
@@ -525,11 +564,12 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
       try {
         await supabase.from("task_updates").delete().eq("id", id);
         await loadTaskUpdates();
+        await onTaskUpdated?.();
       } finally {
         setIsSubmittingUpdate(false);
       }
     },
-    [loadTaskUpdates, supabase],
+    [loadTaskUpdates, onTaskUpdated, supabase],
   );
 
   const handleReply = useCallback(
@@ -545,11 +585,12 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
           reply_to: parentId,
         });
         await loadTaskUpdates();
+        await onTaskUpdated?.();
       } finally {
         setIsSubmittingUpdate(false);
       }
     },
-    [loadTaskUpdates, profileId, selectedTaskDetails, supabase],
+    [loadTaskUpdates, onTaskUpdated, profileId, selectedTaskDetails, supabase],
   );
 
   const renderTaskDetails = () => (
@@ -632,6 +673,17 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
               </div>
             </div>
 
+            <div className="lg:hidden">
+              <TaskDependencies
+                supabase={supabase}
+                taskId={selectedTaskDetails.id}
+                projectId={selectedTaskDetails.projectId}
+                currentUserId={profileId}
+                canManageDependencies={canManageDependencies}
+                showHeader={true}
+              />
+            </div>
+
             {/* Attachments — with permissions */}
             <TaskAttachments
               supabase={supabase}
@@ -670,6 +722,37 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
         )}
       </Modal>
 
+      {selectedTaskDetails && (
+        <ModalPortal>
+          <aside
+            className="fixed z-[10000] hidden max-h-[78vh] w-[360px] flex-col overflow-y-auto rounded-2xl border border-slate-200/70 bg-white shadow-2xl lg:flex"
+            style={{
+              left: "max(276px, calc(50% - 700px))",
+              top: "50%",
+              transform: "translateY(-50%)",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="border-b border-slate-100 px-5 py-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">
+                Key Dependencies / Pending Inputs
+              </p>
+              <p className="mt-1 truncate text-xs text-slate-500" title={selectedTaskDetails.title}>
+                {selectedTaskDetails.title}
+              </p>
+            </div>
+            <TaskDependencies
+              supabase={supabase}
+              taskId={selectedTaskDetails.id}
+              projectId={selectedTaskDetails.projectId}
+              currentUserId={profileId}
+              canManageDependencies={canManageDependencies}
+              showHeader={false}
+            />
+          </aside>
+        </ModalPortal>
+      )}
+
       <ChatPanel
         isOpen={Boolean(selectedTaskDetails)}
         onClose={closeTaskDetails}
@@ -677,10 +760,10 @@ export function useTaskDetailsWorkflow({ supabase, profileId, members, projectOw
         taskUpdates={taskUpdates}
         members={chatMembers}
         profileId={profileId}
-        canAddUpdate={true}
-        canViewUpdates={true}
-        isProjectOwnerMember={true}
-        isSuperAdmin={true}
+        canAddUpdate={canAddUpdate}
+        canViewUpdates={canViewUpdates}
+        isProjectOwnerMember={attachmentPermissions.canDeleteAll}
+        isSuperAdmin={isAdmin ?? false}
         onCreateUpdate={handleCreateUpdate}
         onEditUpdate={handleEditUpdate}
         onDeleteUpdate={(id) => {

@@ -8,14 +8,13 @@ import BoardColumn from "@/components/board/BoardColumn";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
 import Avatar from "@/components/ui/Avatar";
-import ChatPanel from "@/components/ui/ChatPanel";
-import MentionTextarea, { RenderMentionText, encodeMentionsForDatabase } from "@/components/ui/MentionTextarea";
 import type { ColumnId, Task } from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
 import { createEmptyColumns } from "@/lib/data";
 import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
 import type { PendingAttachment } from "@/components/tasks/CreateTaskAttachments";
-import TaskAttachments from "@/components/tasks/TaskAttachments";
+import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
+import { addWorkingDays } from "@/lib/workingDays";
 
 type DbTask = {
   id: string;
@@ -25,6 +24,8 @@ type DbTask = {
   assigned_to: string | null;
   start_date: string | null;
   end_date: string | null;
+  draft_review_started_at: string | null;
+  draft_review_due_at: string | null;
 };
 
 type DbUser = {
@@ -71,77 +72,10 @@ type DbProjectMember = {
     } | null;
 };
 
-type TaskDetailsModalState = {
-  id: string;
-  title: string;
-  description: string | null;
-  status: string;
-  assigneeName: string;
-  assigneeId: string | null;
-  createdAt: string | null;
-  startDate: string | null;
-  endDate: string | null;
-  assignees?: { id: string; name: string | null; email: string | null }[];
-  createdById?: string | null;
-};
-
-type TaskLogRow = {
-  id: string;
-  action: string;
-  from_status: string | null;
-  to_status: string | null;
-  created_at: string;
-  user_id: string | null;
-};
-
-type TaskLogEntry = TaskLogRow & {
-  user: {
-    id: string;
-    name: string | null;
-    email: string | null;
-    job_role: string | null;
-  } | null;
-};
-
-type TaskUpdateRow = {
-  id: string;
-  task_id: string;
-  project_id: string;
-  user_id: string;
-  content: string;
-  created_at: string;
-  reply_to: string | null;
-};
-
-type TaskUpdateEntry = TaskUpdateRow & {
-  user: {
-    id: string;
-    name: string | null;
-    email: string | null;
-    job_role: string | null;
-    avatar_url: string | null;
-  } | null;
-  replies?: TaskUpdateEntry[];
-};
-
-type TaskChatMessage = {
-  id: string;
-  task_id: string;
-  project_id: string;
-  user_id: string;
-  content: string;
-  created_at: string;
-  user: {
-    id: string;
-    name: string | null;
-    email: string | null;
-    avatar_url: string | null;
-  } | null;
-};
-
 const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
   { id: "todo", title: "TO DO" },
   { id: "inProgress", title: "IN PROGRESS" },
+  { id: "draftReview", title: "DRAFT REVIEW" },
   { id: "review", title: "IN REVIEW" },
   { id: "done", title: "DONE" },
 ];
@@ -149,13 +83,15 @@ const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
 const STATUS_TO_COLUMN: Record<string, ColumnId> = {
   todo: "todo",
   in_progress: "inProgress",
+  draft_review: "draftReview",
   in_review: "review",
   done: "done",
 };
 
-const COLUMN_TO_STATUS: Record<ColumnId, "todo" | "in_progress" | "in_review" | "done"> = {
+const COLUMN_TO_STATUS: Record<ColumnId, "todo" | "in_progress" | "draft_review" | "in_review" | "done"> = {
   todo: "todo",
   inProgress: "in_progress",
+  draftReview: "draft_review",
   review: "in_review",
   done: "done",
 };
@@ -163,6 +99,7 @@ const COLUMN_TO_STATUS: Record<ColumnId, "todo" | "in_progress" | "in_review" | 
 const COLUMN_ACCENT: Record<ColumnId, string> = {
   todo: "bg-orange-500",
   inProgress: "bg-sky-500",
+  draftReview: "bg-cyan-500",
   review: "bg-amber-500",
   done: "bg-emerald-600",
 };
@@ -170,9 +107,15 @@ const COLUMN_ACCENT: Record<ColumnId, string> = {
 const STATUS_LABEL: Record<ColumnId, string> = {
   todo: "TODO",
   inProgress: "IN PROGRESS",
+  draftReview: "DRAFT REVIEW",
   review: "IN REVIEW",
   done: "DONE",
 };
+
+const getDraftReviewDateFields = (enteredAt = new Date()) => ({
+  draft_review_started_at: enteredAt.toISOString(),
+  draft_review_due_at: addWorkingDays(enteredAt, 5).toISOString(),
+});
 
 const normalizeRole = (role: string | null | undefined) => (role ?? "").toLowerCase();
 
@@ -200,25 +143,6 @@ const buildInitials = (name: string | null | undefined, email: string | null | u
   return "NA";
 };
 
-const formatDateTime = (value: string | null) => {
-  if (!value) {
-    return "N/A";
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "N/A";
-  }
-
-  return date.toLocaleString(undefined, {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-};
-
 const formatProjectOverviewDate = (value: string | null | undefined) => {
   if (!value) {
     return "Not set";
@@ -234,14 +158,6 @@ const formatProjectOverviewDate = (value: string | null | undefined) => {
     day: "numeric",
     year: "numeric",
   });
-};
-
-const formatStatusValue = (value: string | null | undefined) => {
-  if (!value) {
-    return "UNKNOWN";
-  }
-
-  return value.replace(/_/g, " ").toUpperCase();
 };
 
 const formatDuration = (ms: number) => {
@@ -298,29 +214,9 @@ export default function ProjectBoardPage({
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [taskUpdateCounts, setTaskUpdateCounts] = useState<Record<string, number>>({});
-  const [selectedTaskDetails, setSelectedTaskDetails] = useState<TaskDetailsModalState | null>(null);
-  const [taskLogs, setTaskLogs] = useState<TaskLogEntry[]>([]);
-  const [taskLogsLoading, setTaskLogsLoading] = useState(false);
-  const [taskUpdates, setTaskUpdates] = useState<TaskUpdateEntry[]>([]);
-  const [isUpdateComposerOpen, setIsUpdateComposerOpen] = useState(false);
-  const [updateContent, setUpdateContent] = useState("");
-  const [isSavingUpdate, setIsSavingUpdate] = useState(false);
-  const [editingUpdateId, setEditingUpdateId] = useState<string | null>(null);
-  const [editingUpdateContent, setEditingUpdateContent] = useState("");
-  const [isSavingEdit, setIsSavingEdit] = useState(false);
-  const [expandedReplies, setExpandedReplies] = useState<Record<string, boolean>>({});
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
-  const [isAddingTaskMember, setIsAddingTaskMember] = useState(false);
-  const [showTaskMemberDropdown, setShowTaskMemberDropdown] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
-  const [replyingToId, setReplyingToId] = useState<string | null>(null);
-  const [replyContent, setReplyContent] = useState("");
-  const [isSavingReply, setIsSavingReply] = useState(false);
-  const [taskChatMessages, setTaskChatMessages] = useState<TaskChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [isSendingChat, setIsSendingChat] = useState(false);
-  const [activeTab, setActiveTab] = useState<"details" | "chat">("details");
   const [unreadTaskNotifs, setUnreadTaskNotifs] = useState<Record<string, number>>({});
   const [timerNow, setTimerNow] = useState<number | null>(null);
 
@@ -365,6 +261,7 @@ export default function ProjectBoardPage({
       members.some((member) => member.user_id === profile.id && normalizeRole(member.role) === "owner"),
   );
   const canViewTaskUpdates = isProjectMember || canManageProject;
+  const canParticipateInTaskUpdates = isProjectMember || isProjectOwnerMember || isSuperAdmin;
 
   useEffect(() => {
     setTimerNow(Date.now());
@@ -535,105 +432,28 @@ export default function ProjectBoardPage({
     }
   }, [projectId, supabase]);
 
-  const loadTaskDetailsData = useCallback(async () => {
-    console.log("[DEBUG loadTaskDetailsData] called", {
-      taskId: selectedTaskDetails?.id,
-      projectId,
-      canViewTaskUpdates,
-    });
-    if (!selectedTaskDetails?.id || !projectId || !canViewTaskUpdates) {
-      console.log("[DEBUG loadTaskDetailsData] EARLY RETURN - missing:", {
-        hasTaskId: !!selectedTaskDetails?.id,
-        hasProjectId: !!projectId,
-        canViewTaskUpdates,
-      });
-      setTaskLogs([]);
-      setTaskUpdates([]);
-      return;
-    }
-
-    try {
-      setTaskLogsLoading(true);
-
-      const [logsResponse, updatesResponse] = await Promise.all([
-        supabase
-          .from("task_logs")
-          .select("id, action, from_status, to_status, created_at, user_id")
-          .eq("task_id", selectedTaskDetails.id)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("task_updates")
-          .select("id, task_id, project_id, user_id, content, created_at, reply_to")
-          .eq("task_id", selectedTaskDetails.id)
-          .eq("project_id", projectId)
-          .order("created_at", { ascending: false }),
-      ]);
-      console.log("[DEBUG loadTaskDetailsData] query results:", {
-        logsError: logsResponse.error,
-        logsCount: logsResponse.data?.length ?? 0,
-        updatesError: updatesResponse.error,
-        updatesCount: updatesResponse.data?.length ?? 0,
-        updatesData: updatesResponse.data,
-      });
-
-      if (logsResponse.error) {
-        setTaskLogs([]);
-      }
-
-      if (updatesResponse.error) {
-        setTaskUpdates([]);
-      }
-
-      const logsRows = (logsResponse.data as TaskLogRow[] | null | undefined) ?? [];
-      const updateRows = (updatesResponse.data as TaskUpdateRow[] | null | undefined) ?? [];
-
-      const userIds = Array.from(
-        new Set(
-          [...logsRows.map((row) => row.user_id), ...updateRows.map((row) => row.user_id)].filter(Boolean),
-        ),
-      ) as string[];
-
-      let usersById: Record<string, DbUser> = {};
-
-      if (userIds.length > 0) {
-        try {
-          const { data: usersData, error: usersError } = await supabase
-            .from("users")
-            .select("id, name, email, job_role, system_role, avatar_url")
-            .in("id", userIds);
-
-          if (!usersError) {
-            usersById = ((usersData as DbUser[] | null | undefined) ?? []).reduce<Record<string, DbUser>>((acc, user) => {
-              acc[user.id] = user;
-              return acc;
-            }, {});
+  const { openTaskDetails, renderTaskDetails } = useTaskDetailsWorkflow({
+    supabase,
+    profileId: profile?.id ?? null,
+    members: members.map((member) => ({
+      project_id: projectId,
+      user_id: member.user_id,
+      role: member.role,
+      user: member.user
+        ? {
+            id: member.user.id,
+            name: member.user.name,
+            email: member.user.email,
+            avatar_url: member.user.avatar_url,
           }
-        } catch {
-          usersById = {};
-        }
-      }
-
-      setTaskLogs(
-        logsRows.map((row) => ({
-          ...row,
-          user: (row.user_id && usersById[row.user_id]) || null,
-        })),
-      );
-
-      setTaskUpdates(
-        (updateRows ?? []).map((row) => ({
-          ...row,
-          content: row.content?.trim() ?? "",
-          user: usersById[row.user_id] ?? null,
-        })),
-      );
-    } catch {
-      setTaskLogs([]);
-      setTaskUpdates([]);
-    } finally {
-      setTaskLogsLoading(false);
-    }
-  }, [canViewTaskUpdates, projectId, selectedTaskDetails?.id, supabase]);
+        : null,
+    })),
+    projectOwnerId: project?.owner_id ?? null,
+    isAdmin: isAdmin || isSuperAdmin,
+    canAddUpdate: canParticipateInTaskUpdates,
+    canViewUpdates: canViewTaskUpdates,
+    onTaskUpdated: loadTaskUpdateCounts,
+  });
 
   const handleOpenTaskDetails = useCallback(
     async (taskId: string, column: ColumnId) => {
@@ -671,257 +491,25 @@ export default function ProjectBoardPage({
         createdByIdValue = null;
       }
 
-      setSelectedTaskDetails({
+      openTaskDetails({
         id: task.id,
+        projectId,
         title: task.title,
         description: descriptionValue,
         status: task.statusLabel ?? STATUS_LABEL[column],
-        assigneeName: task.assigneeName ?? task.assigneeEmail ?? "Unassigned",
-        assigneeId: task.assigneeId ?? null,
+        assignee: task.assigneeName ?? task.assigneeEmail ?? "Unassigned",
         createdAt,
+        createdByName: null,
+        projectName: project?.name ?? "Untitled project",
+        projectOwnerId: project?.owner_id ?? null,
         startDate: startDateValue,
         endDate: endDateValue,
         assignees: task.assignees ?? [],
-        createdById: createdByIdValue,
+        creator: createdByIdValue ? { id: createdByIdValue, name: null, email: null } : null,
       });
-      setIsUpdateComposerOpen(false);
-      setUpdateContent("");
-      setEditingUpdateId(null);
-      setEditingUpdateContent("");
     },
-    [columns, projectId, supabase],
+    [columns, openTaskDetails, project?.name, project?.owner_id, projectId, supabase],
   );
-
-  const closeTaskDetails = useCallback(() => {
-    setSelectedTaskDetails(null);
-    setTaskLogs([]);
-    setTaskUpdates([]);
-    setIsUpdateComposerOpen(false);
-    setUpdateContent("");
-    setEditingUpdateId(null);
-    setEditingUpdateContent("");
-    setShowTaskMemberDropdown(false);
-  }, []);
-
-  const addMemberToTask = useCallback(
-    async (userId: string) => {
-      if (!selectedTaskDetails?.id || !projectId) return;
-
-      // Prevent duplicates
-      if (selectedTaskDetails.assignees?.some((u) => u.id === userId)) return;
-
-      setIsAddingTaskMember(true);
-      try {
-        const { error } = await supabase.from("task_assignees").insert({
-          task_id: selectedTaskDetails.id,
-          user_id: userId,
-        });
-
-        if (error) {
-          console.error("Failed to add member to task", error);
-          return;
-        }
-
-        // Find user info from members list
-        const memberUser = members.find((m) => m.user_id === userId)?.user;
-        const newAssignee = {
-          id: userId,
-          name: memberUser?.name ?? null,
-          email: memberUser?.email ?? null,
-        };
-
-        // Update selectedTaskDetails
-        setSelectedTaskDetails((prev) =>
-          prev
-            ? {
-                ...prev,
-                assignees: [...(prev.assignees ?? []), newAssignee],
-              }
-            : prev,
-        );
-
-        // Update task in columns state
-        setColumns((prev) => {
-          const next = { ...prev };
-          BOARD_COLUMNS.forEach((col) => {
-            next[col.id] = next[col.id].map((t) =>
-              t.id === selectedTaskDetails.id
-                ? { ...t, assignees: [...(t.assignees ?? []), newAssignee] }
-                : t,
-            );
-          });
-          return next;
-        });
-
-        setShowTaskMemberDropdown(false);
-      } catch (err) {
-        console.error("Failed to add member to task", err);
-      } finally {
-        setIsAddingTaskMember(false);
-      }
-    },
-    [selectedTaskDetails, projectId, supabase, members],
-  );
-
-  // Live Chat is project-wide collaboration: any project member can participate.
-  // Task edit/move/delete permissions remain unchanged (assignee/owner/admin only).
-  const canAddTaskUpdate = useMemo(() => {
-    if (!selectedTaskDetails || !profile?.id) {
-      return false;
-    }
-
-    return isProjectMember || isProjectOwnerMember || isSuperAdmin;
-  }, [isProjectMember, isProjectOwnerMember, isSuperAdmin, profile?.id, selectedTaskDetails]);
-
-  const canManageAssignees = useMemo(() => {
-    if (!profile?.id) return false;
-
-    const isPrimaryAssignee = selectedTaskDetails?.assigneeId === profile.id;
-
-    let isMultiAssignee = false;
-    BOARD_COLUMNS.forEach((col) => {
-      const t = columns[col.id].find((task) => task.id === selectedTaskDetails?.id);
-      if (t?.assignees?.some(u => u.id === profile.id)) {
-        isMultiAssignee = true;
-      }
-    });
-
-    return (
-      isSuperAdmin ||
-      isProjectOwnerMember ||
-      canManageProject ||
-      isPrimaryAssignee ||
-      isMultiAssignee
-    );
-  }, [profile?.id, selectedTaskDetails, columns, isSuperAdmin, isProjectOwnerMember, canManageProject]);
-
-  // ---- Attachment permissions for Task Details ----
-  const canUploadAttachment = useMemo(() => {
-    if (!selectedTaskDetails || !profile?.id) return false;
-    // Project Owner, Project Lead, Task Creator, Task Assignee
-    if (isOwner || canManageProject || isSuperAdmin) return true;
-    if (selectedTaskDetails.createdById === profile.id) return true;
-    if (selectedTaskDetails.assigneeId === profile.id) return true;
-    if (selectedTaskDetails.assignees?.some((a) => a.id === profile.id)) return true;
-    return false;
-  }, [selectedTaskDetails, profile?.id, isOwner, canManageProject, isSuperAdmin]);
-
-  const canDeleteAllAttachments = useMemo(() => {
-    if (!profile?.id) return false;
-    // Project Owner, Project Lead
-    return isOwner || canManageProject || isSuperAdmin;
-  }, [profile?.id, isOwner, canManageProject, isSuperAdmin]);
-
-
-  const createTaskUpdate = useCallback(async () => {
-    const trimmed = updateContent.trim();
-    if (!selectedTaskDetails || !profile?.id || !projectId) {
-      return;
-    }
-
-    if (trimmed.length < 5) {
-      return;
-    }
-
-    try {
-      if (!canAddTaskUpdate) {
-        throw new Error("Not allowed");
-      }
-
-      setIsSavingUpdate(true);
-      const { error } = await supabase.from("task_updates").insert({
-        task_id: selectedTaskDetails.id,
-        project_id: projectId,
-        user_id: profile.id,
-        content: encodeMentionsForDatabase(trimmed, members.map(m => m.user).filter((u): u is NonNullable<typeof u> => u !== null)),
-      });
-
-      if (error) {
-        return;
-      }
-
-      setUpdateContent("");
-      setIsUpdateComposerOpen(false);
-      await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
-    } catch {
-      // fail silently
-    } finally {
-      setIsSavingUpdate(false);
-    }
-  }, [canAddTaskUpdate, loadTaskDetailsData, loadTaskUpdateCounts, profile?.id, projectId, selectedTaskDetails, supabase, updateContent]);
-
-  const saveTaskUpdateEdit = useCallback(async () => {
-    const trimmed = editingUpdateContent.trim();
-    if (!editingUpdateId || trimmed.length === 0) {
-      return;
-    }
-
-    try {
-      if (!canAddTaskUpdate) {
-        throw new Error("Not allowed");
-      }
-
-      setIsSavingEdit(true);
-      const { error } = await supabase
-        .from("task_updates")
-        .update({ content: encodeMentionsForDatabase(trimmed, members.map(m => m.user).filter((u): u is NonNullable<typeof u> => u !== null)) })
-        .eq("id", editingUpdateId);
-
-      if (error) {
-        return;
-      }
-
-      setEditingUpdateId(null);
-      setEditingUpdateContent("");
-      await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
-    } catch {
-      // fail silently
-    } finally {
-      setIsSavingEdit(false);
-    }
-  }, [canAddTaskUpdate, editingUpdateContent, editingUpdateId, loadTaskDetailsData, loadTaskUpdateCounts, supabase, members]);
-
-  const deleteTaskUpdate = useCallback(
-    async (updateId: string) => {
-      if (!window.confirm("Delete this update?")) {
-        return;
-      }
-
-      try {
-        if (!canAddTaskUpdate) {
-          throw new Error("Not allowed");
-        }
-
-        const deleteQuery = supabase.from("task_updates").delete().eq("id", updateId).eq("project_id", projectId);
-        const { error } = isProjectOwnerMember || isSuperAdmin ? await deleteQuery : await deleteQuery.eq("user_id", profile?.id ?? "");
-
-        if (error) {
-          return;
-        }
-
-        await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
-      } catch {
-        // fail silently
-      }
-    },
-    [canAddTaskUpdate, isProjectOwnerMember, isSuperAdmin, loadTaskDetailsData, loadTaskUpdateCounts, profile?.id, projectId, supabase],
-  );
-
-  const describeLog = useCallback((log: TaskLogEntry) => {
-    if (log.action === "moved") {
-      return `Moved from ${formatStatusValue(log.from_status)} -> ${formatStatusValue(log.to_status)}`;
-    }
-
-    if (log.action === "assigned") {
-      return "Assigned task";
-    }
-
-    if (log.action === "created") {
-      return "Task created";
-    }
-
-    return "Task updated";
-  }, []);
 
   // Fetch project and members (new)
   useEffect(() => {
@@ -1022,6 +610,8 @@ export default function ProjectBoardPage({
       setIsSubmitting(true);
 
       // Build strict payload
+      const now = new Date();
+      const draftReviewFields = newTaskStatus === "draftReview" ? getDraftReviewDateFields(now) : {};
       const payload = {
         title: title.trim(),
         description: newTaskDescription.trim() || null,
@@ -1031,6 +621,7 @@ export default function ProjectBoardPage({
         start_date: startDate || null,
         end_date: endDate || null,
         created_by: profile?.id ?? null,
+        ...draftReviewFields,
       };
       console.log("Creating task with payload:", payload);
       console.log("projectId:", projectId);
@@ -1131,6 +722,8 @@ export default function ProjectBoardPage({
                 avatarUrl: assignee?.avatar_url ?? null,
                 start_date: newTask.start_date ?? null,
                 end_date: newTask.end_date ?? null,
+                draft_review_started_at: newTask.draft_review_started_at ?? null,
+                draft_review_due_at: newTask.draft_review_due_at ?? null,
                 statusLabel: STATUS_LABEL[columnId],
                 canDrag: canMoveTask(newTask.assigned_to, assignees, newTask.start_date),
                 assignees,
@@ -1450,7 +1043,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, description, status, assigned_to, start_date, end_date")
+          .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1580,6 +1173,8 @@ export default function ProjectBoardPage({
               avatarUrl: assignee?.avatar_url ?? null,
               start_date: row.start_date,
               end_date: row.end_date,
+              draft_review_started_at: row.draft_review_started_at,
+              draft_review_due_at: row.draft_review_due_at,
               statusLabel: STATUS_LABEL[columnId],
               canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
               updatesCount: updatesMap[row.id] ?? 0,
@@ -1625,14 +1220,6 @@ export default function ProjectBoardPage({
   }, [loadTaskUpdateCounts]);
 
   useEffect(() => {
-    if (!selectedTaskDetails?.id) {
-      return;
-    }
-
-    void loadTaskDetailsData();
-  }, [loadTaskDetailsData, selectedTaskDetails?.id]);
-
-  useEffect(() => {
     if (!projectId) {
       return;
     }
@@ -1670,9 +1257,19 @@ export default function ProjectBoardPage({
         return;
       }
 
+      const nextStatus = COLUMN_TO_STATUS[destination];
+      const previousStatus = COLUMN_TO_STATUS[source];
+      const statusUpdatePayload = {
+        status: nextStatus,
+        updated_at: new Date().toISOString(),
+        ...(nextStatus === "draft_review" && previousStatus !== "draft_review"
+          ? getDraftReviewDateFields()
+          : {}),
+      };
+
       const { error } = await supabase
         .from("tasks")
-        .update({ status: COLUMN_TO_STATUS[destination], updated_at: new Date().toISOString() })
+        .update(statusUpdatePayload)
         .eq("id", taskId)
         .eq("project_id", projectId);
 
@@ -1744,15 +1341,21 @@ export default function ProjectBoardPage({
           return current;
         }
 
+        const optimisticDraftReviewFields =
+          destination === "draftReview" && from !== "draftReview"
+            ? getDraftReviewDateFields()
+            : {};
+
         return {
           ...current,
           [from]: sourceTasks.filter((task) => task.id !== taskId),
           [destination]: [
-            {
-              ...movedTask,
-              statusLabel: STATUS_LABEL[destination],
-              accent: COLUMN_ACCENT[destination],
-            },
+              {
+                ...movedTask,
+                statusLabel: STATUS_LABEL[destination],
+                accent: COLUMN_ACCENT[destination],
+                ...optimisticDraftReviewFields,
+              },
             ...current[destination],
           ],
         };
@@ -1948,7 +1551,7 @@ export default function ProjectBoardPage({
 
       const { data: taskRows, error: taskError } = await supabase
         .from("tasks")
-        .select("id, title, description, status, assigned_to, start_date, end_date")
+        .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at")
         .eq("project_id", projectId)
         .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -2056,6 +1659,8 @@ export default function ProjectBoardPage({
             avatarUrl: assignee?.avatar_url ?? null,
             start_date: row.start_date,
             end_date: row.end_date,
+            draft_review_started_at: row.draft_review_started_at,
+            draft_review_due_at: row.draft_review_due_at,
             statusLabel: STATUS_LABEL[columnId],
             canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
             updatesCount: updatesMap[row.id] ?? 0,
@@ -2090,7 +1695,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, description, status, assigned_to, start_date, end_date")
+          .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -2220,6 +1825,8 @@ export default function ProjectBoardPage({
               avatarUrl: assignee?.avatar_url ?? null,
               start_date: row.start_date,
               end_date: row.end_date,
+              draft_review_started_at: row.draft_review_started_at,
+              draft_review_due_at: row.draft_review_due_at,
               statusLabel: STATUS_LABEL[columnId],
               canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
               updatesCount: updatesMap[row.id] ?? 0,
@@ -2634,206 +2241,7 @@ export default function ProjectBoardPage({
       {loading ? <div className="text-xs text-slate-500">Loading board tasks...</div> : null}
       {errorMessage ? <div className="text-xs text-red-600">{errorMessage}</div> : null}
 
-      <Modal title="Task Details" isOpen={Boolean(selectedTaskDetails)} onClose={closeTaskDetails}>
-        {selectedTaskDetails ? (
-          <div className="space-y-5 text-sm text-slate-700">
-            <div className="space-y-2">
-              <div className="min-w-0">
-                <p className="text-xl font-bold leading-tight text-slate-900 break-words line-clamp-2">{selectedTaskDetails.title}</p>
-                <p className="mt-1 text-xs uppercase tracking-[0.15em] text-slate-500">{selectedTaskDetails.status}</p>
-              <div className="mt-2 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-1">Description</p>
-                {selectedTaskDetails.description ? (
-                  <p className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">{selectedTaskDetails.description}</p>
-                ) : (
-                  <p className="text-sm text-slate-400 italic">No description provided.</p>
-                )}
-              </div>
-              </div>
-              {/* Multi-assignee display */}
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-1">Assigned To</p>
-                {(() => {
-                  const assignees = selectedTaskDetails.assignees ?? [];
-                  if (assignees.length === 0) {
-                    return <p className="text-sm text-slate-600">Unassigned</p>;
-                  }
-                  const names = assignees.map((u) => u.name || u.email || "Unknown");
-                  const display =
-                    names.length <= 2
-                      ? names.join(", ")
-                      : `${names.slice(0, 2).join(", ")} +${names.length - 2} more`;
-                  return (
-                    <p
-                      className="text-sm text-slate-600"
-                      title={names.join(", ")}
-                    >
-                      {display}
-                    </p>
-                  );
-                })()}
-
-                {/* Add member to task */}
-                {canManageAssignees && (
-                  <div className="mt-2">
-                    {showTaskMemberDropdown ? (
-                      <div className="rounded-lg border border-slate-200 bg-white p-2">
-                        <div className="max-h-[160px] overflow-y-auto space-y-1">
-                          {(() => {
-                            const currentAssigneeIds = new Set(
-                              (selectedTaskDetails.assignees ?? []).map((u) => u.id),
-                            );
-                            const available = members.filter(
-                              (m) => m.user && !currentAssigneeIds.has(m.user_id),
-                            );
-                            if (available.length === 0) {
-                              return (
-                                <p className="px-2 py-1.5 text-xs text-slate-400">
-                                  All members already assigned
-                                </p>
-                              );
-                            }
-                            return available.map((member) => {
-                              const user = member.user;
-                              if (!user) return null;
-                              return (
-                                <button
-                                  key={user.id}
-                                  type="button"
-                                  disabled={isAddingTaskMember}
-                                  onClick={() => void addMemberToTask(user.id)}
-                                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
-                                >
-                                  <Avatar
-                                    userId={user.id}
-                                    name={user.name}
-                                    email={user.email}
-                                    avatarUrl={user.avatar_url}
-                                    size="xs"
-                                  />
-                                  <span>{user.name ?? user.email ?? "Unknown"}</span>
-                                </button>
-                              );
-                            });
-                          })()}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setShowTaskMemberDropdown(false)}
-                          className="mt-1 w-full rounded-md px-2 py-1 text-xs font-medium text-slate-500 transition hover:bg-slate-50"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setShowTaskMemberDropdown(true)}
-                        className="rounded-md border border-dashed border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-500 transition hover:border-slate-400 hover:text-slate-700"
-                      >
-                        + Add Member
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <p className="text-xs text-slate-500">Created: {formatDateTime(selectedTaskDetails.createdAt)}</p>
-              {selectedTaskDetails.startDate && (
-                <div>
-                  <p className="text-xs text-gray-500">Start Date</p>
-                  <p className="text-sm">{selectedTaskDetails.startDate}</p>
-                </div>
-              )}
-              {selectedTaskDetails.endDate && (
-                <div>
-                  <p className="text-xs text-gray-500">Due Date</p>
-                  <p className="text-sm">{selectedTaskDetails.endDate}</p>
-                </div>
-              )}
-              {!canAddTaskUpdate ? (
-                <p className="text-xs text-slate-500">Only project members can participate in task discussions.</p>
-              ) : null}
-            </div>
-
-            {/* Attachments */}
-            <TaskAttachments
-              supabase={supabase}
-              taskId={selectedTaskDetails.id}
-              profileId={profile?.id ?? null}
-              canUpload={canUploadAttachment}
-              canDeleteAll={canDeleteAllAttachments}
-            />
-
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
-              <div className="mt-3 max-h-[200px] overflow-y-auto pr-2 space-y-0">
-                {taskLogsLoading ? (
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
-                    Loading activity...
-                  </div>
-                ) : taskLogs.length === 0 ? (
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
-                    No activity yet
-                  </div>
-                ) : (
-                  taskLogs.map((log, index) => (
-                    <div key={log.id} className="relative pl-7 pb-4">
-                      <span className="absolute left-0 top-1.5 h-2.5 w-2.5 rounded-full bg-slate-400" />
-                      {index < taskLogs.length - 1 && <span className="absolute left-[4px] top-4 h-full w-px bg-slate-200" />}
-                      <p className="mt-1 text-sm text-slate-800">{describeLog(log)}</p>
-                      <p className="mt-0.5 text-xs text-slate-500">
-                        {log.user?.name || log.user?.email || "Unknown"} • {formatDateTime(log.created_at)}
-                      </p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-        ) : null}
-      </Modal>
-
-      {/* Live Chat Panel — renders as independent side panel */}
-      <ChatPanel
-        isOpen={Boolean(selectedTaskDetails)}
-        onClose={closeTaskDetails}
-        taskTitle={selectedTaskDetails?.title ?? ""}
-        taskUpdates={taskUpdates}
-        members={members.map(m => ({ user_id: m.user_id, user: m.user ? { id: m.user?.id ?? m.user_id, name: m.user?.name ?? null, email: m.user?.email ?? null, avatar_url: m.user?.avatar_url ?? null } : null }))}
-        profileId={profile?.id ?? null}
-        canAddUpdate={canAddTaskUpdate}
-        canViewUpdates={canViewTaskUpdates}
-        isProjectOwnerMember={isProjectOwnerMember}
-        isSuperAdmin={isSuperAdmin}
-        onCreateUpdate={async (content) => {
-          if (!selectedTaskDetails || !profile?.id || !projectId) return;
-          await supabase.from("task_updates").insert({
-            task_id: selectedTaskDetails.id,
-            project_id: projectId,
-            user_id: profile.id,
-            content,
-          });
-          await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
-        }}
-        onEditUpdate={async (id, content) => {
-          await supabase.from("task_updates").update({ content }).eq("id", id);
-          await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
-        }}
-        onDeleteUpdate={(id) => void deleteTaskUpdate(id)}
-        onReply={async (parentId, content) => {
-          if (!selectedTaskDetails || !profile?.id || !projectId) return;
-          await supabase.from("task_updates").insert({
-            task_id: selectedTaskDetails.id,
-            project_id: projectId,
-            user_id: profile.id,
-            content,
-            reply_to: parentId,
-          });
-          await Promise.all([loadTaskDetailsData(), loadTaskUpdateCounts()]);
-        }}
-        isSavingUpdate={isSavingUpdate}
-      />
+      {renderTaskDetails()}
 
 
       {/* PROJECT OVERVIEW MODAL */}

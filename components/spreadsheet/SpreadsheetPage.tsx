@@ -46,6 +46,8 @@ function statusBadgeClass(statusKey: string): string {
       return "bg-blue-100 text-blue-700";
     case "in_progress":
       return "bg-amber-100 text-amber-800";
+    case "draft_review":
+      return "bg-cyan-100 text-cyan-800";
     case "in_review":
       return "bg-purple-100 text-purple-800";
     case "done":

@@ -45,6 +45,7 @@ export default function BoardColumn({
   const columnAccent: Record<ColumnId, { ring: string; text: string; bg: string }> = {
     todo: { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" },
     inProgress: { ring: "border-blue-200", text: "text-blue-700", bg: "bg-blue-50/70" },
+    draftReview: { ring: "border-cyan-200", text: "text-cyan-700", bg: "bg-cyan-50/70" },
     review: { ring: "border-amber-200", text: "text-amber-700", bg: "bg-amber-50/70" },
     done: { ring: "border-emerald-200", text: "text-emerald-700", bg: "bg-emerald-50/70" },
   };

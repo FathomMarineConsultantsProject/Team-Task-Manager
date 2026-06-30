@@ -3,7 +3,7 @@
  * Single source of truth — never duplicate status styles elsewhere.
  */
 
-export type StatusKey = "todo" | "in_progress" | "in_review" | "done";
+export type StatusKey = "todo" | "in_progress" | "draft_review" | "in_review" | "done";
 
 export type StatusConfig = {
   label: string;
@@ -34,6 +34,15 @@ export const STATUS_CONFIG: Record<StatusKey, StatusConfig> = {
     dot: "bg-amber-500",
     barColor: "#f59e0b",
   },
+  draft_review: {
+    label: "DRAFT REVIEW",
+    bg: "bg-cyan-50",
+    text: "text-cyan-700",
+    border: "border-l-cyan-500",
+    badge: "bg-cyan-100 text-cyan-700",
+    dot: "bg-cyan-500",
+    barColor: "#06b6d4",
+  },
   in_review: {
     label: "IN REVIEW",
     bg: "bg-indigo-50",
@@ -58,6 +67,7 @@ export const STATUS_CONFIG: Record<StatusKey, StatusConfig> = {
 export function normalizeStatus(raw: string | null | undefined): StatusKey {
   const key = (raw ?? "todo").toLowerCase().trim();
   if (key === "review") return "in_review";
+  if (key === "draft review" || key === "draftreview") return "draft_review";
   if (key === "inprogress" || key === "in progress") return "in_progress";
   if (key === "inreview" || key === "in review") return "in_review";
   if (key in STATUS_CONFIG) return key as StatusKey;
@@ -65,4 +75,4 @@ export function normalizeStatus(raw: string | null | undefined): StatusKey {
 }
 
 /** All status keys in pipeline order */
-export const STATUS_KEYS: StatusKey[] = ["todo", "in_progress", "in_review", "done"];
+export const STATUS_KEYS: StatusKey[] = ["todo", "in_progress", "draft_review", "in_review", "done"];

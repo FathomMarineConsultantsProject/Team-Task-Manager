@@ -9,7 +9,7 @@ import {
   Activity,
   Loader2,
   Filter,
-  Sparkles,
+  FileText,
   Clock,
   Zap,
   Target,
@@ -25,6 +25,7 @@ import { RenderMentionText } from "@/components/ui/MentionTextarea";
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
 import { normalizeStatus, STATUS_CONFIG } from "@/lib/statusConfig";
 import { getTaskBarSpan, startOfWeek, endOfWeek } from "@/lib/roadmap";
+import { workingDaysUntil } from "@/lib/workingDays";
 import {
   computeKPIs,
   computeStatusDistribution,
@@ -63,13 +64,46 @@ import {
   Legend,
 } from "recharts";
 
-type ProjectInfo = { id: string; name: string | null; start_date?: string | null; created_at?: string | null; owner_id?: string | null };
+type ProjectInfo = { id: string; name: string | null; start_date?: string | null; end_date?: string | null; created_at?: string | null; owner_id?: string | null };
 type ProjectMemberInfo = { project_id: string; user_id: string; role?: string | null };
 type TabId = "overview" | "board" | "doclist" | "activity" | "ai";
+type ReportScope = "last_week_progress" | "last_week_activity" | "this_week" | "this_month" | "full_project";
+type TaskSelectionMode = "all" | "selected";
+
+type ReportScopeWindow = {
+  scope: ReportScope;
+  label: string;
+  start: Date | null;
+  end: Date | null;
+};
+
+type TaskDependency = {
+  task_id: string;
+  title: string | null;
+  details?: string | null;
+  due_at?: string | null;
+  status: string | null;
+  created_at: string | null;
+};
+
+type PendingDependencyReportItem = {
+  title: string;
+  details?: string | null;
+  dueAt?: string | null;
+};
+
+const REPORT_SCOPE_OPTIONS: { value: ReportScope; label: string }[] = [
+  { value: "last_week_progress", label: "Last Week Progress" },
+  { value: "last_week_activity", label: "Last Week Activity" },
+  { value: "this_week", label: "This Week" },
+  { value: "this_month", label: "This Month" },
+  { value: "full_project", label: "Full Project Report" },
+];
 
 const CLIENT_STATUS_COLORS = {
   todo: "#6D4AF2",
   inProgress: "#00B8D9",
+  draftReview: "#06B6D4",
   inReview: "#F59E0B",
   completed: "#16A34A",
   overdue: "#EF4444",
@@ -140,6 +174,7 @@ function formatDuration(ms: number) {
 const STATUS_LABEL_MAP: Record<string, string> = {
   todo: "To Do",
   in_progress: "In Progress",
+  draft_review: "Draft Review",
   in_review: "In Review",
   done: "Done",
 };
@@ -194,6 +229,7 @@ function scopeProjectWorkloadInputs<TTask extends AnalyticsTask>(
 function clientPreviewStatusColor(statusKey: ReportStatusKey | string, statusLabel?: string) {
   const normalizedLabel = (statusLabel ?? "").toLowerCase();
   if (statusKey === "not_started") return CLIENT_STATUS_COLORS.todo;
+  if (statusKey === "draft_review") return CLIENT_STATUS_COLORS.draftReview;
   if (statusKey === "in_progress") {
     return normalizedLabel.includes("review") ? CLIENT_STATUS_COLORS.inReview : CLIENT_STATUS_COLORS.inProgress;
   }
@@ -222,6 +258,8 @@ type ReportTaskWithDetails = AnalyticsTask & {
   description?: string | null;
   project_id?: string;
   updated_at?: string | null;
+  draft_review_started_at?: string | null;
+  draft_review_due_at?: string | null;
 };
 
 type ReportTaskItem = {
@@ -231,8 +269,20 @@ type ReportTaskItem = {
   dueDate: string;
   status: string;
   statusKey: ReportStatusKey;
+  workflowStatusKey?: string;
   color: string;
   projectName?: string;
+  draftReviewDueDate?: string;
+  draftReviewDueValue?: string | null;
+  expectedFirstHalfDate?: string;
+  pendingDependencyCount?: number;
+  pendingDependencyTitles?: string[];
+  pendingDependencySummary?: string;
+  pendingDependencies?: PendingDependencyReportItem[];
+  movedToDraftReviewInScope?: boolean;
+  completedInScope?: boolean;
+  updatedInScope?: boolean;
+  activitySummary?: string;
 };
 
 type GanttPdfItem = ReportTaskItem & {
@@ -272,6 +322,11 @@ type ExecutiveReportData = {
   audience: "internal" | "client";
   projectName: string;
   generatedAt: string;
+  reportScope?: ReportScope;
+  scopeLabel?: string;
+  scopeStartDate?: string | null;
+  scopeEndDate?: string | null;
+  selectedTaskIds?: string[];
   leads: ProjectLeadInfo;
   health: {
     label: string;
@@ -292,6 +347,7 @@ type ExecutiveReportData = {
   statusSummary: {
     todo: number;
     inProgress: number;
+    draftReview: number;
     inReview: number;
     completed: number;
     overdue: number;
@@ -323,6 +379,14 @@ type ExecutiveReportData = {
     upcoming: ReportTaskItem[];
   };
   taskRegister: DetailedTaskRegisterItem[];
+  activitySummary?: {
+    completed: number;
+    movedToDraftReview: number;
+    updated: number;
+    pendingInputs: number;
+  };
+  draftReviewTasks?: DetailedTaskRegisterItem[];
+  pendingInputTasks?: DetailedTaskRegisterItem[];
   recommendations: string[];
 };
 
@@ -457,6 +521,7 @@ function getDocumentProgress(status: ReportStatusKey) {
   const progressByStatus: Record<ReportStatusKey, number> = {
     not_started: 0,
     in_progress: 45,
+    draft_review: 60,
     near_due: 75,
     done_early: 100,
     completed: 100,
@@ -480,7 +545,7 @@ function getDocumentTimeLeft(task: ReportTask, status: ReportStatusKey) {
 function getTaskPriority(status: ReportStatusKey) {
   if (status === "overdue") return "High";
   if (status === "near_due") return "Medium";
-  if (status === "in_progress") return "Normal";
+  if (status === "in_progress" || status === "draft_review") return "Normal";
   return "Low";
 }
 
@@ -495,6 +560,29 @@ function formatReportDate(value: string | null | undefined) {
   return date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
 }
 
+function formatShortReportDate(value: string | null | undefined) {
+  if (!value) return "No due date";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return "No due date";
+  return date.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" });
+}
+
+function formatDraftReviewDueStatus(value: string | null | undefined, fromDate = new Date()) {
+  if (!value) return "Not set";
+  const due = new Date(value);
+  if (Number.isNaN(due.getTime())) return "Not set";
+  due.setHours(0, 0, 0, 0);
+  const today = new Date(fromDate);
+  today.setHours(0, 0, 0, 0);
+  const days = workingDaysUntil(due, today);
+  if (due < today) return `Overdue by ${Math.abs(days)} working ${Math.abs(days) === 1 ? "day" : "days"}`;
+  return `Due in ${days} working ${days === 1 ? "day" : "days"}`;
+}
+
+function clean(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function getTaskOwner(task: ReportTaskWithDetails, usersById: Map<string, AnalyticsUser>) {
   const user = task.assigned_to ? usersById.get(task.assigned_to) : null;
   return user?.name ?? user?.email ?? "Unassigned";
@@ -504,9 +592,37 @@ function toReportTaskItem(
   task: ReportTaskWithDetails,
   usersById: Map<string, AnalyticsUser>,
   projectsById: Map<string, ProjectInfo>,
+  dependenciesByTaskId = new Map<string, TaskDependency[]>(),
+  scopeWindow?: ReportScopeWindow,
+  logs: (AnalyticsLog & { task_id?: string })[] = [],
+  comments: EnrichedComment[] = [],
 ): ReportTaskItem {
   const statusKey = deriveReportStatus(task as ReportTask);
   const status = REPORT_STATUS[statusKey];
+  const workflowStatusKey = normalizeStatus(task.status);
+  const dependencies = dependenciesByTaskId.get(task.id) ?? [];
+  const pendingDependencies = dependencies.filter((item) => clean(item.status).toLowerCase() === "pending");
+  const pendingDependencyTitles = pendingDependencies
+    .slice(0, 2)
+    .map((item) => item.title?.trim())
+    .filter((title): title is string => Boolean(title));
+  const pendingDependencyItems = pendingDependencies
+    .map((item) => ({
+      title: item.title?.trim() || "Untitled pending input",
+      details: item.details ?? null,
+      dueAt: item.due_at ?? null,
+    }));
+  const draftReviewDueDate = formatReportDate(task.draft_review_due_at);
+  const expectedFirstHalfDate = draftReviewDueDate;
+  const movedToDraftReview = scopeWindow ? taskMovedToDraftReviewInScope(task, logs, scopeWindow) : false;
+  const completedInScope = scopeWindow ? taskCompletedInScope(task, scopeWindow) : false;
+  const updatedInScope = scopeWindow ? taskUpdatedInScope(task, logs, comments, scopeWindow) : false;
+  const activityParts = [
+    completedInScope ? "Completed in scope" : null,
+    movedToDraftReview ? "Moved to Draft Review" : null,
+    updatedInScope ? "Updated in scope" : null,
+    pendingDependencies.length > 0 ? `${pendingDependencies.length} pending input${pendingDependencies.length === 1 ? "" : "s"}` : null,
+  ].filter((item): item is string => Boolean(item));
   return {
     id: task.id,
     title: task.title ?? "Untitled task",
@@ -514,8 +630,20 @@ function toReportTaskItem(
     dueDate: formatReportDate(task.end_date),
     status: status.label,
     statusKey,
+    workflowStatusKey,
     color: status.color,
     projectName: task.project_id ? projectsById.get(task.project_id)?.name ?? undefined : undefined,
+    draftReviewDueDate,
+    draftReviewDueValue: task.draft_review_due_at ?? null,
+    expectedFirstHalfDate,
+    pendingDependencyCount: pendingDependencies.length,
+    pendingDependencyTitles,
+    pendingDependencySummary: formatPendingDependencySummary(pendingDependencies),
+    pendingDependencies: pendingDependencyItems,
+    movedToDraftReviewInScope: movedToDraftReview,
+    completedInScope,
+    updatedInScope,
+    activitySummary: activityParts.join(" · "),
   };
 }
 
@@ -573,6 +701,8 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
   const overdueCount = report.kpis.overdue;
   const completedCount = report.kpis.completed;
   const completionRate = report.health.completionRate;
+  const draftReviewCount = report.statusSummary.draftReview;
+  const pendingInputCount = report.activitySummary?.pendingInputs ?? report.taskRegister.reduce((sum, task) => sum + (task.pendingDependencyCount ?? 0), 0);
   const missingDateCount = report.taskRegister.filter((task) => task.dueDate === "--" || task.dueDate === "Invalid Date").length;
   const longDurationCount = report.gantt.tasks.filter((task) => {
     const start = new Date(task.startValue ?? "").getTime();
@@ -588,6 +718,9 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
     deliveryFocus.push("Maintain delivery momentum by keeping completed work validated and any remaining open items visible in the task register.");
   }
   deliveryFocus.push(`${completedCount} of ${report.kpis.total} tracked ${report.kpis.total === 1 ? "deliverable is" : "deliverables are"} complete, with ${activeCount} still requiring follow-through to protect the delivery plan.`);
+  if (draftReviewCount > 0) {
+    deliveryFocus.push(`Review ${draftReviewCount} Draft Review ${draftReviewCount === 1 ? "item" : "items"} before the expected first-half date to avoid downstream delay.`);
+  }
   deliveryFocus.push(`Use the ${completionRate}% completion position to focus the next review on closing measurable deliverables rather than adding unplanned scope.`);
 
   const priorityActions: string[] = [];
@@ -595,6 +728,9 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
     priorityActions.push(`Review the ${nearDueCount} near-due ${nearDueCount === 1 ? "item" : "items"} first and confirm the owner, dependency status, and target completion date for each.`);
   } else {
     priorityActions.push("Keep the next milestone review focused on upcoming deliverables so any date movement is identified before it becomes urgent.");
+  }
+  if (pendingInputCount > 0) {
+    priorityActions.push(`Confirm ${pendingInputCount} pending ${pendingInputCount === 1 ? "input" : "inputs"} required to progress Draft Review and upcoming milestone tasks.`);
   }
   if (overdueCount > 0) {
     priorityActions.push(`Clear the ${overdueCount} overdue ${overdueCount === 1 ? "item" : "items"} by confirming recovery actions and revised dates before downstream milestones are affected.`);
@@ -616,11 +752,13 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
 
   const clientNextSteps = [
     "Maintain a weekly progress update using the Gantt timeline and task register as the source of truth for completed, active, and pending work.",
+    pendingInputCount > 0
+      ? "Prioritize approvals or information required for upcoming milestones so pending inputs do not hold delivery progress."
+      : "Keep client-side approvals and information requests visible so upcoming milestones can progress without avoidable delay.",
     "Confirm acceptance criteria for upcoming deliverables so completion can be recorded without delay once work is ready for review.",
     upcomingCount > 0
       ? `Review the next ${Math.min(upcomingCount, 3)} upcoming ${upcomingCount === 1 ? "deliverable" : "deliverables"} with stakeholders and confirm whether any client input is needed.`
       : "Review the next planned deliverables with stakeholders and confirm whether any client input is needed before work advances.",
-    "Approve scope or date changes quickly once the impact on existing delivery commitments is visible.",
   ];
 
   return [
@@ -643,18 +781,162 @@ function parseReportDateValue(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function endOfDay(date: Date) {
+  const result = new Date(date);
+  result.setHours(23, 59, 59, 999);
+  return result;
+}
+
+function startOfMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function endOfMonth(date: Date) {
+  return endOfDay(new Date(date.getFullYear(), date.getMonth() + 1, 0));
+}
+
+function getReportScopeWindow(scope: ReportScope, now = new Date()): ReportScopeWindow {
+  if (scope === "full_project") {
+    return { scope, label: "Full Project Report", start: null, end: null };
+  }
+
+  const currentWeekStart = startOfWeek(now);
+  if (scope === "last_week_progress" || scope === "last_week_activity") {
+    const start = new Date(currentWeekStart);
+    start.setDate(start.getDate() - 7);
+    const end = endOfDay(new Date(currentWeekStart.getTime() - 1));
+    return {
+      scope,
+      label: scope === "last_week_progress" ? "Last Week Progress" : "Last Week Activity",
+      start,
+      end,
+    };
+  }
+
+  if (scope === "this_month") {
+    return { scope, label: "This Month", start: startOfMonth(now), end: endOfMonth(now) };
+  }
+
+  return { scope, label: "This Week", start: currentWeekStart, end: endOfWeek(currentWeekStart) };
+}
+
+function isWithinScope(value: string | null | undefined, window: ReportScopeWindow) {
+  if (!window.start || !window.end) return true;
+  const date = parseReportDateValue(value);
+  if (!date) return false;
+  return date >= window.start && date <= window.end;
+}
+
+function taskCompletedInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
+  return isWithinScope(task.completed_at, window);
+}
+
+function taskMovedToDraftReviewInScope(
+  task: ReportTaskWithDetails,
+  logs: (AnalyticsLog & { task_id?: string })[],
+  window: ReportScopeWindow,
+) {
+  return logs.some((log) => log.task_id === task.id && normalizeStatus(log.to_status) === "draft_review" && isWithinScope(log.created_at, window));
+}
+
+function taskUpdatedInScope(
+  task: ReportTaskWithDetails,
+  logs: (AnalyticsLog & { task_id?: string })[],
+  comments: EnrichedComment[],
+  window: ReportScopeWindow,
+) {
+  return (
+    isWithinScope(task.updated_at, window) ||
+    logs.some((log) => log.task_id === task.id && isWithinScope(log.created_at, window)) ||
+    comments.some((comment) => comment.taskId === task.id && isWithinScope(comment.createdAt, window))
+  );
+}
+
+function taskDueInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
+  return isWithinScope(task.end_date, window);
+}
+
+function draftReviewDueInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
+  return isWithinScope(task.draft_review_due_at, window);
+}
+
+function isTaskActiveInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
+  if (!window.start || !window.end) return true;
+  if (deriveReportStatus(task as ReportTask) === "completed" || deriveReportStatus(task as ReportTask) === "done_early") {
+    return false;
+  }
+  const start = parseReportDateValue(task.start_date ?? task.created_at);
+  const end = parseReportDateValue(task.end_date ?? task.draft_review_due_at ?? task.updated_at);
+  if (!start && !end) return false;
+  const effectiveStart = start ?? end;
+  const effectiveEnd = end ?? start;
+  return Boolean(effectiveStart && effectiveEnd && effectiveStart <= window.end && effectiveEnd >= window.start);
+}
+
+function buildScopedClientTasks(
+  tasks: ReportTaskWithDetails[],
+  logs: (AnalyticsLog & { task_id?: string })[],
+  comments: EnrichedComment[],
+  scope: ReportScope,
+  selectedTaskIds: string[],
+) {
+  const window = getReportScopeWindow(scope);
+  const selectedSet = new Set(selectedTaskIds);
+  let scoped = tasks;
+
+  if (scope !== "full_project") {
+    scoped = tasks.filter((task) => {
+      if (scope === "last_week_progress") {
+        return taskCompletedInScope(task, window) || taskMovedToDraftReviewInScope(task, logs, window) || logs.some((log) => log.task_id === task.id && isWithinScope(log.created_at, window));
+      }
+      if (scope === "last_week_activity") {
+        return taskUpdatedInScope(task, logs, comments, window);
+      }
+      return taskDueInScope(task, window) || draftReviewDueInScope(task, window) || taskUpdatedInScope(task, logs, comments, window) || isTaskActiveInScope(task, window);
+    });
+  }
+
+  if (selectedSet.size > 0) scoped = scoped.filter((task) => selectedSet.has(task.id));
+  return { tasks: scoped, window };
+}
+
+function buildClientActivitySummary(tasks: DetailedTaskRegisterItem[]) {
+  return {
+    completed: tasks.filter((task) => task.completedInScope).length,
+    movedToDraftReview: tasks.filter((task) => task.movedToDraftReviewInScope).length,
+    updated: tasks.filter((task) => task.updatedInScope).length,
+    pendingInputs: tasks.reduce((sum, task) => sum + (task.pendingDependencyCount ?? 0), 0),
+  };
+}
+
+function formatPendingDependencySummary(dependencies: TaskDependency[]) {
+  const pending = dependencies.filter((item) => clean(item.status).toLowerCase() === "pending");
+  if (pending.length === 0) return undefined;
+  const titles = pending.slice(0, 2).map((item) => item.title?.trim()).filter((title): title is string => Boolean(title));
+  return `${pending.length} pending${titles.length ? ` - ${titles.join(", ")}` : ""}`;
+}
+
 function bestReportStartDate(task: ReportTaskWithDetails) {
   return parseReportDateValue(task.start_date ?? task.created_at ?? task.updated_at ?? task.completed_at) ?? new Date();
 }
 
-function bestReportEndDate(task: ReportTaskWithDetails) {
+function bestReportEndDate(task: ReportTaskWithDetails, preferPlannedEnd = false) {
   const status = deriveReportStatus(task as ReportTask);
   const fallback = task.end_date ?? task.completed_at ?? task.updated_at ?? task.start_date ?? task.created_at;
+  if (preferPlannedEnd) {
+    return parseReportDateValue(fallback) ?? bestReportStartDate(task);
+  }
   if (status === "completed" || status === "done_early") {
     return parseReportDateValue(task.completed_at ?? fallback) ?? bestReportStartDate(task);
   }
   return parseReportDateValue(fallback) ?? bestReportStartDate(task);
 }
+
+type GanttPdfOptions = {
+  projectStartDate?: string | null;
+  projectEndDate?: string | null;
+  reportScope?: ReportScope;
+};
 
 function getProjectLeadInfo(
   projectId: string,
@@ -688,24 +970,39 @@ function buildGanttPdfData(
   tasks: ReportTaskWithDetails[],
   usersById: Map<string, AnalyticsUser>,
   projectsById: Map<string, ProjectInfo>,
+  dependenciesByTaskId = new Map<string, TaskDependency[]>(),
+  scopeWindow?: ReportScopeWindow,
+  logs: (AnalyticsLog & { task_id?: string })[] = [],
+  comments: EnrichedComment[] = [],
+  options: GanttPdfOptions = {},
 ) {
+  const isFullProjectReport = options.reportScope === "full_project";
   const datedTasks = tasks
     .map((task) => {
       const start = bestReportStartDate(task);
-      const end = bestReportEndDate(task);
+      const end = bestReportEndDate(task, isFullProjectReport);
       return { task, start, end };
     })
     .filter((item): item is { task: ReportTaskWithDetails; start: Date; end: Date } => Boolean(item.start && item.end));
 
-  if (datedTasks.length === 0) {
+  const minCandidates = datedTasks.map((item) => item.start.getTime());
+  const maxCandidates = datedTasks.map((item) => item.end.getTime());
+  if (isFullProjectReport) {
+    const projectStart = parseReportDateValue(options.projectStartDate);
+    const projectEnd = parseReportDateValue(options.projectEndDate);
+    if (projectStart) minCandidates.push(projectStart.getTime());
+    if (projectEnd) maxCandidates.push(projectEnd.getTime());
+  }
+
+  if (minCandidates.length === 0 || maxCandidates.length === 0) {
     const today = new Date();
     const start = startOfWeek(today);
     const end = endOfWeek(start);
     return { rangeStart: start.toISOString(), rangeEnd: end.toISOString(), currentWeekLeft: 0, tasks: [] as GanttPdfItem[] };
   }
 
-  const minTime = Math.min(...datedTasks.map((item) => item.start.getTime()));
-  const maxTime = Math.max(...datedTasks.map((item) => item.end.getTime()));
+  const minTime = Math.min(...minCandidates);
+  const maxTime = Math.max(...maxCandidates);
   const rangeStart = startOfWeek(new Date(minTime));
   const rangeEnd = endOfWeek(new Date(maxTime));
   const today = new Date();
@@ -720,7 +1017,7 @@ function buildGanttPdfData(
       const span = getTaskBarSpan(start, end, rangeStart, rangeEnd);
       if (!span) return null;
       const item: GanttPdfItem = {
-        ...toReportTaskItem(task, usersById, projectsById),
+        ...toReportTaskItem(task, usersById, projectsById, dependenciesByTaskId, scopeWindow, logs, comments),
         startValue: start.toISOString(),
         endValue: end.toISOString(),
         left: span.left,
@@ -1154,25 +1451,41 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
 }
 
 function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
+  const draftReviewTasks = report.draftReviewTasks ?? report.taskRegister.filter((task) => task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review" || normalizeStatus(task.status) === "draft_review");
+  const pendingInputTasks = report.pendingInputTasks ?? report.taskRegister.filter((task) => (task.pendingDependencyCount ?? 0) > 0);
+  const activitySummary = report.activitySummary ?? buildClientActivitySummary(report.taskRegister);
   const progressSegments = [
     { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "In Progress", value: report.statusSummary.inProgress, color: CLIENT_STATUS_COLORS.inProgress },
+    { label: "Draft Review", value: report.statusSummary.draftReview, color: CLIENT_STATUS_COLORS.draftReview },
     { label: "In Review", value: report.statusSummary.inReview, color: CLIENT_STATUS_COLORS.inReview },
     { label: "Todo", value: report.statusSummary.todo, color: CLIENT_STATUS_COLORS.todo },
     { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
   ];
   const total = Math.max(1, progressSegments.reduce((sum, segment) => sum + segment.value, 0));
   const ganttLegend = [
-    ["Todo / Not Started", CLIENT_STATUS_COLORS.todo], ["In Progress", CLIENT_STATUS_COLORS.inProgress], ["In Review", CLIENT_STATUS_COLORS.inReview],
+    ["Todo / Not Started", CLIENT_STATUS_COLORS.todo], ["In Progress", CLIENT_STATUS_COLORS.inProgress], ["Draft Review", CLIENT_STATUS_COLORS.draftReview], ["In Review", CLIENT_STATUS_COLORS.inReview],
     ["Completed", CLIENT_STATUS_COLORS.completed], ["Overdue", CLIENT_STATUS_COLORS.overdue], ["Near Due", CLIENT_STATUS_COLORS.nearDue],
   ];
   const statusRows = [
     { label: "Todo", value: report.statusSummary.todo, color: CLIENT_STATUS_COLORS.todo },
     { label: "In Progress", value: report.statusSummary.inProgress, color: CLIENT_STATUS_COLORS.inProgress },
+    { label: "Draft Review", value: report.statusSummary.draftReview, color: CLIENT_STATUS_COLORS.draftReview },
     { label: "In Review", value: report.statusSummary.inReview, color: CLIENT_STATUS_COLORS.inReview },
     { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
   ];
+  const kanbanColumns = [
+    { key: "todo", title: "Todo / Not Started", color: CLIENT_STATUS_COLORS.todo, tasks: report.taskRegister.filter((task) => (task.workflowStatusKey ?? normalizeStatus(task.status)) === "todo" && task.statusKey !== "completed" && task.statusKey !== "done_early") },
+    { key: "inProgress", title: "In Progress", color: CLIENT_STATUS_COLORS.inProgress, tasks: report.taskRegister.filter((task) => (task.workflowStatusKey ?? normalizeStatus(task.status)) === "in_progress" || (!task.workflowStatusKey && (task.statusKey === "in_progress" || task.statusKey === "near_due"))) },
+    { key: "draftReview", title: "Draft Review", color: CLIENT_STATUS_COLORS.draftReview, tasks: draftReviewTasks },
+    { key: "inReview", title: "In Review", color: CLIENT_STATUS_COLORS.inReview, tasks: report.taskRegister.filter((task) => (task.workflowStatusKey ?? normalizeStatus(task.status)) === "in_review") },
+    { key: "completed", title: "Completed", color: CLIENT_STATUS_COLORS.completed, tasks: report.taskRegister.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early") },
+    { key: "overdue", title: "Overdue", color: CLIENT_STATUS_COLORS.overdue, tasks: report.taskRegister.filter((task) => task.statusKey === "overdue" && !["draft_review", "in_review"].includes(task.workflowStatusKey ?? normalizeStatus(task.status))) },
+  ];
+  const scopeRange = report.scopeStartDate && report.scopeEndDate
+    ? `${formatDate(report.scopeStartDate)} to ${formatDate(report.scopeEndDate)}`
+    : "Full project timeline";
   const recommendationCards = buildClientRecommendationCards(report);
   return (
     <div className="space-y-6">
@@ -1184,9 +1497,11 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
           <span>Owner: <strong className="text-white">{BRAND_NAME}</strong></span>
           <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
+          <span>Scope: <strong className="text-white">{report.scopeLabel ?? "Full Project Report"}</strong></span>
+          <span>Date Range: <strong className="text-white">{scopeRange}</strong></span>
         </div>
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[["Total Tasks", report.kpis.total], ["Completed", report.kpis.completed], ["In Progress", report.statusSummary.inProgress], ["Overdue", report.kpis.overdue]].map(([label, value]) => (
+          {[["Total Tasks in Scope", report.kpis.total], ["Completed in Scope", report.kpis.completed], ["Draft Review", report.statusSummary.draftReview], ["Pending Inputs", activitySummary.pendingInputs]].map(([label, value]) => (
             <div key={label} className="rounded-lg bg-white/[0.07] px-3 py-2.5 text-center">
               <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
               <p className="mt-1 text-lg font-bold">{value}</p>
@@ -1206,13 +1521,100 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
       </div>
 
       <ReportSection title="Client Status Summary">
-        <div className="grid gap-3 sm:grid-cols-5">
+        <div className="grid gap-3 sm:grid-cols-6">
           {statusRows.map((row) => (
             <div key={row.label} className="rounded-lg border border-slate-200 bg-white p-3">
               <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">{row.label}</p>
               <p className="mt-1 text-lg font-bold" style={{ color: row.color }}>{row.value}</p>
             </div>
           ))}
+        </div>
+      </ReportSection>
+
+      <ReportSection title="Client Kanban Summary">
+        <div className="grid gap-3 lg:grid-cols-3 xl:grid-cols-6">
+          {kanbanColumns.map((column) => (
+            <div key={column.key} className="min-w-0 rounded-lg border border-slate-200 bg-slate-50">
+              <div className="border-b border-slate-200 px-3 py-2" style={{ borderTop: `4px solid ${column.color}` }}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="break-words text-xs font-bold text-slate-800">{column.title}</p>
+                  <span className="rounded-md px-2 py-0.5 text-[10px] font-bold text-white" style={{ backgroundColor: column.color }}>{column.tasks.length}</span>
+                </div>
+              </div>
+              <div className="space-y-2 p-2">
+                {column.tasks.slice(0, 5).map((task) => (
+                  <div key={task.id} className="rounded-md border border-slate-200 bg-white p-2 text-xs">
+                    <p className="break-words font-semibold text-slate-900">{task.title}</p>
+                    <p className="mt-1 text-slate-500">Due {task.dueDate && task.dueDate !== "--" ? task.dueDate : "Not set"}</p>
+                    {(task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review") && task.expectedFirstHalfDate && task.expectedFirstHalfDate !== "--" && (
+                      <p className="mt-1 text-cyan-700">Expected First Half: {task.expectedFirstHalfDate}</p>
+                    )}
+                    {(task.pendingDependencyCount ?? 0) > 0 && (
+                      <p className="mt-1 break-words text-amber-700">Pending Inputs: {task.pendingDependencyCount}</p>
+                    )}
+                  </div>
+                ))}
+                {column.tasks.length === 0 && <p className="px-2 py-4 text-xs text-slate-400">No tasks</p>}
+                {column.tasks.length > 5 && <p className="px-2 text-[11px] font-medium text-slate-500">+{column.tasks.length - 5} more in PDF</p>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </ReportSection>
+
+      <ReportSection title="Draft Review / Expected First Half">
+        <div className="overflow-hidden rounded-lg border border-slate-200">
+          {draftReviewTasks.length === 0 ? (
+            <div className="px-3 py-3 text-sm text-slate-400">No Draft Review tasks in this report scope.</div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 text-left text-[9px] font-semibold uppercase tracking-wider text-slate-400"><tr>
+                <th className="px-3 py-2">Task</th><th className="px-3 py-2">Expected First Half</th><th className="px-3 py-2">Review Due Status</th><th className="px-3 py-2">Pending Inputs</th>
+              </tr></thead>
+              <tbody>{draftReviewTasks.map((task) => <tr key={task.id} className="border-t border-slate-100 align-top">
+                <td className="break-words px-3 py-2 font-semibold text-slate-900">{task.title}</td>
+                <td className="px-3 py-2">{task.expectedFirstHalfDate ?? "--"}</td>
+                <td className="px-3 py-2">{formatDraftReviewDueStatus(task.draftReviewDueValue)}</td>
+                <td className="px-3 py-2">
+                  {(task.pendingDependencies ?? []).length > 0 ? (
+                    <ul className="space-y-1">
+                      {(task.pendingDependencies ?? []).slice(0, 2).map((dependency) => (
+                        <li key={`${task.id}-${dependency.title}-${dependency.dueAt ?? "none"}`} className="break-words">
+                          {dependency.title}
+                          <span className="ml-1 text-slate-400">({formatShortReportDate(dependency.dueAt)})</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : "--"}
+                </td>
+              </tr>)}</tbody>
+            </table>
+          )}
+        </div>
+      </ReportSection>
+
+      <ReportSection title="Key Dependencies / Pending Inputs">
+        <div className="grid gap-3 md:grid-cols-2">
+          {pendingInputTasks.map((task) => (
+            <div key={task.id} className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <p className="break-words text-sm font-bold text-slate-900">{task.title}</p>
+                <span className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold text-amber-700">{task.status}</span>
+              </div>
+              <p className="mt-1 text-xs text-slate-600">Due {task.dueDate && task.dueDate !== "--" ? task.dueDate : "Not set"}</p>
+              <ul className="mt-2 space-y-1 text-xs text-amber-800">
+                {(task.pendingDependencies ?? []).map((dependency) => (
+                  <li key={`${task.id}-${dependency.title}-${dependency.dueAt ?? "none"}`} className="break-words">
+                    <span className="font-semibold">- {dependency.title}</span>
+                    <span className="ml-1 text-amber-700">({formatShortReportDate(dependency.dueAt)})</span>
+                    {dependency.details && <p className="ml-3 mt-0.5 whitespace-pre-wrap text-slate-600">{dependency.details}</p>}
+                  </li>
+                ))}
+                {(task.pendingDependencies ?? []).length === 0 && <li>Pending input details not specified.</li>}
+              </ul>
+            </div>
+          ))}
+          {pendingInputTasks.length === 0 && <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-400">No pending inputs in this report scope.</div>}
         </div>
       </ReportSection>
 
@@ -1243,7 +1645,11 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
               <th className="w-[36%] px-3 py-2">Task Name</th><th className="w-[13%] px-3 py-2">Status</th><th className="w-[10%] px-3 py-2">Progress</th><th className="w-[14%] px-3 py-2">Start Date</th><th className="w-[14%] px-3 py-2">Due Date</th><th className="w-[13%] px-3 py-2">Time Left</th>
             </tr></thead>
             <tbody>{report.taskRegister.map((task) => <tr key={task.id} className="border-t border-slate-100 align-top">
-              <td className="break-words px-3 py-2 font-medium text-slate-900">{task.title}</td><td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${clientPreviewStatusColor(task.statusKey, task.status)}18`, color: clientPreviewStatusColor(task.statusKey, task.status) }}>{task.status}</span></td><td className="px-3 py-2">{task.progress}%</td><td className="px-3 py-2">{task.startDate}</td><td className="px-3 py-2">{task.dueDate}</td><td className="px-3 py-2">{task.timeLeft}</td>
+              <td className="break-words px-3 py-2 font-medium text-slate-900">
+                {task.title}
+                {(task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review") && task.expectedFirstHalfDate && task.expectedFirstHalfDate !== "--" && <p className="mt-1 text-[11px] font-normal text-cyan-700">Expected First Half: {task.expectedFirstHalfDate}</p>}
+                {(task.pendingDependencyCount ?? 0) > 0 && <p className="mt-1 break-words text-[11px] font-normal text-amber-700">Pending Inputs: {task.pendingDependencySummary}</p>}
+              </td><td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${clientPreviewStatusColor(task.statusKey, task.status)}18`, color: clientPreviewStatusColor(task.statusKey, task.status) }}>{task.status}</span></td><td className="px-3 py-2">{task.progress}%</td><td className="px-3 py-2">{task.startDate}</td><td className="px-3 py-2">{task.dueDate}</td><td className="px-3 py-2">{task.timeLeft}</td>
             </tr>)}</tbody>
           </table>
         </div>
@@ -1490,6 +1896,10 @@ export default function ReportsPage() {
   const [aiReport, setAiReport] = useState<GeneratedAiReport | null>(null);
   const [aiReportType, setAiReportType] = useState<"user" | "project">("user");
   const [reportAudience, setReportAudience] = useState<"internal" | "client">("internal");
+  const [reportScope, setReportScope] = useState<ReportScope>("full_project");
+  const [taskSelectionMode, setTaskSelectionMode] = useState<TaskSelectionMode>("all");
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [selectedTaskSearch, setSelectedTaskSearch] = useState("");
   const [aiReportError, setAiReportError] = useState<string | null>(null);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
 
@@ -1525,7 +1935,7 @@ export default function ReportsPage() {
       // Fetch projects
       const { data: projData } = await supabase
         .from("projects")
-        .select("id, name, start_date, created_at, owner_id")
+        .select("id, name, start_date, end_date, created_at, owner_id")
         .eq("is_active", true)
         .order("name");
       const projects = (projData ?? []) as ProjectInfo[];
@@ -1544,7 +1954,7 @@ export default function ReportsPage() {
       const [tasksRes, logsRes, assigneesRes, usersRes, commentsRes, pmRes] = await Promise.all([
         supabase
           .from("tasks")
-          .select("id, status, assigned_to, start_date, end_date, created_at, updated_at, completed_at, project_id, title, description")
+          .select("id, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, created_at, updated_at, completed_at, project_id, title, description")
           .in("project_id", projectIds),
         supabase
           .from("task_logs")
@@ -1731,7 +2141,8 @@ export default function ReportsPage() {
   const openReportTaskDetails = useCallback((task: AnalyticsTask & { project_id?: string; title?: string }) => {
     const statusKey = deriveReportStatus(task as ReportTask);
     const statusLabel = REPORT_STATUS[statusKey]?.label ?? "Task";
-    const projectName = allProjects.find((p) => p.id === task.project_id)?.name ?? "Untitled project";
+    const projectInfo = allProjects.find((p) => p.id === task.project_id);
+    const projectName = projectInfo?.name ?? "Untitled project";
     const assignee = task.assigned_to ? usersById.get(task.assigned_to) ?? null : null;
     const assigneeName = assignee?.name ?? assignee?.email ?? "Unassigned";
 
@@ -1745,6 +2156,7 @@ export default function ReportsPage() {
       createdAt: task.created_at ?? null,
       createdByName: null,
       projectName,
+      projectOwnerId: projectInfo?.owner_id ?? null,
       startDate: task.start_date ?? null,
       endDate: task.end_date ?? null,
       creator: null,
@@ -1769,7 +2181,7 @@ export default function ReportsPage() {
     return null;
   }, []);
 
-  // ── AI Report generation ──────────────────────
+  // Report generation
   const [aiProjectFilter, setAiProjectFilter] = useState("all");
   const [aiUserFilter, setAiUserFilter] = useState("all");
 
@@ -1784,6 +2196,27 @@ export default function ReportsPage() {
     const memberIds = getProjectAllowedUserIds(aiProjectFilter, projectMembers, allProjects);
     return users.filter((u) => memberIds.has(u.id));
   }, [aiProjectFilter, users, projectMembers, allProjects]);
+
+  const selectableClientTasks = useMemo(() => {
+    if (aiProjectFilter === "all") return [] as ReportTaskWithDetails[];
+    const term = selectedTaskSearch.trim().toLowerCase();
+    return (tasks as ReportTaskWithDetails[])
+      .filter((task) => task.project_id === aiProjectFilter)
+      .filter((task) => {
+        if (!term) return true;
+        return `${task.title ?? ""} ${task.description ?? ""}`.toLowerCase().includes(term);
+      })
+      .sort((left, right) => (left.title ?? "").localeCompare(right.title ?? ""));
+  }, [aiProjectFilter, selectedTaskSearch, tasks]);
+
+  useEffect(() => {
+    if (aiProjectFilter === "all") {
+      setSelectedTaskIds([]);
+      return;
+    }
+    const validIds = new Set((tasks as ReportTaskWithDetails[]).filter((task) => task.project_id === aiProjectFilter).map((task) => task.id));
+    setSelectedTaskIds((current) => current.filter((taskId) => validIds.has(taskId)));
+  }, [aiProjectFilter, tasks]);
 
   const generateAiReport = useCallback(async () => {
     if (!profile?.id) return;
@@ -1801,6 +2234,7 @@ export default function ReportsPage() {
         aiTasks = aiTasks.filter((t: any) => t.project_id === aiProjectFilter);
       }
       const aiWorkloadScope = scopeProjectWorkloadInputs(aiTasks, assignees, users, aiProjectFilter, projectMembers, allProjects);
+      const reportLogs = logs as (AnalyticsLog & { task_id?: string })[];
 
       if (aiReportType === "user") {
         if (aiProjectFilter === "all" || aiUserFilter === "all") {
@@ -1822,7 +2256,7 @@ export default function ReportsPage() {
         const completedItems = userTaskItems.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early");
         const projectTaskIds = new Set(aiTasks.map((task) => task.id));
         const userComments = comments.filter((comment) => comment.userId === aiUserFilter && projectTaskIds.has(comment.taskId));
-        const userLogs = (logs as (AnalyticsLog & { task_id?: string })[]).filter((log) => log.user_id === aiUserFilter && (!log.task_id || projectTaskIds.has(log.task_id)));
+        const userLogs = reportLogs.filter((log) => log.user_id === aiUserFilter && (!log.task_id || projectTaskIds.has(log.task_id)));
         const recentComments: UserActivityItem[] = userComments.map((comment) => ({
           id: `comment-${comment.id}`,
           type: "comment",
@@ -1950,25 +2384,95 @@ Utilization: ${utilizationScore}%`;
         return;
       }
 
+      if (reportAudience === "client" && taskSelectionMode === "selected" && aiProjectFilter === "all") {
+        setAiReportError("Select a specific project before choosing selected tasks for a client report.");
+        return;
+      }
+
+      if (reportAudience === "client" && taskSelectionMode === "selected" && selectedTaskIds.length === 0) {
+        setAiReportError("Select at least one task before generating a selected-tasks client report.");
+        return;
+      }
+
+      const selectedIdsForReport = reportAudience === "client" && taskSelectionMode === "selected" ? selectedTaskIds : [];
+      const clientScope = reportAudience === "client"
+        ? buildScopedClientTasks(aiTasks, reportLogs, comments, reportScope, selectedIdsForReport)
+        : { tasks: aiTasks, window: getReportScopeWindow("full_project" as ReportScope) };
+      aiTasks = clientScope.tasks;
+
+      const pendingDependenciesByTaskId = new Map<string, TaskDependency[]>();
+      if (reportAudience === "client" && aiTasks.length > 0) {
+        try {
+          const taskIds = aiTasks.map((task) => task.id);
+          const { data: dependencyData, error: dependencyError } = await supabase
+            .from("task_dependencies")
+            .select("task_id, title, details, due_at, status, created_at")
+            .in("task_id", taskIds)
+            .eq("status", "pending")
+            .order("created_at", { ascending: true });
+
+          if (process.env.NODE_ENV === "development") {
+            console.debug("client report scoped task ids", taskIds.length);
+            console.debug("pending dependencies fetched", dependencyData?.length ?? 0);
+            console.debug("draft review raw tasks", aiTasks.filter((task) => normalizeStatus(task.status) === "draft_review").length);
+          }
+
+          if (dependencyError) {
+            console.warn("Pending task dependencies unavailable", dependencyError);
+            setAiReportError("Report generated, but pending inputs could not be loaded.");
+          } else {
+            ((dependencyData ?? []) as TaskDependency[]).forEach((dependency) => {
+              const existing = pendingDependenciesByTaskId.get(dependency.task_id) ?? [];
+              existing.push(dependency);
+              pendingDependenciesByTaskId.set(dependency.task_id, existing);
+            });
+          }
+        } catch (dependencyError) {
+          console.warn("Pending task dependencies unavailable", dependencyError);
+          setAiReportError("Report generated, but pending inputs could not be loaded.");
+        }
+      }
+
       const aiReportKpis = computeReportKPIs(aiTasks as ReportTask[]);
       const aiStatusDist = computeReportStatusDistribution(aiTasks as ReportTask[]);
       const projectsById = new Map(allProjects.map((p) => [p.id, p]));
       const reportUsersById = new Map(users.map((u) => [u.id, u]));
-      const taskItems = aiTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+      const taskItems = aiTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments));
       const statusSummary = aiTasks.reduce((summary, task) => {
         const reportStatus = deriveReportStatus(task as ReportTask);
-        if (reportStatus === "overdue") summary.overdue += 1;
-        else if (reportStatus === "completed" || reportStatus === "done_early") summary.completed += 1;
-        else if (normalizeStatus(task.status) === "in_review") summary.inReview += 1;
+        const workflowStatusKey = normalizeStatus(task.status);
+        if (reportStatus === "completed" || reportStatus === "done_early") summary.completed += 1;
+        else if (workflowStatusKey === "draft_review") summary.draftReview += 1;
+        else if (workflowStatusKey === "in_review") summary.inReview += 1;
+        else if (reportStatus === "overdue") summary.overdue += 1;
         else if (reportStatus === "in_progress" || reportStatus === "near_due") summary.inProgress += 1;
         else summary.todo += 1;
         return summary;
-      }, { todo: 0, inProgress: 0, inReview: 0, completed: 0, overdue: 0 });
-      const gantt = buildGanttPdfData(aiTasks, reportUsersById, projectsById);
+      }, { todo: 0, inProgress: 0, draftReview: 0, inReview: 0, completed: 0, overdue: 0 });
+      const ganttProjectCandidates = aiProjectFilter === "all"
+        ? allProjects.filter((project) => aiTasks.some((task) => task.project_id === project.id))
+        : allProjects.filter((project) => project.id === aiProjectFilter);
+      const projectStartDates = ganttProjectCandidates
+        .map((project) => parseReportDateValue(project.start_date ?? project.created_at))
+        .filter((date): date is Date => Boolean(date));
+      const projectEndDates = ganttProjectCandidates
+        .map((project) => parseReportDateValue(project.end_date))
+        .filter((date): date is Date => Boolean(date));
+      const ganttProjectStartDate = projectStartDates.length
+        ? new Date(Math.min(...projectStartDates.map((date) => date.getTime()))).toISOString()
+        : null;
+      const ganttProjectEndDate = projectEndDates.length
+        ? new Date(Math.max(...projectEndDates.map((date) => date.getTime()))).toISOString()
+        : null;
+      const gantt = buildGanttPdfData(aiTasks, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments, {
+        projectStartDate: ganttProjectStartDate,
+        projectEndDate: ganttProjectEndDate,
+        reportScope,
+      });
       const overdueItems = taskItems.filter((task) => task.statusKey === "overdue");
       const nearDueItems = taskItems.filter((task) => task.statusKey === "near_due");
-      const staleItems = aiTasks.filter(isStaleReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById));
-      const inactiveItems = aiTasks.filter(isInactiveReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+      const staleItems = aiTasks.filter(isStaleReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments));
+      const inactiveItems = aiTasks.filter(isInactiveReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments));
       const completedItems = taskItems.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early");
       const inProgressItems = taskItems.filter((task) => task.statusKey === "in_progress");
       const upcomingItems = taskItems
@@ -1977,7 +2481,7 @@ Utilization: ${utilizationScore}%`;
       const taskRegister: DetailedTaskRegisterItem[] = aiTasks.map((task) => {
         const statusKey = deriveReportStatus(task as ReportTask);
         return {
-          ...toReportTaskItem(task, reportUsersById, projectsById),
+          ...toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments),
           progress: getDocumentProgress(statusKey),
           startDate: formatReportDate(task.start_date ?? task.created_at),
           timeLeft: getDocumentTimeLeft(task as ReportTask, statusKey),
@@ -1986,6 +2490,9 @@ Utilization: ${utilizationScore}%`;
           priority: getTaskPriority(statusKey),
         };
       });
+      const draftReviewTasks = taskRegister.filter((task) => task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review" || normalizeStatus(task.status) === "draft_review");
+      const pendingInputTasks = taskRegister.filter((task) => (task.pendingDependencyCount ?? 0) > 0);
+      const clientActivitySummary = buildClientActivitySummary(taskRegister);
 
       const workloadRows = computeWorkload(aiWorkloadScope.tasks, aiWorkloadScope.assignees, aiWorkloadScope.users);
       const maxWorkload = Math.max(1, ...workloadRows.map((row) => row.total));
@@ -2064,6 +2571,11 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
           audience: reportAudience,
           projectName,
           generatedAt: new Date().toISOString(),
+          reportScope: reportAudience === "client" ? reportScope : undefined,
+          scopeLabel: reportAudience === "client" ? clientScope.window.label : undefined,
+          scopeStartDate: reportAudience === "client" ? clientScope.window.start?.toISOString() ?? null : undefined,
+          scopeEndDate: reportAudience === "client" ? clientScope.window.end?.toISOString() ?? null : undefined,
+          selectedTaskIds: reportAudience === "client" ? selectedIdsForReport : undefined,
           leads,
           health: {
             label: healthLabel,
@@ -2105,6 +2617,9 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
             upcoming: upcomingItems,
           },
           taskRegister,
+          activitySummary: reportAudience === "client" ? clientActivitySummary : undefined,
+          draftReviewTasks: reportAudience === "client" ? draftReviewTasks : undefined,
+          pendingInputTasks: reportAudience === "client" ? pendingInputTasks : undefined,
           recommendations,
         },
       });
@@ -2114,7 +2629,153 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, supabase]);
+
+  const refreshClientReportDataForPdf = useCallback(async (report: ExecutiveReportData): Promise<ExecutiveReportData> => {
+    const taskIds = Array.from(new Set(report.taskRegister.map((task) => task.id).filter(Boolean)));
+    if (taskIds.length === 0) return report;
+
+    const latestTasksById = new Map<string, Partial<ReportTaskWithDetails>>();
+    try {
+      const { data: latestTasks, error: latestTasksError } = await supabase
+        .from("tasks")
+        .select("id, status, start_date, end_date, draft_review_due_at, completed_at")
+        .in("id", taskIds);
+
+      if (latestTasksError) {
+        console.warn("Client report task refresh unavailable", latestTasksError);
+      } else {
+        ((latestTasks ?? []) as Partial<ReportTaskWithDetails>[]).forEach((task) => {
+          if (task.id) latestTasksById.set(task.id, task);
+        });
+      }
+    } catch (refreshError) {
+      console.warn("Client report task refresh unavailable", refreshError);
+    }
+
+    const pendingDependenciesByTaskId = new Map<string, TaskDependency[]>();
+    let dependencyRefreshFailed = false;
+    try {
+      const { data: dependencyData, error: dependencyError } = await supabase
+        .from("task_dependencies")
+        .select("task_id, title, details, due_at, status, created_at")
+        .in("task_id", taskIds)
+        .eq("status", "pending")
+        .order("created_at", { ascending: true });
+
+      if (process.env.NODE_ENV === "development") {
+        console.debug("client report scoped task ids", taskIds.length);
+        console.debug("pending dependencies fetched", dependencyData?.length ?? 0);
+        console.debug("draft review raw tasks", Array.from(latestTasksById.values()).filter((task) => normalizeStatus(task.status) === "draft_review").length);
+      }
+
+      if (dependencyError) {
+        console.warn("Pending task dependencies unavailable", dependencyError);
+        dependencyRefreshFailed = true;
+        setAiReportError("PDF exported, but pending inputs could not be refreshed.");
+      } else {
+        ((dependencyData ?? []) as TaskDependency[]).forEach((dependency) => {
+          const existing = pendingDependenciesByTaskId.get(dependency.task_id) ?? [];
+          existing.push(dependency);
+          pendingDependenciesByTaskId.set(dependency.task_id, existing);
+        });
+      }
+    } catch (dependencyError) {
+      console.warn("Pending task dependencies unavailable", dependencyError);
+      dependencyRefreshFailed = true;
+      setAiReportError("PDF exported, but pending inputs could not be refreshed.");
+    }
+
+    const mergeItem = <TItem extends ReportTaskItem>(item: TItem): TItem => {
+      const latestTask = latestTasksById.get(item.id);
+      const statusKey = latestTask?.id ? deriveReportStatus(latestTask as ReportTask) : item.statusKey;
+      const workflowStatusKey = latestTask?.id ? normalizeStatus(latestTask.status) : item.workflowStatusKey ?? normalizeStatus(item.status);
+      const pendingDependencies = pendingDependenciesByTaskId.get(item.id) ?? [];
+      const pendingDependencyTitles = dependencyRefreshFailed
+        ? item.pendingDependencyTitles
+        : pendingDependencies
+          .slice(0, 2)
+          .map((dependency) => dependency.title?.trim())
+          .filter((title): title is string => Boolean(title));
+      const pendingDependencyItems = dependencyRefreshFailed
+        ? item.pendingDependencies
+        : pendingDependencies.map((dependency) => ({
+          title: dependency.title?.trim() || "Untitled pending input",
+          details: dependency.details ?? null,
+          dueAt: dependency.due_at ?? null,
+        }));
+      const draftReviewDueDate = latestTask?.draft_review_due_at !== undefined
+        ? formatReportDate(latestTask.draft_review_due_at)
+        : item.draftReviewDueDate;
+      const dueDate = latestTask?.end_date !== undefined ? formatReportDate(latestTask.end_date) : item.dueDate;
+      const merged = {
+        ...item,
+        dueDate,
+        status: REPORT_STATUS[statusKey]?.label ?? item.status,
+        statusKey,
+        workflowStatusKey,
+        color: REPORT_STATUS[statusKey]?.color ?? item.color,
+        draftReviewDueDate,
+        draftReviewDueValue: latestTask?.draft_review_due_at !== undefined ? latestTask.draft_review_due_at ?? null : item.draftReviewDueValue,
+        expectedFirstHalfDate: draftReviewDueDate ?? item.expectedFirstHalfDate,
+        pendingDependencyCount: dependencyRefreshFailed ? item.pendingDependencyCount : pendingDependencies.length,
+        pendingDependencyTitles,
+        pendingDependencySummary: dependencyRefreshFailed ? item.pendingDependencySummary : formatPendingDependencySummary(pendingDependencies),
+        pendingDependencies: pendingDependencyItems,
+      };
+
+      if ("progress" in merged) {
+        return {
+          ...merged,
+          progress: getDocumentProgress(statusKey),
+          timeLeft: latestTask?.id ? getDocumentTimeLeft(latestTask as ReportTask, statusKey) : (merged as TItem & DetailedTaskRegisterItem).timeLeft,
+          priority: getTaskPriority(statusKey),
+        } as TItem;
+      }
+
+      return merged as TItem;
+    };
+
+    const taskRegister = report.taskRegister.map((task) => mergeItem(task));
+    const summarize = taskRegister.reduce((summary, task) => {
+      const workflowStatusKey = task.workflowStatusKey ?? normalizeStatus(task.status);
+      if (task.statusKey === "completed" || task.statusKey === "done_early") summary.completed += 1;
+      else if (workflowStatusKey === "draft_review") summary.draftReview += 1;
+      else if (workflowStatusKey === "in_review") summary.inReview += 1;
+      else if (task.statusKey === "overdue") summary.overdue += 1;
+      else if (task.statusKey === "in_progress" || task.statusKey === "near_due") summary.inProgress += 1;
+      else summary.todo += 1;
+      return summary;
+    }, { todo: 0, inProgress: 0, draftReview: 0, inReview: 0, completed: 0, overdue: 0 });
+    const activitySummary = buildClientActivitySummary(taskRegister);
+
+    return {
+      ...report,
+      statusSummary: summarize,
+      taskRegister,
+      gantt: {
+        ...report.gantt,
+        tasks: report.gantt.tasks.map((task) => mergeItem(task)),
+      },
+      timeline: report.timeline.map((task) => mergeItem(task)),
+      actions: report.actions.map((task) => mergeItem(task)),
+      risks: {
+        overdue: taskRegister.filter((task) => task.statusKey === "overdue"),
+        nearDue: taskRegister.filter((task) => task.statusKey === "near_due"),
+        stale: report.risks.stale.map((task) => mergeItem(task)),
+        inactive: report.risks.inactive.map((task) => mergeItem(task)),
+      },
+      breakdown: {
+        completed: taskRegister.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early"),
+        inProgress: taskRegister.filter((task) => task.statusKey === "in_progress"),
+        overdue: taskRegister.filter((task) => task.statusKey === "overdue"),
+        upcoming: taskRegister.filter((task) => task.statusKey === "not_started" || task.statusKey === "near_due"),
+      },
+      activitySummary,
+      draftReviewTasks: taskRegister.filter((task) => task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review"),
+      pendingInputTasks: taskRegister.filter((task) => (task.pendingDependencyCount ?? 0) > 0),
+    };
+  }, [supabase]);
 
   const exportAiReportPdf = useCallback(async () => {
     if (!aiReport) {
@@ -2124,10 +2785,13 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
 
     setAiReportError(null);
     try {
+      const exportReport = aiReport.type === "project" && aiReport.audience === "client"
+        ? { ...aiReport, data: await refreshClientReportDataForPdf(aiReport.data) }
+        : aiReport;
       const response = await fetch("/api/reports/pdf", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(aiReport),
+        body: JSON.stringify(exportReport),
       });
 
       if (!response.ok) {
@@ -2138,7 +2802,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = aiReport.type === "project" ? "executive-report.pdf" : "user-performance-report.pdf";
+      link.download = exportReport.type === "project" ? "executive-report.pdf" : "user-performance-report.pdf";
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -2147,7 +2811,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
       console.error("PDF export error", exportError);
       setAiReportError("Could not export PDF. Please try again.");
     }
-  }, [aiReport]);
+  }, [aiReport, refreshClientReportDataForPdf]);
 
   // ── Tab buttons ───────────────────────────────
   const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
@@ -2155,7 +2819,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
     { id: "board", label: "Board", icon: BarChart3 },
     { id: "doclist", label: "Document List", icon: Filter },
     { id: "activity", label: "Activity", icon: Activity },
-    { id: "ai", label: "AI Report", icon: Sparkles },
+    { id: "ai", label: "Report", icon: FileText },
   ];
 
   // ════════════════════════════════════════════════
@@ -2415,7 +3079,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
               : allReportTasks.filter((t) => t._reportStatus === reportStatusFilter);
 
             const grouped: Record<ReportStatusKey, typeof allReportTasks> = {
-              not_started: [], in_progress: [], near_due: [], done_early: [], completed: [], overdue: [],
+              not_started: [], in_progress: [], draft_review: [], near_due: [], done_early: [], completed: [], overdue: [],
             };
             boardFiltered.forEach((t) => { grouped[t._reportStatus]?.push(t); });
 
@@ -2674,12 +3338,12 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
             </div>
           )}
 
-          {/* ═══ AI REPORT TAB ═══ */}
+          {/* Report tab */}
           {activeTab === "ai" && (
             <div className="space-y-5">
               <div className="overflow-hidden rounded-2xl border border-[#2d1460]/20 bg-white shadow-sm">
                 <div className="bg-[#24124d] px-5 py-4 text-white">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-violet-200">AI Reporting System V2</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-violet-200">Reporting System V2</p>
                   <h2 className="mt-1 text-xl font-bold tracking-tight">PMO Report Builder</h2>
                 </div>
                 <div className="grid gap-4 p-5 xl:grid-cols-[240px_1fr]">
@@ -2691,13 +3355,14 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
                         { id: "project", label: "Project Executive" },
                       ].map((type) => (
                         <button
-                          key={type.id}
-                          type="button"
-                          onClick={() => {
-                            setAiReportType(type.id as "user" | "project");
-                            setAiReport(null);
-                            setAiReportError(null);
-                          }}
+                            key={type.id}
+                            type="button"
+                            onClick={() => {
+                              setAiReportType(type.id as "user" | "project");
+                              setAiReport(null);
+                              setAiReportError(null);
+                              setTaskSelectionMode("all");
+                            }}
                           className={`rounded-lg border px-3 py-2 text-left text-sm font-semibold transition ${aiReportType === type.id
                               ? "border-[#381a78] bg-[#381a78] text-white"
                               : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
@@ -2733,7 +3398,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
                             <button
                               key={value}
                               type="button"
-                              onClick={() => { setReportAudience(value); setAiReport(null); setAiReportError(null); }}
+                              onClick={() => { setReportAudience(value); setAiReport(null); setAiReportError(null); setTaskSelectionMode("all"); }}
                               className={`rounded-md px-3 text-xs font-semibold transition ${reportAudience === value ? "bg-[#381a78] text-white shadow-sm" : "text-slate-600 hover:bg-white"}`}
                             >
                               {label}
@@ -2742,13 +3407,90 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
                         </div>
                       </div>
                     )}
+                    {aiReportType === "project" && reportAudience === "client" && (
+                      <div className="grid w-full gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 lg:grid-cols-[220px_220px_1fr]">
+                        <div>
+                          <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400">Report Scope</label>
+                          <select
+                            value={reportScope}
+                            onChange={(e) => { setReportScope(e.target.value as ReportScope); setAiReport(null); setAiReportError(null); }}
+                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-[#381a78]"
+                          >
+                            {REPORT_SCOPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Task Scope</p>
+                          <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-white p-1">
+                            {([["all", "All Tasks"], ["selected", "Selected Tasks"]] as const).map(([value, label]) => (
+                              <button
+                                key={value}
+                                type="button"
+                                onClick={() => { setTaskSelectionMode(value); setAiReport(null); setAiReportError(null); }}
+                                className={`rounded-md px-3 text-xs font-semibold transition ${taskSelectionMode === value ? "bg-[#381a78] text-white shadow-sm" : "text-slate-600 hover:bg-slate-50"}`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {taskSelectionMode === "selected" && (
+                          <div className="min-w-0">
+                            {aiProjectFilter === "all" ? (
+                              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+                                Select a specific project to choose individual client report tasks.
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    value={selectedTaskSearch}
+                                    onChange={(e) => setSelectedTaskSearch(e.target.value)}
+                                    placeholder="Search tasks"
+                                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-[#381a78]"
+                                  />
+                                  <span className="shrink-0 rounded-lg bg-white px-2 py-2 text-xs font-semibold text-slate-600">
+                                    {selectedTaskIds.length} selected
+                                  </span>
+                                </div>
+                                <div className="max-h-36 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                                  {selectableClientTasks.map((task) => (
+                                    <label key={task.id} className="flex cursor-pointer items-start gap-2 border-b border-slate-100 px-3 py-2 last:border-0">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedTaskIds.includes(task.id)}
+                                        onChange={(e) => {
+                                          setSelectedTaskIds((current) => e.target.checked
+                                            ? Array.from(new Set([...current, task.id]))
+                                            : current.filter((taskId) => taskId !== task.id));
+                                          setAiReport(null);
+                                          setAiReportError(null);
+                                        }}
+                                        className="mt-0.5 h-4 w-4 rounded border-slate-300 text-[#381a78] focus:ring-[#381a78]"
+                                      />
+                                      <span className="min-w-0">
+                                        <span className="block break-words text-xs font-semibold text-slate-800">{task.title ?? "Untitled task"}</span>
+                                        <span className="block text-[11px] text-slate-400">{formatReportDate(task.end_date)}</span>
+                                      </span>
+                                    </label>
+                                  ))}
+                                  {selectableClientTasks.length === 0 && (
+                                    <div className="px-3 py-3 text-xs text-slate-400">No matching tasks.</div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={() => void generateAiReport()}
                       disabled={isGeneratingAi}
                       className="flex h-10 items-center justify-center gap-2 rounded-xl bg-[#2d1460] px-5 text-sm font-medium text-white transition hover:bg-[#381a78] disabled:opacity-50"
                     >
-                      {isGeneratingAi ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                      {isGeneratingAi ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
                       {isGeneratingAi ? "Generating..." : "Generate Report"}
                     </button>
                     <button

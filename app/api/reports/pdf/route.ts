@@ -1,6 +1,13 @@
 export const runtime = "nodejs";
 
-type ReportStatusKey = "not_started" | "in_progress" | "near_due" | "done_early" | "completed" | "overdue";
+type ReportStatusKey = "not_started" | "in_progress" | "draft_review" | "near_due" | "done_early" | "completed" | "overdue";
+type ReportScope = "last_week_progress" | "last_week_activity" | "this_week" | "this_month" | "full_project";
+
+type PendingDependencyReportItem = {
+  title: string;
+  details?: string | null;
+  dueAt?: string | null;
+};
 
 type ReportTaskItem = {
   id: string;
@@ -9,8 +16,20 @@ type ReportTaskItem = {
   dueDate: string;
   status: string;
   statusKey: ReportStatusKey;
+  workflowStatusKey?: string;
   color: string;
   projectName?: string;
+  draftReviewDueDate?: string;
+  draftReviewDueValue?: string | null;
+  expectedFirstHalfDate?: string;
+  pendingDependencyCount?: number;
+  pendingDependencyTitles?: string[];
+  pendingDependencySummary?: string;
+  pendingDependencies?: PendingDependencyReportItem[];
+  movedToDraftReviewInScope?: boolean;
+  completedInScope?: boolean;
+  updatedInScope?: boolean;
+  activitySummary?: string;
 };
 
 type GanttPdfItem = ReportTaskItem & {
@@ -50,6 +69,11 @@ type ExecutiveReportData = {
   audience?: "internal" | "client";
   projectName: string;
   generatedAt: string;
+  reportScope?: ReportScope;
+  scopeLabel?: string;
+  scopeStartDate?: string | null;
+  scopeEndDate?: string | null;
+  selectedTaskIds?: string[];
   leads: ProjectLeadInfo;
   health: {
     label: string;
@@ -70,6 +94,7 @@ type ExecutiveReportData = {
   statusSummary: {
     todo: number;
     inProgress: number;
+    draftReview: number;
     inReview: number;
     completed: number;
     overdue: number;
@@ -101,6 +126,14 @@ type ExecutiveReportData = {
     upcoming: ReportTaskItem[];
   };
   taskRegister: DetailedTaskRegisterItem[];
+  activitySummary?: {
+    completed: number;
+    movedToDraftReview: number;
+    updated: number;
+    pendingInputs: number;
+  };
+  draftReviewTasks?: DetailedTaskRegisterItem[];
+  pendingInputTasks?: DetailedTaskRegisterItem[];
   recommendations: string[];
 };
 
@@ -179,6 +212,7 @@ const COLORS = {
 const CLIENT_STATUS_COLORS = {
   todo: "#6D4AF2",
   inProgress: "#00B8D9",
+  draftReview: "#06B6D4",
   inReview: "#F59E0B",
   completed: "#16A34A",
   overdue: "#EF4444",
@@ -218,6 +252,47 @@ function formatDate(value: string | null | undefined) {
   return date.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
 }
 
+function formatShortDate(value: string | null | undefined) {
+  if (!value) return "No due date";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return "No due date";
+  return date.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" });
+}
+
+function isWeekend(date: Date) {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+function workingDaysUntilDate(targetDate: Date, fromDate = new Date()) {
+  const start = new Date(fromDate);
+  start.setHours(0, 0, 0, 0);
+  const target = new Date(targetDate);
+  target.setHours(0, 0, 0, 0);
+  const direction = target.getTime() >= start.getTime() ? 1 : -1;
+  const cursor = new Date(start);
+  let days = 0;
+
+  while ((target.getTime() - cursor.getTime()) * direction > 0) {
+    cursor.setDate(cursor.getDate() + direction);
+    if (!isWeekend(cursor)) days += direction;
+  }
+
+  return days;
+}
+
+function formatDraftReviewDueStatus(value: string | null | undefined, fromDate = new Date()) {
+  if (!value) return "Not set";
+  const due = new Date(value);
+  if (Number.isNaN(due.getTime())) return "Not set";
+  due.setHours(0, 0, 0, 0);
+  const today = new Date(fromDate);
+  today.setHours(0, 0, 0, 0);
+  const days = workingDaysUntilDate(due, today);
+  if (due < today) return `Overdue by ${Math.abs(days)} working ${Math.abs(days) === 1 ? "day" : "days"}`;
+  return `Due in ${days} working ${days === 1 ? "day" : "days"}`;
+}
+
 function clamp(value: number, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
 }
@@ -225,6 +300,7 @@ function clamp(value: number, min = 0, max = 100) {
 function statusColor(status: ReportStatusKey | string) {
   if (status === "not_started") return COLORS.purple;
   if (status === "in_progress") return COLORS.blue;
+  if (status === "draft_review") return CLIENT_STATUS_COLORS.draftReview;
   if (status === "near_due") return COLORS.orange;
   if (status === "done_early") return COLORS.lightGreen;
   if (status === "completed") return COLORS.green;
@@ -235,6 +311,7 @@ function statusColor(status: ReportStatusKey | string) {
 function clientStatusColor(statusKey: ReportStatusKey | string, statusLabel?: string) {
   const normalizedLabel = clean(statusLabel).toLowerCase();
   if (statusKey === "not_started") return CLIENT_STATUS_COLORS.todo;
+  if (statusKey === "draft_review") return CLIENT_STATUS_COLORS.draftReview;
   if (statusKey === "in_progress") {
     return normalizedLabel.includes("review") ? CLIENT_STATUS_COLORS.inReview : CLIENT_STATUS_COLORS.inProgress;
   }
@@ -624,6 +701,8 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
   const overdueCount = report.kpis.overdue;
   const completedCount = report.kpis.completed;
   const completionRate = report.health.completionRate;
+  const draftReviewCount = report.statusSummary?.draftReview ?? 0;
+  const pendingInputCount = report.activitySummary?.pendingInputs ?? report.taskRegister.reduce((sum, task) => sum + (task.pendingDependencyCount ?? 0), 0);
   const missingDateCount = report.taskRegister.filter((task) => task.dueDate === "--" || task.dueDate === "Invalid Date").length;
   const longDurationCount = report.gantt.tasks.filter((task) => {
     const start = new Date(task.startValue ?? "").getTime();
@@ -639,6 +718,9 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
     deliveryFocus.push(`Maintain delivery momentum by keeping completed work validated and any remaining open items visible in the task register.`);
   }
   deliveryFocus.push(`${completedCount} of ${report.kpis.total} tracked ${report.kpis.total === 1 ? "deliverable is" : "deliverables are"} complete, with ${activeCount} still requiring follow-through to protect the delivery plan.`);
+  if (draftReviewCount > 0) {
+    deliveryFocus.push(`Review ${draftReviewCount} Draft Review ${draftReviewCount === 1 ? "item" : "items"} before the expected first-half date to avoid downstream delay.`);
+  }
   deliveryFocus.push(`Use the ${completionRate}% completion position to focus the next review on closing measurable deliverables rather than adding unplanned scope.`);
 
   const priorityActions: string[] = [];
@@ -646,6 +728,9 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
     priorityActions.push(`Review the ${nearDueCount} near-due ${nearDueCount === 1 ? "item" : "items"} first and confirm the owner, dependency status, and target completion date for each.`);
   } else {
     priorityActions.push(`Keep the next milestone review focused on upcoming deliverables so any date movement is identified before it becomes urgent.`);
+  }
+  if (pendingInputCount > 0) {
+    priorityActions.push(`Confirm ${pendingInputCount} pending ${pendingInputCount === 1 ? "input" : "inputs"} required to progress Draft Review and upcoming milestone tasks.`);
   }
   if (overdueCount > 0) {
     priorityActions.push(`Clear the ${overdueCount} overdue ${overdueCount === 1 ? "item" : "items"} by confirming recovery actions and revised dates before downstream milestones are affected.`);
@@ -667,11 +752,13 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
 
   const clientNextSteps = [
     `Maintain a weekly progress update using the Gantt timeline and task register as the source of truth for completed, active, and pending work.`,
+    pendingInputCount > 0
+      ? `Prioritize approvals or information required for upcoming milestones so pending inputs do not hold delivery progress.`
+      : `Keep client-side approvals and information requests visible so upcoming milestones can progress without avoidable delay.`,
     `Confirm acceptance criteria for upcoming deliverables so completion can be recorded without delay once work is ready for review.`,
     upcomingCount > 0
       ? `Review the next ${Math.min(upcomingCount, 3)} upcoming ${upcomingCount === 1 ? "deliverable" : "deliverables"} with stakeholders and confirm whether any client input is needed.`
       : `Review the next planned deliverables with stakeholders and confirm whether any client input is needed before work advances.`,
-    `Approve scope or date changes quickly once the impact on existing delivery commitments is visible.`,
   ];
 
   return [
@@ -784,7 +871,7 @@ function drawClientStatusDonut(
 function clientCompactBars(c: Canvas, x: number, y: number, w: number, rows: { label: string; value: number; color: string }[], maxValue?: number) {
   const max = Math.max(1, maxValue ?? Math.max(...rows.map((row) => row.value), 1));
   rows.forEach((row, index) => {
-    const top = y + index * 18;
+    const top = y + index * 20;
     c.text(wrap(row.label, 28, 1)[0], x, top, 7.5, COLORS.ink, true);
     c.text(row.value, x + w - 24, top, 7.5, COLORS.muted, true);
     c.bar(x, top + 10, w, 6, row.value / max * 100, row.color);
@@ -792,7 +879,7 @@ function clientCompactBars(c: Canvas, x: number, y: number, w: number, rows: { l
 }
 
 type ClientKanbanColumn = {
-  key: "todo" | "inProgress" | "inReview" | "completed" | "overdue";
+  key: "todo" | "inProgress" | "draftReview" | "inReview" | "completed" | "overdue";
   title: string;
   color: string;
   tasks: DetailedTaskRegisterItem[];
@@ -823,6 +910,7 @@ function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKan
   const columns: ClientKanbanColumn[] = [
     { key: "todo", title: "Todo / Not Started", color: CLIENT_STATUS_COLORS.todo, tasks: [] },
     { key: "inProgress", title: "In Progress", color: CLIENT_STATUS_COLORS.inProgress, tasks: [] },
+    { key: "draftReview", title: "Draft Review", color: CLIENT_STATUS_COLORS.draftReview, tasks: [] },
     { key: "inReview", title: "In Review", color: CLIENT_STATUS_COLORS.inReview, tasks: [] },
     { key: "completed", title: "Completed", color: CLIENT_STATUS_COLORS.completed, tasks: [] },
     { key: "overdue", title: "Overdue", color: CLIENT_STATUS_COLORS.overdue, tasks: [] },
@@ -832,9 +920,11 @@ function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKan
   tasks.forEach((task) => {
     const statusLabel = clean(task.status).toLowerCase();
     const statusKey = task.statusKey as ReportStatusKey | "in_review" | string;
-    if (statusKey === "overdue") byKey.get("overdue")?.tasks.push(task);
-    else if (statusKey === "completed" || statusKey === "done_early") byKey.get("completed")?.tasks.push(task);
-    else if (statusKey === "in_review" || statusLabel.includes("review")) byKey.get("inReview")?.tasks.push(task);
+    const workflowStatusKey = clean(task.workflowStatusKey).toLowerCase();
+    if (statusKey === "completed" || statusKey === "done_early") byKey.get("completed")?.tasks.push(task);
+    else if (workflowStatusKey === "draft_review" || statusKey === "draft_review") byKey.get("draftReview")?.tasks.push(task);
+    else if (workflowStatusKey === "in_review" || statusKey === "in_review" || statusLabel.includes("review")) byKey.get("inReview")?.tasks.push(task);
+    else if (statusKey === "overdue") byKey.get("overdue")?.tasks.push(task);
     else if (statusKey === "not_started") byKey.get("todo")?.tasks.push(task);
     else byKey.get("inProgress")?.tasks.push(task);
   });
@@ -859,7 +949,7 @@ function buildClientKanbanPage(pdf: PdfDoc, report: ExecutiveReportData) {
       const columnGap = 10;
       const columnY = 86;
       const columnH = 430;
-      const columnW = (PAGE_W - M * 2 - columnGap * 4) / 5;
+      const columnW = (PAGE_W - M * 2 - columnGap * (columns.length - 1)) / columns.length;
       if (batchCount > 1) {
         c.text(`Page batch ${batchIndex + 1} of ${batchCount}`, M, 70, 9, COLORS.muted, true);
       }
@@ -878,10 +968,23 @@ function buildClientKanbanPage(pdf: PdfDoc, report: ExecutiveReportData) {
         }
         visibleTasks.forEach((task, taskIndex) => {
           const cardY = columnY + 56 + taskIndex * 72;
-          const titleLines = safeWrapText(task.title, 21, 3);
+          const titleLines = safeWrapText(task.title, 21, 2);
+          const metaItems = [
+            `Due: ${task.dueDate && task.dueDate !== "--" ? task.dueDate : "Not set"}`,
+            (task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review") && task.expectedFirstHalfDate && task.expectedFirstHalfDate !== "--"
+              ? `First Half: ${task.expectedFirstHalfDate}`
+              : null,
+            (task.pendingDependencyCount ?? 0) > 0 ? `Inputs: ${task.pendingDependencyCount}` : null,
+          ].filter((item): item is string => Boolean(item));
           c.rect(x + 8, cardY, columnW - 16, 62, COLORS.panel, COLORS.border);
           c.textLines(titleLines, x + 14, cardY + 9, 7.2, COLORS.ink, true, 8.5);
-          c.text(`Due: ${task.dueDate && task.dueDate !== "--" ? task.dueDate : "Not set"}`, x + 14, cardY + 49, 7, COLORS.muted);
+          let metaY = cardY + 34;
+          metaItems.slice(0, 3).forEach((item) => {
+            const lines = safeWrapText(item, 18, 1);
+            const color = item.startsWith("First Half") ? CLIENT_STATUS_COLORS.draftReview : item.startsWith("Inputs") ? COLORS.orange : COLORS.muted;
+            c.textLines(lines, x + 14, metaY, 6.3, color, item.startsWith("Inputs"), 7.5);
+            metaY += 8;
+          });
         });
       });
 
@@ -890,9 +993,156 @@ function buildClientKanbanPage(pdf: PdfDoc, report: ExecutiveReportData) {
   });
 }
 
+function getClientActivitySummary(report: ExecutiveReportData) {
+  return report.activitySummary ?? {
+    completed: report.taskRegister.filter((task) => task.completedInScope).length,
+    movedToDraftReview: report.taskRegister.filter((task) => task.movedToDraftReviewInScope).length,
+    updated: report.taskRegister.filter((task) => task.updatedInScope).length,
+    pendingInputs: report.taskRegister.reduce((sum, task) => sum + (task.pendingDependencyCount ?? 0), 0),
+  };
+}
+
+function scopeRangeText(report: ExecutiveReportData) {
+  return report.scopeStartDate && report.scopeEndDate
+    ? `${formatDate(report.scopeStartDate)} to ${formatDate(report.scopeEndDate)}`
+    : "Full project timeline";
+}
+
+function buildClientDraftReviewPage(pdf: PdfDoc, report: ExecutiveReportData) {
+  const draftReviewTasks = report.draftReviewTasks ?? report.taskRegister.filter((task) => task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review");
+  const batches = draftReviewTasks.length ? chunk(draftReviewTasks, 10) : [[] as DetailedTaskRegisterItem[]];
+  const dependencySummary = (task: DetailedTaskRegisterItem) => {
+    const dependencies = task.pendingDependencies ?? [];
+    if (dependencies.length === 0) return "--";
+    return dependencies
+      .slice(0, 2)
+      .map((dependency) => `${dependency.title || "Untitled pending input"} (${formatShortDate(dependency.dueAt)})`)
+      .join("; ");
+  };
+  batches.forEach((rows, index) => {
+    pdf.addPage((c, pageNo, pageCount) => {
+      clientSectionHeader(c, index === 0 ? "Draft Review / Expected First Half" : "Draft Review / Expected First Half Continued");
+      c.text(`${report.scopeLabel ?? "Full Project Report"} | ${scopeRangeText(report)}`, M, 70, 10, COLORS.muted, true);
+      if (rows.length === 0) {
+        c.text("No Draft Review tasks in this report scope.", M, 112, 12, COLORS.muted);
+      } else {
+        miniTableDynamicRows(
+          c,
+          M,
+          92,
+          [265, 130, 155, 195],
+          ["Task", "Expected First Half", "Review Due Status", "Pending Inputs"],
+          rows.map((task) => [
+            task.title,
+            task.expectedFirstHalfDate ?? task.draftReviewDueDate ?? "--",
+            formatDraftReviewDueStatus(task.draftReviewDueValue),
+            dependencySummary(task),
+          ]),
+          34,
+        );
+      }
+      footer(c, report.generatedAt, pageNo, pageCount);
+    });
+  });
+}
+
+function buildClientPendingInputsPages(pdf: PdfDoc, report: ExecutiveReportData) {
+  const pendingTasks = report.pendingInputTasks ?? report.taskRegister.filter((task) => (task.pendingDependencyCount ?? 0) > 0);
+  const pendingRows = pendingTasks.flatMap((task) => {
+    const dependencies = task.pendingDependencies ?? [];
+    return dependencies.map((dependency) => ({
+      task,
+      dependency,
+    }));
+  });
+  const batches = pendingRows.length ? chunk(pendingRows, 8) : [[] as { task: DetailedTaskRegisterItem; dependency: PendingDependencyReportItem }[]];
+  batches.forEach((rows, index) => {
+    pdf.addPage((c, pageNo, pageCount) => {
+      clientSectionHeader(c, index === 0 ? "Key Dependencies / Pending Inputs" : "Key Dependencies / Pending Inputs Continued");
+      c.text("Pending inputs shown here are client-safe task dependencies only.", M, 70, 10, COLORS.muted, true);
+      if (rows.length === 0) {
+        c.text("No pending inputs in this report scope.", M, 112, 12, COLORS.muted);
+      } else {
+        const widths = [210, 95, 95, 250, 95];
+        const headers = ["Task", "Status", "Task Due Date", "Pending Input", "Input Due Date"];
+        const total = widths.reduce((sum, width) => sum + width, 0);
+        let top = 92;
+        c.rect(M, top, total, 28, "#24124d");
+        let cursor = M;
+        headers.forEach((header, headerIndex) => {
+          c.text(header.toUpperCase(), cursor + 5, top + 8, 8.5, "#ffffff", true);
+          cursor += widths[headerIndex];
+        });
+        top += 28;
+
+        rows.forEach(({ task, dependency }, rowIndex) => {
+          const detailLines = dependency.details ? safeWrapText(dependency.details, 38, 2) : [];
+          const titleLines = safeWrapText(dependency.title, 36, 2);
+          const taskLines = safeWrapText(task.title, 30, 2);
+          const rowH = Math.max(42, (titleLines.length + detailLines.length) * 10 + 18, taskLines.length * 10 + 18);
+          if (top + rowH > 540) return;
+          c.rect(M, top, total, rowH, rowIndex % 2 === 0 ? "#ffffff" : "#f8fafc", COLORS.border);
+          cursor = M;
+          c.textLines(taskLines, cursor + 5, top + 8, 8.5, COLORS.ink, true, 10);
+          cursor += widths[0];
+          c.textLines(wrapCell(task.status, 14, 2), cursor + 5, top + 8, 8.5, COLORS.ink, false, 10);
+          cursor += widths[1];
+          c.textLines(wrapCell(task.dueDate, 14, 2), cursor + 5, top + 8, 8.5, COLORS.ink, false, 10);
+          cursor += widths[2];
+          c.textLines(titleLines, cursor + 5, top + 8, 8.5, COLORS.ink, true, 10);
+          if (detailLines.length > 0) {
+            c.textLines(detailLines, cursor + 5, top + 8 + titleLines.length * 10, 7.5, COLORS.muted, false, 9);
+          }
+          cursor += widths[3];
+          c.textLines(wrapCell(formatShortDate(dependency.dueAt), 14, 2), cursor + 5, top + 8, 8.5, COLORS.ink, false, 10);
+          top += rowH;
+        });
+      }
+      footer(c, report.generatedAt, pageNo, pageCount);
+    });
+  });
+}
+
+function buildScopedClientTaskRegister(pdf: PdfDoc, report: ExecutiveReportData) {
+  const register = report.taskRegister ?? [];
+  for (let offset = 0; offset < register.length || offset === 0; offset += 8) {
+    const rows = register.slice(offset, offset + 8);
+    pdf.addPage((c, pageNo, pageCount) => {
+      clientSectionHeader(c, offset === 0 ? "Client Task Register" : "Client Task Register Continued");
+      const widths = [310, 96, 66, 88, 88, 88];
+      const headers = ["Task Name", "Status", "Progress %", "Start Date", "Due Date", "Time Left"];
+      const x = M;
+      const y = 82;
+      miniTable(c, x, y, widths, headers, [], 24);
+      if (rows.length === 0) c.text("No tasks in this report scope.", x + 8, y + 48, 12, COLORS.muted);
+      let rowTop = y + 42;
+      rows.forEach((task, index) => {
+        const titleMeta = [
+          (task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review") && task.expectedFirstHalfDate && task.expectedFirstHalfDate !== "--" ? `Expected First Half: ${task.expectedFirstHalfDate}` : null,
+          (task.pendingDependencyCount ?? 0) > 0 ? `Pending Inputs: ${task.pendingDependencySummary ?? `${task.pendingDependencyCount} pending`}` : null,
+        ].filter((item): item is string => Boolean(item));
+        const titleLines = safeWrapText(task.title, 42, 2);
+        const metaLines = titleMeta.flatMap((item) => safeWrapText(item, 44, 2));
+        const rowH = Math.max(42, (titleLines.length + metaLines.length) * 10 + 18);
+        c.rect(x, rowTop, widths.reduce((sum, width) => sum + width, 0), rowH, index % 2 === 0 ? "#ffffff" : "#f8fafc", COLORS.border);
+        c.textLines(titleLines, x + 5, rowTop + 8, 8.5, COLORS.ink, true, 10);
+        if (metaLines.length > 0) c.textLines(metaLines, x + 5, rowTop + 8 + titleLines.length * 10, 7.2, COLORS.muted, false, 9);
+        const cells = [task.status, `${task.progress}%`, task.startDate, task.dueDate, task.timeLeft];
+        let cursor = x + widths[0];
+        cells.forEach((cell, cellIndex) => {
+          c.textLines(wrap(cell, Math.floor(widths[cellIndex + 1] / 6), 2), cursor + 5, rowTop + 10, 8, cellIndex === 0 ? clientStatusColor(task.statusKey, task.status) : COLORS.ink, cellIndex === 0, 10);
+          cursor += widths[cellIndex + 1];
+        });
+        rowTop += rowH + 2;
+      });
+      footer(c, report.generatedAt, pageNo, pageCount);
+    });
+  }
+}
+
 function clientGanttLegend(c: Canvas) {
   const items = [
-    ["Todo / Not Started", CLIENT_STATUS_COLORS.todo], ["In Progress", CLIENT_STATUS_COLORS.inProgress], ["In Review", CLIENT_STATUS_COLORS.inReview],
+    ["Todo / Not Started", CLIENT_STATUS_COLORS.todo], ["In Progress", CLIENT_STATUS_COLORS.inProgress], ["Draft Review", CLIENT_STATUS_COLORS.draftReview], ["In Review", CLIENT_STATUS_COLORS.inReview],
     ["Completed", CLIENT_STATUS_COLORS.completed], ["Overdue", CLIENT_STATUS_COLORS.overdue], ["Near Due", CLIENT_STATUS_COLORS.nearDue],
   ] as const;
   let x = M;
@@ -908,6 +1158,7 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   const summary = report.statusSummary ?? {
     todo: Math.max(0, report.kpis.total - report.kpis.completed - report.kpis.inProgress - report.kpis.overdue),
     inProgress: report.kpis.inProgress,
+    draftReview: 0,
     inReview: 0,
     completed: report.kpis.completed,
     overdue: report.kpis.overdue,
@@ -915,6 +1166,7 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   const progress = [
     { label: "Completed", value: summary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "In Progress", value: summary.inProgress, color: CLIENT_STATUS_COLORS.inProgress },
+    { label: "Draft Review", value: summary.draftReview, color: CLIENT_STATUS_COLORS.draftReview },
     { label: "In Review", value: summary.inReview, color: CLIENT_STATUS_COLORS.inReview },
     { label: "Todo", value: summary.todo, color: CLIENT_STATUS_COLORS.todo },
     { label: "Overdue", value: summary.overdue, color: CLIENT_STATUS_COLORS.overdue },
@@ -923,11 +1175,13 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   const statusRows = [
     { label: "Todo / Not Started", value: summary.todo, color: CLIENT_STATUS_COLORS.todo },
     { label: "In Progress", value: summary.inProgress, color: CLIENT_STATUS_COLORS.inProgress },
+    { label: "Draft Review", value: summary.draftReview, color: CLIENT_STATUS_COLORS.draftReview },
     { label: "In Review", value: summary.inReview, color: CLIENT_STATUS_COLORS.inReview },
     { label: "Completed", value: summary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "Overdue", value: summary.overdue, color: CLIENT_STATUS_COLORS.overdue },
   ];
   const statusTotal = statusRows.reduce((sum, item) => sum + item.value, 0);
+  const activitySummary = getClientActivitySummary(report);
 
   pdf.addPage((c, pageNo, pageCount) => {
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
@@ -937,11 +1191,13 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
     c.text(report.projectName, M, 148, 18, "#c7d2fe", true);
     c.text(`Owner: ${BRAND_NAME}`, M, 194, 12, "#dbeafe");
     c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 214, 12, "#dbeafe");
+    c.text(`Report Scope: ${report.scopeLabel ?? "Full Project Report"}`, M, 234, 12, "#dbeafe");
+    c.text(`Scope Dates: ${scopeRangeText(report)}`, M, 254, 12, "#dbeafe");
     const cards = [
-      ["Total Tasks", report.kpis.total, CLIENT_STATUS_COLORS.todo],
-      ["Completed", report.kpis.completed, CLIENT_STATUS_COLORS.completed],
-      ["In Progress", summary.inProgress, CLIENT_STATUS_COLORS.inProgress],
-      ["Overdue", report.kpis.overdue, report.kpis.overdue ? CLIENT_STATUS_COLORS.overdue : CLIENT_STATUS_COLORS.completed],
+      ["Total Tasks in Scope", report.kpis.total, CLIENT_STATUS_COLORS.todo],
+      ["Completed in Scope", report.kpis.completed, CLIENT_STATUS_COLORS.completed],
+      ["Draft Review", summary.draftReview, CLIENT_STATUS_COLORS.draftReview],
+      ["Pending Inputs", activitySummary.pendingInputs, activitySummary.pendingInputs ? COLORS.orange : CLIENT_STATUS_COLORS.completed],
     ] as const;
     cards.forEach((card, index) => kpi(c, M + index * 195, 282, 178, card[0], card[1], card[2]));
     c.text("Overall Progress", M, 394, 14, "#ffffff", true);
@@ -962,7 +1218,7 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   });
 
   pdf.addPage((c, pageNo, pageCount) => {
-    clientSectionHeader(c, "Client Status Summary");
+    clientSectionHeader(c, "Executive Progress Summary");
     c.text("Task Status Distribution", 82, 88, 13, COLORS.ink, true);
     drawClientStatusDonut(c, 220, 225, 95, 54, statusRows, statusTotal);
     statusRows.forEach((row, index) => {
@@ -973,12 +1229,13 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
       c.text(row.label.toUpperCase(), cardX + 16, cardY + 10, 8, COLORS.muted, true);
       c.text(row.value, cardX + 16, cardY + 27, 18, row.color, true);
     });
-    panel(c, M, 385, PAGE_W - M * 2, 130, "Status Breakdown");
-    clientCompactBars(c, M + 18, 422, PAGE_W - M * 2 - 36, statusRows, Math.max(1, statusTotal));
+    panel(c, M, 350, PAGE_W - M * 2, 175, "Status Breakdown");
+    clientCompactBars(c, M + 18, 388, PAGE_W - M * 2 - 36, statusRows, Math.max(1, statusTotal));
     footer(c, report.generatedAt, pageNo, pageCount);
   });
 
   buildClientKanbanPage(pdf, report);
+  buildClientDraftReviewPage(pdf, report);
 
   const ganttChunks = report.gantt.tasks.length ? chunk(report.gantt.tasks, 8) : [[]];
   ganttChunks.forEach((ganttRows, chunkIndex) => {
@@ -1051,21 +1308,7 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
     });
   });
 
-  const register = report.taskRegister ?? [];
-  for (let offset = 0; offset < register.length || offset === 0; offset += 10) {
-    const rows = register.slice(offset, offset + 10);
-    pdf.addPage((c, pageNo, pageCount) => {
-      clientSectionHeader(c, offset === 0 ? "Client Task Register" : "Client Task Register Continued");
-      miniTable(
-        c, M, 82,
-        [300, 100, 70, 92, 92, 90],
-        ["Task Name", "Status", "Progress %", "Start Date", "Due Date", "Time Left"],
-        rows.map((task) => [task.title, task.status, `${task.progress}%`, task.startDate, task.dueDate, task.timeLeft]),
-        40,
-      );
-      footer(c, report.generatedAt, pageNo, pageCount);
-    });
-  }
+  buildScopedClientTaskRegister(pdf, report);
 
   pdf.addPage((c, pageNo, pageCount) => {
     clientSectionHeader(c, "Project Manager's Recommendation");
@@ -1083,6 +1326,8 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
     });
     footer(c, report.generatedAt, pageNo, pageCount);
   });
+
+  buildClientPendingInputsPages(pdf, report);
 
   return pdf.build();
 }

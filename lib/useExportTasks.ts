@@ -40,7 +40,7 @@ export function useExportTasks({
       const { data: tasksData, error: tasksErr } = await supabase
         .from("tasks")
         .select(
-          "id, title, description, status, priority, assigned_to, created_by, start_date, end_date, created_at, updated_at",
+          "id, title, description, status, priority, assigned_to, created_by, start_date, end_date, draft_review_started_at, draft_review_due_at, created_at, updated_at",
         )
         .eq("project_id", projectId)
         .order("created_at", { ascending: false });

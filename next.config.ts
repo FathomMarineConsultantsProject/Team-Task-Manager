@@ -5,6 +5,10 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
+}
+// next.config.js
+module.exports = {
+  allowedDevOrigins: ['192.168.0.5'],
 };
 
 export default nextConfig;

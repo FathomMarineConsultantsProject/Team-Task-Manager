@@ -1,4 +1,4 @@
-export type ColumnId = "todo" | "inProgress" | "review" | "done";
+export type ColumnId = "todo" | "inProgress" | "draftReview" | "review" | "done";
 
 export type TaskDirection = "up" | "down" | "right";
 
@@ -8,6 +8,8 @@ export type Task = {
   description?: string | null;
   start_date?: string | null;
   end_date?: string | null;
+  draft_review_started_at?: string | null;
+  draft_review_due_at?: string | null;
   direction?: TaskDirection;
   initials?: string;
   statusLabel?: string;

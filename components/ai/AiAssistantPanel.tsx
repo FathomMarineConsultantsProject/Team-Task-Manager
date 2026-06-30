@@ -5,6 +5,7 @@ import { Bot, Send, X, Sparkles, Check, Loader2, AlertCircle } from "lucide-reac
 import Avatar from "@/components/ui/Avatar";
 import Button from "@/components/ui/button";
 import { useAppData } from "@/components/providers/AppDataProvider";
+import { addWorkingDays } from "@/lib/workingDays";
 
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
 
@@ -402,17 +403,26 @@ export default function AiAssistantPanel({
         }
 
         const description = typeof d.description === "string" ? d.description.trim() : null;
+        const status = String(d.status ?? "todo");
+        const now = new Date();
+        const draftReviewFields = status === "draft_review"
+          ? {
+            draft_review_started_at: now.toISOString(),
+            draft_review_due_at: addWorkingDays(now, 5).toISOString(),
+          }
+          : {};
         const { data: createdTask, error } = await supabase
           .from("tasks")
           .insert({
             title: d.title,
             description: description || null,
-            status: d.status ?? "todo",
+            status,
             project_id: pid,
             assigned_to: assigneeId ?? null,
             start_date: d.start_date ?? null,
             end_date: d.end_date ?? null,
             created_by: profile.id,
+            ...draftReviewFields,
           })
           .select("id")
           .single();
@@ -422,7 +432,7 @@ export default function AiAssistantPanel({
           throw error;
         }
 
-        const statusLabel = String(d.status ?? "todo").replace(/_/g, " ").toUpperCase();
+        const statusLabel = status.replace(/_/g, " ").toUpperCase();
         setMessages(prev => [
           ...prev,
           {

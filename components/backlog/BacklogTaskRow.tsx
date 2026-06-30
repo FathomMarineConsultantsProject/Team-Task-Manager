@@ -17,6 +17,7 @@ type TaskWithUser = {
 const statusStyles: Record<string, { badge: string; dot: string }> = {
   todo: { badge: "bg-gray-100 text-gray-600", dot: "bg-gray-500" },
   in_progress: { badge: "bg-blue-100 text-blue-600", dot: "bg-blue-500" },
+  draft_review: { badge: "bg-cyan-100 text-cyan-700", dot: "bg-cyan-500" },
   in_review: { badge: "bg-orange-100 text-orange-600", dot: "bg-orange-500" },
   done: { badge: "bg-green-100 text-green-600", dot: "bg-green-500" },
 };

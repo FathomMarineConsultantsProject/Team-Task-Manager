@@ -15,6 +15,7 @@ import { normalizeStatus } from "./statusConfig";
 export type ReportStatusKey =
   | "not_started"
   | "in_progress"
+  | "draft_review"
   | "near_due"
   | "done_early"
   | "completed"
@@ -45,6 +46,14 @@ export const REPORT_STATUS: Record<ReportStatusKey, ReportStatusConfig> = {
     bg: "bg-blue-50",
     text: "text-blue-700",
     border: "border-blue-300",
+  },
+  draft_review: {
+    key: "draft_review",
+    label: "Draft Review",
+    color: "#06b6d4",
+    bg: "bg-cyan-50",
+    text: "text-cyan-700",
+    border: "border-cyan-300",
   },
   near_due: {
     key: "near_due",
@@ -83,6 +92,7 @@ export const REPORT_STATUS: Record<ReportStatusKey, ReportStatusConfig> = {
 export const REPORT_STATUS_KEYS: ReportStatusKey[] = [
   "not_started",
   "in_progress",
+  "draft_review",
   "near_due",
   "done_early",
   "completed",
@@ -137,6 +147,10 @@ export function deriveReportStatus(task: ReportTask): ReportStatusKey {
   }
 
   // In progress (includes in_review)
+  if (baseStatus === "draft_review") {
+    return "draft_review";
+  }
+
   if (baseStatus === "in_progress" || baseStatus === "in_review") {
     return "in_progress";
   }
@@ -200,6 +214,7 @@ export type ReportKPIs = {
   total: number;
   notStarted: number;
   inProgress: number;
+  draftReview: number;
   nearDue: number;
   doneEarly: number;
   completed: number;
@@ -211,6 +226,7 @@ export function computeReportKPIs(tasks: ReportTask[]): ReportKPIs {
   const counts: Record<ReportStatusKey, number> = {
     not_started: 0,
     in_progress: 0,
+    draft_review: 0,
     near_due: 0,
     done_early: 0,
     completed: 0,
@@ -228,6 +244,7 @@ export function computeReportKPIs(tasks: ReportTask[]): ReportKPIs {
     total,
     notStarted: counts.not_started,
     inProgress: counts.in_progress,
+    draftReview: counts.draft_review,
     nearDue: counts.near_due,
     doneEarly: counts.done_early,
     completed: counts.completed,
@@ -247,6 +264,7 @@ export function computeReportStatusDistribution(tasks: ReportTask[]): ReportStat
   const counts: Record<ReportStatusKey, number> = {
     not_started: 0,
     in_progress: 0,
+    draft_review: 0,
     near_due: 0,
     done_early: 0,
     completed: 0,

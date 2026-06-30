@@ -24,6 +24,7 @@ export const MOCK_USERS: AppUser[] = [
 export const createEmptyColumns = (): Record<ColumnId, Task[]> => ({
   todo: [],
   inProgress: [],
+  draftReview: [],
   review: [],
   done: [],
 });
@@ -61,6 +62,7 @@ const productLaunchTasks: Record<ColumnId, Task[]> = {
       accent: "bg-blue-500",
     },
   ],
+  draftReview: [],
   review: [
     {
       id: "PROJ-105",

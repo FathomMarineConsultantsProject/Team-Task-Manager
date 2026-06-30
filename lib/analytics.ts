@@ -45,6 +45,7 @@ export type ProjectKPIs = {
   total: number;
   completed: number;
   inProgress: number;
+  draftReview: number;
   inReview: number;
   todo: number;
   overdue: number;
@@ -109,6 +110,7 @@ export function computeKPIs(tasks: AnalyticsTask[]): ProjectKPIs {
   const total = tasks.length;
   let completed = 0;
   let inProgress = 0;
+  let draftReview = 0;
   let inReview = 0;
   let todo = 0;
   let overdue = 0;
@@ -120,6 +122,7 @@ export function computeKPIs(tasks: AnalyticsTask[]): ProjectKPIs {
     const s = normalizeStatus(t.status);
     if (s === "done") completed++;
     else if (s === "in_progress") inProgress++;
+    else if (s === "draft_review") draftReview++;
     else if (s === "in_review") inReview++;
     else todo++;
 
@@ -133,6 +136,7 @@ export function computeKPIs(tasks: AnalyticsTask[]): ProjectKPIs {
     total,
     completed,
     inProgress,
+    draftReview,
     inReview,
     todo,
     overdue,
@@ -144,7 +148,7 @@ export function computeKPIs(tasks: AnalyticsTask[]): ProjectKPIs {
 }
 
 export function computeStatusDistribution(tasks: AnalyticsTask[]): StatusDistribution[] {
-  const counts: Record<StatusKey, number> = { todo: 0, in_progress: 0, in_review: 0, done: 0 };
+  const counts: Record<StatusKey, number> = { todo: 0, in_progress: 0, draft_review: 0, in_review: 0, done: 0 };
   for (const t of tasks) {
     counts[normalizeStatus(t.status)]++;
   }

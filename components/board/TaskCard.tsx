@@ -3,6 +3,7 @@ import type { DragEvent } from "react";
 import { Clock, MessageSquare, MoreHorizontal } from "lucide-react";
 import type { ColumnId, Task } from "./types";
 import Avatar from "@/components/ui/Avatar";
+import { workingDaysUntil } from "@/lib/workingDays";
 
 interface TaskCardProps extends Task {
   columnId: ColumnId;
@@ -21,6 +22,7 @@ interface TaskCardProps extends Task {
 const STATUS_TONES: Record<string, { border: string; glow: string; pill: string }> = {
   not_started: { border: "#a78bfa", glow: "rgba(167, 139, 250, 0.25)", pill: "bg-purple-50 text-purple-700" },
   in_progress: { border: "#3b82f6", glow: "rgba(59, 130, 246, 0.25)", pill: "bg-blue-50 text-blue-700" },
+  draft_review: { border: "#06b6d4", glow: "rgba(6, 182, 212, 0.25)", pill: "bg-cyan-50 text-cyan-700" },
   near_due: { border: "#f59e0b", glow: "rgba(245, 158, 11, 0.25)", pill: "bg-amber-50 text-amber-700" },
   completed: { border: "#22c55e", glow: "rgba(34, 197, 94, 0.25)", pill: "bg-emerald-50 text-emerald-700" },
   done_early: { border: "#06b6d4", glow: "rgba(6, 182, 212, 0.25)", pill: "bg-cyan-50 text-cyan-700" },
@@ -32,6 +34,7 @@ const resolveTone = (columnId: ColumnId, dueState: "overdue" | "near" | "on_trac
   if (dueState === "near") return STATUS_TONES.near_due;
   if (columnId === "done") return STATUS_TONES.completed;
   if (columnId === "todo") return STATUS_TONES.not_started;
+  if (columnId === "draftReview") return STATUS_TONES.draft_review;
   if (columnId === "inProgress") return STATUS_TONES.in_progress;
   return STATUS_TONES.in_progress;
 };
@@ -53,7 +56,10 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
   const canDrag = task.canDrag ?? false;
   const now = Date.now();
   const isFutureTask = task.start_date && new Date(task.start_date) > new Date();
-  const dueAt = task.end_date ? new Date(task.end_date).getTime() : null;
+  const reviewDueAt = columnId === "draftReview" && task.draft_review_due_at
+    ? new Date(task.draft_review_due_at).getTime()
+    : null;
+  const dueAt = reviewDueAt ?? (task.end_date ? new Date(task.end_date).getTime() : null);
   const isOverdue = dueAt !== null && dueAt < now && columnId !== "done";
   const isNearDue = dueAt !== null && !isOverdue && (dueAt - now) <= 3 * 24 * 60 * 60 * 1000 && columnId !== "done";
   const dueState: "overdue" | "near" | "on_track" | null = isOverdue ? "overdue" : isNearDue ? "near" : dueAt ? "on_track" : null;
@@ -61,6 +67,17 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
   const dueDateLabel = task.end_date
     ? new Date(task.end_date).toLocaleDateString(undefined, { month: "short", day: "2-digit" })
     : null;
+  const reviewDueDateLabel = task.draft_review_due_at
+    ? new Date(task.draft_review_due_at).toLocaleDateString(undefined, { month: "short", day: "2-digit" })
+    : null;
+  const reviewWorkingDays = task.draft_review_due_at
+    ? workingDaysUntil(new Date(task.draft_review_due_at))
+    : null;
+  const reviewDueText = reviewWorkingDays === null
+    ? null
+    : reviewWorkingDays < 0
+      ? `Review overdue by ${Math.abs(reviewWorkingDays)} working ${Math.abs(reviewWorkingDays) === 1 ? "day" : "days"}`
+      : `Review due in ${reviewWorkingDays} working ${reviewWorkingDays === 1 ? "day" : "days"}`;
   const tone = resolveTone(columnId, dueState);
 
   const baseClasses = "select-none rounded-2xl border bg-white/90 p-4 shadow-[0_10px_25px_-20px_rgba(15,23,42,0.4)] transition-all duration-200";
@@ -211,7 +228,7 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
           {dueAt ? (
             <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone.pill}`}>
               <Clock size={11} />
-              {isOverdue ? `overdue by ${dueDelta}` : `due in ${dueDelta}`}
+              {reviewDueText ?? (isOverdue ? `overdue by ${dueDelta}` : `due in ${dueDelta}`)}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
@@ -222,6 +239,11 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
           {task.start_date ? (
             <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
               Starts {task.start_date}
+            </span>
+          ) : null}
+          {columnId === "draftReview" && reviewDueDateLabel ? (
+            <span className="inline-flex items-center rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700">
+              Review due {reviewDueDateLabel}
             </span>
           ) : null}
         </div>

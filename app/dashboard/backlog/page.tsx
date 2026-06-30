@@ -76,6 +76,8 @@ function getStatusColor(status: string | null | undefined) {
       return "bg-red-400";
     case "in_progress":
       return "bg-yellow-400";
+    case "draft_review":
+      return "bg-cyan-400";
     case "in_review":
       return "bg-blue-400";
     case "done":
