@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { exportProjectToExcel } from "@/lib/exportTasksToExcel";
-import type { ExportPendingInput, ExportTask, ExportTaskComment } from "@/lib/exportTasksToExcel";
+import type { ExportPendingInput, ExportTask, ExportTaskComment, ExportTaskLink } from "@/lib/exportTasksToExcel";
 
 type SupabaseClient = {
   from: (table: string) => any;
@@ -37,13 +37,29 @@ type TaskDependencyRow = {
   resolved_at: string | null;
 };
 
+type TaskLinkRow = {
+  task_id: string;
+  url: string | null;
+  label: string | null;
+  sort_order: number | null;
+  created_at: string | null;
+};
+
 type ProjectReviewerRow = {
-  reviewer: {
-    id: string | null;
-    name: string | null;
-    email: string | null;
-    job_role: string | null;
-  } | null;
+  reviewer:
+    | {
+        id: string | null;
+        name: string | null;
+        email: string | null;
+        job_role: string | null;
+      }
+    | {
+        id: string | null;
+        name: string | null;
+        email: string | null;
+        job_role: string | null;
+      }[]
+    | null;
 };
 
 type ExportTasksOptions = {
@@ -215,6 +231,7 @@ export function useExportTasks({
       const commentCounts: Record<string, number> = {};
       const commentsByTaskId: Record<string, TaskUpdateRow[]> = {};
       const dependenciesByTaskId: Record<string, TaskDependencyRow[]> = {};
+      const linksByTaskId: Record<string, TaskLinkRow[]> = {};
 
       if (taskIds.length > 0) {
         try {
@@ -252,6 +269,27 @@ export function useExportTasks({
           }
         } catch (error) {
           console.warn("[Export] Failed to fetch pending inputs:", error);
+        }
+
+        try {
+          const { data: linksData, error: linksError } = await supabase
+            .from("task_links")
+            .select("task_id, url, label, sort_order, created_at")
+            .in("task_id", taskIds)
+            .eq("project_id", projectId)
+            .order("sort_order", { ascending: true })
+            .order("created_at", { ascending: true });
+
+          if (linksError) {
+            console.warn("[Export] Failed to fetch task links:", linksError);
+          } else if (linksData) {
+            (linksData as TaskLinkRow[]).forEach((row) => {
+              if (!linksByTaskId[row.task_id]) linksByTaskId[row.task_id] = [];
+              linksByTaskId[row.task_id].push(row);
+            });
+          }
+        } catch (error) {
+          console.warn("[Export] Failed to fetch task links:", error);
         }
       }
 
@@ -328,6 +366,13 @@ export function useExportTasks({
           createdAt: dependency.created_at,
           resolvedAt: dependency.resolved_at,
         }));
+        const taskLinkRows = linksByTaskId[t.id] ?? [];
+        const linkItems: ExportTaskLink[] = taskLinkRows
+          .filter((link) => Boolean(link.url?.trim()))
+          .map((link) => ({
+            url: link.url?.trim() ?? "",
+            label: link.label,
+          }));
 
         return {
           id: t.id,
@@ -348,6 +393,7 @@ export function useExportTasks({
           commentBlocks,
           pendingInputs: formatPendingInputs(dependenciesByTaskId[t.id] ?? []),
           pendingInputItems,
+          linkItems,
           nextAction: "",
           targetRevisionDate: "",
           targetApprovalDate: "",
@@ -380,7 +426,10 @@ export function useExportTasks({
           console.warn("[Export] Failed to fetch project reviewers:", reviewerError);
         } else if (reviewerData) {
           projectReviewerNames = (reviewerData as ProjectReviewerRow[])
-            .map((row) => row.reviewer?.name || row.reviewer?.email || "")
+            .map((row) => {
+              const reviewer = Array.isArray(row.reviewer) ? row.reviewer[0] ?? null : row.reviewer;
+              return reviewer?.name || reviewer?.email || "";
+            })
             .filter(Boolean);
         }
       } catch (error) {

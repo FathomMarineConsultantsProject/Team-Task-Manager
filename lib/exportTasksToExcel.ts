@@ -25,6 +25,7 @@ export type ExportTask = {
   commentBlocks?: ExportTaskComment[];
   pendingInputs?: string;
   pendingInputItems?: ExportPendingInput[];
+  linkItems?: ExportTaskLink[];
   nextAction?: string;
   targetRevisionDate?: string;
   targetApprovalDate?: string;
@@ -44,6 +45,11 @@ export type ExportPendingInput = {
   dueAt: string | null;
   createdAt: string | null;
   resolvedAt: string | null;
+};
+
+export type ExportTaskLink = {
+  url: string;
+  label?: string | null;
 };
 
 export type ExportProjectData = {
@@ -95,6 +101,9 @@ const STATUS_FILLS: Record<string, Partial<ExcelJS.Fill>> = {
 const DAYS_RED: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFEE2E2" } };
 const DAYS_ORANGE: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFED7AA" } };
 const DAYS_GREEN: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD1FAE5" } };
+const EXCEL_CELL_TEXT_LIMIT = 32000;
+const EXCEL_HYPERLINK_LIMIT = 2000;
+const EXCEL_TRUNCATION_NOTICE = "\n\n[Text truncated for Excel compatibility]";
 
 const HEADER_COLUMNS = [
   { header: "S.No", key: "serialNo", width: 8 },
@@ -148,6 +157,59 @@ const WRAP_KEYS = new Set([
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
+
+function sanitizeExcelText(value: unknown, maxLength = EXCEL_CELL_TEXT_LIMIT): string {
+  return String(value ?? "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .slice(0, maxLength);
+}
+
+function truncateExcelText(value: unknown, maxLength = EXCEL_CELL_TEXT_LIMIT): string {
+  const clean = sanitizeExcelText(value, Number.MAX_SAFE_INTEGER);
+  if (clean.length > maxLength) {
+    return `${clean.slice(0, Math.max(0, maxLength - EXCEL_TRUNCATION_NOTICE.length))}${EXCEL_TRUNCATION_NOTICE}`;
+  }
+  return clean;
+}
+
+function sanitizeExcelUrl(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw || !/^https?:\/\//i.test(raw)) return null;
+
+  const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
+  if (!cleaned || cleaned.length > EXCEL_HYPERLINK_LIMIT) return null;
+
+  try {
+    const parsed = new URL(cleaned);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function setSafeCellText(cell: ExcelJS.Cell, value: unknown, maxLength = EXCEL_CELL_TEXT_LIMIT): void {
+  cell.value = sanitizeExcelText(value, maxLength);
+}
+
+function setSafeHyperlinkCell(cell: ExcelJS.Cell, text: unknown, url: unknown): void {
+  const safeText = sanitizeExcelText(text, 500);
+  const safeUrl = sanitizeExcelUrl(url);
+
+  if (safeUrl) {
+    cell.value = {
+      text: safeText || safeUrl,
+      hyperlink: safeUrl,
+      tooltip: safeUrl.slice(0, 255),
+    };
+    cell.font = { ...(cell.font ?? {}), color: { argb: "FF0563C1" }, underline: true };
+    return;
+  }
+
+  cell.value = sanitizeExcelText(url || text);
+}
 
 function normalizeStatus(status: string): string {
   return status.toLowerCase().replace(/\s+/g, "_");
@@ -233,16 +295,31 @@ function extractUrls(text: string): string[] {
 }
 
 function normalizeTextWithUrls(text: string): string {
-  return text
+  return sanitizeExcelText(text)
     .split("\n")
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .filter(Boolean)
     .join("\n");
 }
 
+function getHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function getLinkDisplayText(link: ExportTaskLink): string {
+  const label = normalizeTextWithUrls(link.label ?? "");
+  if (label) return label;
+  const url = normalizeTextWithUrls(link.url ?? "");
+  return getHostname(url) || url;
+}
+
 function formatCommentBlock(comment: ExportTaskComment): string {
   const body = normalizeTextWithUrls(comment.content ?? "");
-  return `[${formatDateTime(comment.createdAt) || "No date"}] ${comment.author || "Unknown"}:\n${body}`;
+  return sanitizeExcelText(`[${formatDateTime(comment.createdAt) || "No date"}] ${comment.author || "Unknown"}:\n${body}`);
 }
 
 function formatPendingInput(item: ExportPendingInput): string {
@@ -250,7 +327,7 @@ function formatPendingInput(item: ExportPendingInput): string {
   const details = normalizeTextWithUrls(item.details ?? "");
   const isResolved = normalizeStatus(item.status ?? "") === "resolved" || Boolean(item.resolvedAt);
   const dueDate = formatDate(item.dueAt);
-  return `${isResolved ? "Resolved" : "Pending"}: ${title}${dueDate ? ` (Due ${dueDate})` : ""}${details ? `\n${details}` : ""}`;
+  return sanitizeExcelText(`${isResolved ? "Resolved" : "Pending"}: ${title}${dueDate ? ` (Due ${dueDate})` : ""}${details ? `\n${details}` : ""}`);
 }
 
 type PreparedTask = {
@@ -271,15 +348,17 @@ function prepareTasks(tasks: ExportTask[]): PreparedTask[] {
     const pendingInputs = task.pendingInputItems?.length
       ? task.pendingInputItems.map(formatPendingInput).join("\n\n")
       : normalizeTextWithUrls(task.pendingInputs ?? "");
-    const commentUrls = extractUrls(commentsText);
-    const pendingInputUrls = extractUrls(pendingInputs);
+    const safeCommentsText = truncateExcelText(commentsText);
+    const safePendingInputs = truncateExcelText(pendingInputs);
+    const commentUrls = extractUrls(safeCommentsText);
+    const pendingInputUrls = extractUrls(safePendingInputs);
 
     return {
       serialNo,
       task,
-      commentsText,
+      commentsText: safeCommentsText,
       commentsHyperlink: commentUrls.length === 1 ? commentUrls[0] : null,
-      pendingInputs,
+      pendingInputs: safePendingInputs,
       pendingInputsHyperlink: pendingInputUrls.length === 1 ? pendingInputUrls[0] : null,
     };
   });
@@ -296,11 +375,11 @@ function styleHeaderRow(row: ExcelJS.Row): void {
 }
 
 function safeWorksheetName(name: string): string {
-  return name
+  return sanitizeExcelText(name, 31)
     .replace(/[*?:\\/\[\]]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 31);
+    .slice(0, 31) || "Sheet";
 }
 
 // -------------------------------------------------------------------
@@ -320,6 +399,21 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   wb.creator = "Team Task Manager";
   wb.created = new Date();
   const preparedTasks = prepareTasks(data.tasks);
+  const maxLinkCount = Math.max(0, ...data.tasks.map((task) => task.linkItems?.length ?? 0));
+  const linkColumns = Array.from({ length: maxLinkCount }, (_, index) => ({
+    header: `Link ${index + 1}`,
+    key: `link${index + 1}`,
+    width: 28,
+  }));
+  const pendingInputsColumnIndex = HEADER_COLUMNS.findIndex((column) => column.key === "pendingInputs");
+  const taskSheetColumns =
+    pendingInputsColumnIndex >= 0
+      ? [
+          ...HEADER_COLUMNS.slice(0, pendingInputsColumnIndex + 1),
+          ...linkColumns,
+          ...HEADER_COLUMNS.slice(pendingInputsColumnIndex + 1),
+        ]
+      : [...HEADER_COLUMNS, ...linkColumns];
 
   // ========================================
   // Computed metrics
@@ -352,9 +446,9 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   // ============================================================
   ss.mergeCells("A1:N2");
   const titleCell = ss.getCell("A1");
-  titleCell.value = data.exportScope
+  setSafeCellText(titleCell, data.exportScope
     ? `${data.projectName}\n${data.exportScope} Task Export`
-    : `${data.projectName}\nExecutive Project Summary`;
+    : `${data.projectName}\nExecutive Project Summary`);
   titleCell.font = { size: 20, bold: true, ...WHITE_FONT };
   titleCell.fill = DARK_BLUE;
   titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
@@ -368,7 +462,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   ss.mergeCells("A3:N3");
   const dateCell = ss.getCell("A3");
   const generatedLabel = `Generated ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}`;
-  dateCell.value = data.exportScope ? `${generatedLabel} | Export Scope: ${data.exportScope}` : generatedLabel;
+  setSafeCellText(dateCell, data.exportScope ? `${generatedLabel} | Export Scope: ${data.exportScope}` : generatedLabel);
   dateCell.font = { size: 10, italic: true, color: { argb: "FF64748B" } };
   dateCell.alignment = { vertical: "middle", horizontal: "right" };
   ss.getRow(3).height = 20;
@@ -376,7 +470,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   if (data.projectReviewers?.length) {
     ss.mergeCells("A4:N4");
     const reviewerCell = ss.getCell("A4");
-    reviewerCell.value = `Project Reviewer: ${data.projectReviewers.join(", ")}`;
+    setSafeCellText(reviewerCell, `Project Reviewer: ${data.projectReviewers.join(", ")}`);
     reviewerCell.font = { size: 11, bold: true, color: { argb: "FF334155" } };
     reviewerCell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
     reviewerCell.border = ALL_BORDERS;
@@ -424,7 +518,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     // Label row (top of card)
     ss.mergeCells(baseRow, lStart, baseRow, vEnd);
     const labelCell = ss.getRow(baseRow).getCell(lStart);
-    labelCell.value = card.label;
+    setSafeCellText(labelCell, card.label);
     labelCell.font = { bold: true, size: 10, color: { argb: "FF475569" } };
     labelCell.alignment = { vertical: "middle", horizontal: "center" };
     labelCell.border = ALL_BORDERS;
@@ -433,7 +527,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     // Value row (bottom of card)
     ss.mergeCells(baseRow + 1, lStart, baseRow + 1, vEnd);
     const valCell = ss.getRow(baseRow + 1).getCell(lStart);
-    valCell.value = card.value;
+    setSafeCellText(valCell, card.value);
     valCell.font = { bold: true, size: 18, color: { argb: "FF0F172A" } };
     valCell.alignment = { vertical: "middle", horizontal: "center" };
     valCell.border = ALL_BORDERS;
@@ -451,7 +545,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   // Section header
   ss.mergeCells(statusStart, 1, statusStart, 4);
   const sbTitleCell = ss.getRow(statusStart).getCell(1);
-  sbTitleCell.value = "STATUS BREAKDOWN";
+  setSafeCellText(sbTitleCell, "STATUS BREAKDOWN");
   sbTitleCell.font = { size: 12, bold: true, ...WHITE_FONT };
   sbTitleCell.fill = DARK_BLUE;
   sbTitleCell.alignment = { vertical: "middle", horizontal: "center" };
@@ -462,9 +556,9 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   const sbHdrRow = statusStart + 1;
   const sbHdr = ss.getRow(sbHdrRow);
   ss.mergeCells(sbHdrRow, 1, sbHdrRow, 2);
-  sbHdr.getCell(1).value = "Status";
+  setSafeCellText(sbHdr.getCell(1), "Status");
   ss.mergeCells(sbHdrRow, 3, sbHdrRow, 4);
-  sbHdr.getCell(3).value = "Count";
+  setSafeCellText(sbHdr.getCell(3), "Count");
   for (const c of [1, 3]) {
     const cell = sbHdr.getCell(c);
     cell.font = { bold: true, size: 11, ...WHITE_FONT };
@@ -488,13 +582,13 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     const isAlt = idx % 2 === 1;
 
     ss.mergeCells(rowNum, 1, rowNum, 2);
-    row.getCell(1).value = label;
+    setSafeCellText(row.getCell(1), label);
     row.getCell(1).font = { size: 11, color: { argb: "FF334155" } };
     row.getCell(1).alignment = { vertical: "middle" };
     row.getCell(1).border = ALL_BORDERS;
 
     ss.mergeCells(rowNum, 3, rowNum, 4);
-    row.getCell(3).value = count;
+    setSafeCellText(row.getCell(3), count);
     row.getCell(3).font = { bold: true, size: 11 };
     row.getCell(3).alignment = { vertical: "middle", horizontal: "center" };
     row.getCell(3).border = ALL_BORDERS;
@@ -514,7 +608,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   // Section header
   ss.mergeCells(teamStart, 1, teamStart, 4);
   const tmTitleCell = ss.getRow(teamStart).getCell(1);
-  tmTitleCell.value = "TEAM MEMBERS";
+  setSafeCellText(tmTitleCell, "TEAM MEMBERS");
   tmTitleCell.font = { size: 12, bold: true, ...WHITE_FONT };
   tmTitleCell.fill = DARK_BLUE;
   tmTitleCell.alignment = { vertical: "middle", horizontal: "center" };
@@ -525,7 +619,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   const tmHdrRow = teamStart + 1;
   ss.mergeCells(tmHdrRow, 1, tmHdrRow, 4);
   const tmHdrCell = ss.getRow(tmHdrRow).getCell(1);
-  tmHdrCell.value = "Member Name";
+  setSafeCellText(tmHdrCell, "Member Name");
   tmHdrCell.font = { bold: true, size: 11, ...WHITE_FONT };
   tmHdrCell.fill = DARK_BLUE;
   tmHdrCell.alignment = { vertical: "middle", horizontal: "center" };
@@ -540,7 +634,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     const isAlt = idx % 2 === 1;
 
     ss.mergeCells(rowNum, 1, rowNum, 4);
-    row.getCell(1).value = name;
+    setSafeCellText(row.getCell(1), name);
     row.getCell(1).font = { size: 11, color: { argb: "FF334155" } };
     row.getCell(1).alignment = { vertical: "middle" };
     row.getCell(1).border = ALL_BORDERS;
@@ -557,7 +651,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   const ts = wb.addWorksheet(safeWorksheetName("Tasks"));
 
   // Define columns
-  ts.columns = HEADER_COLUMNS;
+  ts.columns = taskSheetColumns;
 
   // Style header row
   styleHeaderRow(ts.getRow(1));
@@ -566,12 +660,12 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   ts.views = [{ state: "frozen", ySplit: 1 }];
   ts.autoFilter = {
     from: { row: 1, column: 1 },
-    to: { row: 1, column: HEADER_COLUMNS.length },
+    to: { row: 1, column: taskSheetColumns.length },
   };
 
   // Track max content length per column for auto-fit
   const maxLengths: Record<string, number> = {};
-  HEADER_COLUMNS.forEach((col) => {
+  taskSheetColumns.forEach((col) => {
     maxLengths[col.key] = col.header.length;
   });
 
@@ -584,11 +678,11 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
 
     const rowValues: Record<string, string | number> = {
       serialNo: prepared.serialNo,
-      title: task.title,
-      description: task.description ?? "",
-      status: formatStatusLabel(task.status),
-      assignees: task.assignees || "Unassigned",
-      createdBy: task.createdBy || "Unknown",
+      title: sanitizeExcelText(task.title),
+      description: truncateExcelText(task.description ?? ""),
+      status: sanitizeExcelText(formatStatusLabel(task.status)),
+      assignees: sanitizeExcelText(task.assignees || "Unassigned"),
+      createdBy: sanitizeExcelText(task.createdBy || "Unknown"),
       startDate: formatDate(task.startDate),
       dueDate: formatDate(task.dueDate),
       draftReviewStartDate: formatDate(task.draftReviewStartDate ?? null),
@@ -599,35 +693,37 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       commentsCount: task.commentsCount,
       commentsText: prepared.commentsText,
       pendingInputs: prepared.pendingInputs,
-      nextAction: task.nextAction ?? "",
-      targetRevisionDate: task.targetRevisionDate ?? "",
-      targetApprovalDate: task.targetApprovalDate ?? "",
+      nextAction: sanitizeExcelText(task.nextAction ?? ""),
+      targetRevisionDate: sanitizeExcelText(task.targetRevisionDate ?? ""),
+      targetApprovalDate: sanitizeExcelText(task.targetApprovalDate ?? ""),
       attachmentCount: task.attachmentCount,
       daysRemaining: daysRemaining !== null ? daysRemaining : "",
     };
+    linkColumns.forEach((column, linkIndex) => {
+      const link = task.linkItems?.[linkIndex];
+      rowValues[column.key] = link ? sanitizeExcelText(getLinkDisplayText(link), 500) : "";
+    });
 
     const row = ts.addRow(rowValues);
     if (prepared.commentsHyperlink) {
       const commentsCell = row.getCell("commentsText");
-      commentsCell.value = {
-        text: prepared.commentsText,
-        hyperlink: prepared.commentsHyperlink,
-        tooltip: prepared.commentsHyperlink,
-      };
-      commentsCell.font = { color: { argb: "FF2563EB" }, underline: true };
+      setSafeHyperlinkCell(commentsCell, prepared.commentsText, prepared.commentsHyperlink);
     }
     if (prepared.pendingInputsHyperlink) {
       const pendingInputsCell = row.getCell("pendingInputs");
-      pendingInputsCell.value = {
-        text: prepared.pendingInputs,
-        hyperlink: prepared.pendingInputsHyperlink,
-        tooltip: prepared.pendingInputsHyperlink,
-      };
-      pendingInputsCell.font = { color: { argb: "FF2563EB" }, underline: true };
+      setSafeHyperlinkCell(pendingInputsCell, prepared.pendingInputs, prepared.pendingInputsHyperlink);
     }
+    linkColumns.forEach((column, linkIndex) => {
+      const link = task.linkItems?.[linkIndex];
+      if (!link) return;
+
+      const linkCell = row.getCell(column.key);
+      setSafeHyperlinkCell(linkCell, getLinkDisplayText(link), link.url);
+      linkCell.alignment = { vertical: "top", horizontal: "left", wrapText: true };
+    });
 
     // Update max lengths for auto-fit
-    for (const col of HEADER_COLUMNS) {
+    for (const col of taskSheetColumns) {
       const val = String(rowValues[col.key] ?? "");
       if (val.length > (maxLengths[col.key] ?? 0)) {
         maxLengths[col.key] = val.length;
@@ -638,24 +734,24 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     row.alignment = { vertical: "middle", horizontal: "left", wrapText: false };
 
     // ---- Enable wrapText for long-content columns ----
-    for (const col of HEADER_COLUMNS) {
-      if (WRAP_KEYS.has(col.key)) {
+    for (const col of taskSheetColumns) {
+      if (WRAP_KEYS.has(col.key) || col.key.startsWith("link")) {
         const cell = row.getCell(col.key);
-        cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+        cell.alignment = { vertical: col.key.startsWith("link") ? "top" : "middle", horizontal: "left", wrapText: true };
       }
     }
 
     // ---- Dynamic row height based on wrapped content ----
     let maxLines = 1;
-    for (const col of HEADER_COLUMNS) {
-      if (WRAP_KEYS.has(col.key)) {
+    for (const col of taskSheetColumns) {
+      if (WRAP_KEYS.has(col.key) || col.key.startsWith("link")) {
         const text = String(rowValues[col.key] ?? "");
         const colWidth = COL_MAX_WIDTH[col.key] ?? col.width;
         const lines = estimateLines(text, colWidth);
         if (lines > maxLines) maxLines = lines;
       }
     }
-    row.height = Math.max(20, maxLines * 15);
+    row.height = Math.min(Math.max(20, maxLines * 15), 150);
 
     // ---- Alternating row shading (behind other fills) ----
     if (idx % 2 === 1) {
@@ -715,7 +811,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       });
       statusCell.fill = STATUS_FILLS.overdue as ExcelJS.Fill;
       statusCell.font = { color: { argb: "FFFFFFFF" }, bold: true };
-      statusCell.value = "Overdue";
+      setSafeCellText(statusCell, "Overdue");
     } else if (isDueSoon) {
       row.eachCell({ includeEmpty: true }, (cell) => {
         if (cell.address === statusCell.address) return;
@@ -731,10 +827,10 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   });
 
   // ---- Auto-fit column widths (respect caps) ----
-  for (const col of HEADER_COLUMNS) {
+  for (const col of taskSheetColumns) {
     const tsCol = ts.getColumn(col.key);
     const maxLen = maxLengths[col.key] ?? col.width;
-    const cap = COL_MAX_WIDTH[col.key] ?? 50;
+    const cap = col.key.startsWith("link") ? col.width : COL_MAX_WIDTH[col.key] ?? 50;
     // Add padding of 4 chars, clamp between header width and cap
     tsCol.width = Math.min(cap, Math.max(col.header.length + 4, maxLen + 4));
   }
@@ -746,9 +842,9 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   });
 
   const today = new Date().toISOString().slice(0, 10);
-  const safeName = data.projectName.replace(/[^a-zA-Z0-9_\- ]/g, "_").replace(/\s+/g, "_");
+  const safeName = sanitizeExcelText(data.projectName).replace(/[^a-zA-Z0-9_\- ]/g, "_").replace(/\s+/g, "_");
   const safeScope = data.exportScope
-    ? data.exportScope.replace(/[^a-zA-Z0-9_\- ]/g, "_").replace(/\s+/g, "_")
+    ? sanitizeExcelText(data.exportScope).replace(/[^a-zA-Z0-9_\- ]/g, "_").replace(/\s+/g, "_")
     : null;
   const filename = safeScope
     ? `${safeName}_${safeScope}_Tasks_${today}.xlsx`

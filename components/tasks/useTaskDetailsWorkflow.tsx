@@ -6,6 +6,7 @@ import Modal from "@/components/ui/modal";
 import ChatPanel from "@/components/ui/ChatPanel";
 import TaskAttachments from "@/components/tasks/TaskAttachments";
 import TaskDependencies from "@/components/tasks/TaskDependencies";
+import TaskLinks from "@/components/tasks/TaskLinks";
 import LinkifiedText from "@/components/ui/LinkifiedText";
 
 export type TaskDetailsSeed = {
@@ -233,7 +234,9 @@ export function useTaskDetailsWorkflow({
   const [isSubmittingUpdate, setIsSubmittingUpdate] = useState(false);
   const [isTitleExpanded, setIsTitleExpanded] = useState(false);
   const [isDependenciesOpen, setIsDependenciesOpen] = useState(false);
+  const [isLinksOpen, setIsLinksOpen] = useState(false);
   const [dependencyPendingCount, setDependencyPendingCount] = useState<number | null>(null);
+  const [linksCount, setLinksCount] = useState<number | null>(null);
   const taskId = selectedTaskDetails?.id ?? null;
   const projectId = selectedTaskDetails?.projectId ?? null;
   const chatMembers = useMemo(() => {
@@ -280,7 +283,9 @@ export function useTaskDetailsWorkflow({
     setSelectedTaskDetails(null);
     setIsTitleExpanded(false);
     setIsDependenciesOpen(false);
+    setIsLinksOpen(false);
     setDependencyPendingCount(null);
+    setLinksCount(null);
   }, []);
 
   const openTaskDetails = useCallback((seed: TaskDetailsSeed) => {
@@ -431,7 +436,6 @@ export function useTaskDetailsWorkflow({
 
         const pendingCount = ((data as { status: string | null }[] | null) ?? []).filter((item) => item.status === "pending").length;
         setDependencyPendingCount(pendingCount);
-        setIsDependenciesOpen(pendingCount > 0);
       } catch {
         if (isMounted) {
           setDependencyPendingCount(null);
@@ -440,6 +444,40 @@ export function useTaskDetailsWorkflow({
     };
 
     void loadDependencyCount();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase, taskId]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    setLinksCount(null);
+    setIsLinksOpen(false);
+
+    if (!taskId) return;
+
+    const loadLinksCount = async () => {
+      try {
+        const { data, error } = await supabase.from("task_links").select("id").eq("task_id", taskId);
+        if (!isMounted) return;
+
+        if (error) {
+          setLinksCount(null);
+          return;
+        }
+
+        const count = ((data as { id: string }[] | null) ?? []).length;
+        setLinksCount(count);
+      } catch {
+        if (isMounted) {
+          setLinksCount(null);
+        }
+      }
+    };
+
+    void loadLinksCount();
 
     return () => {
       isMounted = false;
@@ -760,6 +798,45 @@ export function useTaskDetailsWorkflow({
               canUpload={attachmentPermissions.canUpload}
               canDeleteAll={attachmentPermissions.canDeleteAll}
             />
+
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setIsLinksOpen((value) => !value)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                aria-expanded={isLinksOpen}
+              >
+                <span className="min-w-0">
+                  <span className="block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">
+                    Links / References
+                  </span>
+                  <span className="mt-0.5 block text-xs text-slate-500">
+                    Store task-related documents, references, or external links.
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {linksCount !== null && linksCount > 0 && (
+                    <span className="inline-flex min-w-fit shrink-0 whitespace-nowrap items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold leading-none text-slate-600">
+                      {linksCount} {linksCount === 1 ? "link" : "links"}
+                    </span>
+                  )}
+                  {isLinksOpen ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                </span>
+              </button>
+              {isLinksOpen && (
+                <div className="border-t border-slate-100 px-4 py-3">
+                  <TaskLinks
+                    supabase={supabase}
+                    taskId={selectedTaskDetails.id}
+                    projectId={selectedTaskDetails.projectId}
+                    currentUserId={profileId}
+                    canManageLinks={attachmentPermissions.canUpload}
+                    showHeader={false}
+                    onLinksCountChange={setLinksCount}
+                  />
+                </div>
+              )}
+            </div>
 
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Activity Timeline</p>
