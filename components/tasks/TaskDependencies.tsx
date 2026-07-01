@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import LinkifiedText from "@/components/ui/LinkifiedText";
 
 type SupabaseClient = {
   from: (table: string) => any;
@@ -28,6 +29,7 @@ type TaskDependenciesProps = {
   currentUserId: string | null;
   canManageDependencies: boolean;
   showHeader?: boolean;
+  onPendingCountChange?: (count: number) => void;
 };
 
 const formatDate = (value: string | null | undefined) => {
@@ -63,6 +65,7 @@ export default function TaskDependencies({
   currentUserId,
   canManageDependencies,
   showHeader = true,
+  onPendingCountChange,
 }: TaskDependenciesProps) {
   const [items, setItems] = useState<TaskDependency[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -78,6 +81,7 @@ export default function TaskDependencies({
   const hasTaskId = Boolean(taskId);
   const hasProjectId = Boolean(projectId);
   const canMutateDependencies = canManageDependencies && Boolean(currentUserId) && hasTaskId && hasProjectId;
+  const pendingItemsCount = items.filter((item) => item.status === "pending").length;
 
   const loadDependencies = useCallback(async () => {
     if (!taskId) {
@@ -115,6 +119,10 @@ export default function TaskDependencies({
   useEffect(() => {
     void loadDependencies();
   }, [loadDependencies]);
+
+  useEffect(() => {
+    onPendingCountChange?.(pendingItemsCount);
+  }, [onPendingCountChange, pendingItemsCount]);
 
   const resetAddForm = () => {
     setTitle("");
@@ -250,7 +258,7 @@ export default function TaskDependencies({
   };
 
   return (
-    <section className={showHeader ? "rounded-xl border border-slate-200 bg-white px-3 py-3" : "px-4 py-4"}>
+    <section className={showHeader ? "rounded-xl border border-slate-200 bg-white px-3 py-3" : "min-w-0"}>
       {showHeader && (
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -262,18 +270,10 @@ export default function TaskDependencies({
             </p>
           </div>
           {items.length > 0 && (
-            <span className="inline-flex min-w-fit shrink-0 items-center justify-center whitespace-nowrap rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold leading-none text-amber-700">
-              {items.filter((item) => item.status === "pending").length} pending
+            <span className="inline-flex min-w-fit shrink-0 whitespace-nowrap items-center justify-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold leading-none text-amber-700">
+              {pendingItemsCount} pending
             </span>
           )}
-        </div>
-      )}
-
-      {!showHeader && items.length > 0 && (
-        <div className="mb-3 flex justify-end">
-          <span className="inline-flex min-w-fit shrink-0 items-center justify-center whitespace-nowrap rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold leading-none text-amber-700">
-            {items.filter((item) => item.status === "pending").length} pending
-          </span>
         </div>
       )}
 
@@ -389,11 +389,15 @@ export default function TaskDependencies({
                 ) : (
                   <>
                     <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className={`break-words text-sm font-semibold ${isResolved ? "text-slate-500 line-through" : "text-slate-900"}`}>
-                          {item.title}
+                          <LinkifiedText text={item.title} />
                         </p>
-                        {item.details && <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-600">{item.details}</p>}
+                        {item.details && (
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-600">
+                            <LinkifiedText text={item.details} />
+                          </p>
+                        )}
                         <div className="mt-1 flex flex-wrap items-center gap-2">
                           <p className="text-[11px] text-slate-500">Due: {formatDueDate(item.due_at)}</p>
                           {isOverdue && (

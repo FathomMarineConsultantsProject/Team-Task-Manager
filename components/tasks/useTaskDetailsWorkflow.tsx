@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import Modal from "@/components/ui/modal";
 import ChatPanel from "@/components/ui/ChatPanel";
 import TaskAttachments from "@/components/tasks/TaskAttachments";
 import TaskDependencies from "@/components/tasks/TaskDependencies";
-import ModalPortal from "@/components/ModalPortal";
+import LinkifiedText from "@/components/ui/LinkifiedText";
 
 export type TaskDetailsSeed = {
   id: string;
@@ -231,6 +232,8 @@ export function useTaskDetailsWorkflow({
   const [projectMembers, setProjectMembers] = useState<TaskDetailMember[]>([]);
   const [isSubmittingUpdate, setIsSubmittingUpdate] = useState(false);
   const [isTitleExpanded, setIsTitleExpanded] = useState(false);
+  const [isDependenciesOpen, setIsDependenciesOpen] = useState(false);
+  const [dependencyPendingCount, setDependencyPendingCount] = useState<number | null>(null);
   const taskId = selectedTaskDetails?.id ?? null;
   const projectId = selectedTaskDetails?.projectId ?? null;
   const chatMembers = useMemo(() => {
@@ -276,6 +279,8 @@ export function useTaskDetailsWorkflow({
   const closeTaskDetails = useCallback(() => {
     setSelectedTaskDetails(null);
     setIsTitleExpanded(false);
+    setIsDependenciesOpen(false);
+    setDependencyPendingCount(null);
   }, []);
 
   const openTaskDetails = useCallback((seed: TaskDetailsSeed) => {
@@ -405,6 +410,41 @@ export function useTaskDetailsWorkflow({
       void loadTaskLogs();
     }
   }, [taskId, loadTaskLogs]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    setDependencyPendingCount(null);
+    setIsDependenciesOpen(false);
+
+    if (!taskId) return;
+
+    const loadDependencyCount = async () => {
+      try {
+        const { data, error } = await supabase.from("task_dependencies").select("status").eq("task_id", taskId);
+        if (!isMounted) return;
+
+        if (error) {
+          setDependencyPendingCount(null);
+          return;
+        }
+
+        const pendingCount = ((data as { status: string | null }[] | null) ?? []).filter((item) => item.status === "pending").length;
+        setDependencyPendingCount(pendingCount);
+        setIsDependenciesOpen(pendingCount > 0);
+      } catch {
+        if (isMounted) {
+          setDependencyPendingCount(null);
+        }
+      }
+    };
+
+    void loadDependencyCount();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase, taskId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -627,7 +667,7 @@ export function useTaskDetailsWorkflow({
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">Description</p>
                   <p className="mt-1 text-sm text-slate-700 whitespace-pre-wrap">
-                    {selectedTaskDetails.description}
+                    <LinkifiedText text={selectedTaskDetails.description} />
                   </p>
                 </div>
               )}
@@ -673,15 +713,43 @@ export function useTaskDetailsWorkflow({
               </div>
             </div>
 
-            <div className="lg:hidden">
-              <TaskDependencies
-                supabase={supabase}
-                taskId={selectedTaskDetails.id}
-                projectId={selectedTaskDetails.projectId}
-                currentUserId={profileId}
-                canManageDependencies={canManageDependencies}
-                showHeader={true}
-              />
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setIsDependenciesOpen((value) => !value)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                aria-expanded={isDependenciesOpen}
+              >
+                <span className="min-w-0">
+                  <span className="block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">
+                    Key Dependencies / Pending Inputs
+                  </span>
+                  <span className="mt-0.5 block text-xs text-slate-500">
+                    Track client inputs, approvals, or blockers needed for this task.
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {dependencyPendingCount !== null && (
+                    <span className="inline-flex min-w-fit shrink-0 whitespace-nowrap items-center justify-center rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold leading-none text-amber-700">
+                      {dependencyPendingCount} pending
+                    </span>
+                  )}
+                  {isDependenciesOpen ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                </span>
+              </button>
+              {isDependenciesOpen && (
+                <div className="border-t border-slate-100 px-4 py-3">
+                  <TaskDependencies
+                    supabase={supabase}
+                    taskId={selectedTaskDetails.id}
+                    projectId={selectedTaskDetails.projectId}
+                    currentUserId={profileId}
+                    canManageDependencies={canManageDependencies}
+                    showHeader={false}
+                    onPendingCountChange={setDependencyPendingCount}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Attachments — with permissions */}
@@ -721,37 +789,6 @@ export function useTaskDetailsWorkflow({
           </div>
         )}
       </Modal>
-
-      {selectedTaskDetails && (
-        <ModalPortal>
-          <aside
-            className="fixed z-[10000] hidden max-h-[78vh] w-[360px] flex-col overflow-y-auto rounded-2xl border border-slate-200/70 bg-white shadow-2xl lg:flex"
-            style={{
-              left: "max(276px, calc(50% - 700px))",
-              top: "50%",
-              transform: "translateY(-50%)",
-            }}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="border-b border-slate-100 px-5 py-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">
-                Key Dependencies / Pending Inputs
-              </p>
-              <p className="mt-1 truncate text-xs text-slate-500" title={selectedTaskDetails.title}>
-                {selectedTaskDetails.title}
-              </p>
-            </div>
-            <TaskDependencies
-              supabase={supabase}
-              taskId={selectedTaskDetails.id}
-              projectId={selectedTaskDetails.projectId}
-              currentUserId={profileId}
-              canManageDependencies={canManageDependencies}
-              showHeader={false}
-            />
-          </aside>
-        </ModalPortal>
-      )}
 
       <ChatPanel
         isOpen={Boolean(selectedTaskDetails)}

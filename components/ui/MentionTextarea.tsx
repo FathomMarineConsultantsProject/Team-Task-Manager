@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Avatar from "@/components/ui/Avatar";
+import LinkifiedText from "@/components/ui/LinkifiedText";
 
 type MemberUser = {
   id: string;
@@ -266,7 +267,7 @@ export function RenderMentionText({ text, className = "" }: { text: string; clas
             @{part.value}
           </span>
         ) : (
-          <span key={i}>{part.value}</span>
+          <LinkifiedText key={i} text={part.value} />
         ),
       )}
     </span>
