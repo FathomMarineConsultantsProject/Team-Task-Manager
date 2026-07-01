@@ -5,6 +5,19 @@ import ProjectCard from "@/components/dashboard/ProjectCard";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
 import { supabase } from "@/lib/supabaseClient";
+import { useExportTasks } from "@/lib/useExportTasks";
+
+type ProjectMemberUser = {
+  id: string | null;
+  name: string | null;
+  email: string | null;
+};
+
+type ProjectMemberRow = {
+  id: string | null;
+  user_id: string | null;
+  user: ProjectMemberUser | ProjectMemberUser[] | null;
+};
 
 type ProjectRow = {
   id: string;
@@ -16,8 +29,63 @@ type ProjectRow = {
     id: string | null;
     name: string | null;
   } | null;
-  project_members: { id: string | null; user_id: string | null }[] | null;
+  project_members: ProjectMemberRow[] | null;
 };
+
+type DashboardProjectCardProps = {
+  project: ProjectRow;
+  currentUserId: string | null;
+  isSuperAdmin: boolean;
+  onDelete: (projectId: string) => Promise<void>;
+  onEdit: (projectId: string) => void;
+};
+
+function DashboardProjectCard({
+  project,
+  currentUserId,
+  isSuperAdmin,
+  onDelete,
+  onEdit,
+}: DashboardProjectCardProps) {
+  const exportMembers = (project.project_members ?? [])
+    .map((member) => {
+      const user = Array.isArray(member.user) ? (member.user[0] ?? null) : member.user;
+      return {
+        user_id: member.user_id ?? "",
+        user: user
+          ? {
+              id: user.id ?? member.user_id ?? "",
+              name: user.name,
+              email: user.email,
+            }
+          : null,
+      };
+    })
+    .filter((member) => Boolean(member.user_id));
+
+  const { isExporting, handleExportTasks } = useExportTasks({
+    supabase,
+    projectId: project.id,
+    projectName: project.name,
+    members: exportMembers,
+  });
+
+  return (
+    <ProjectCard
+      projectId={project.id}
+      projectName={project.name}
+      ownerName={project.users?.name ?? "Unknown"}
+      ownerId={project.owner_id ?? ""}
+      memberCount={project.project_members?.length ?? 0}
+      currentUserId={currentUserId}
+      isSuperAdmin={isSuperAdmin}
+      onDelete={onDelete}
+      onEdit={onEdit}
+      onExport={() => handleExportTasks()}
+      isExporting={isExporting}
+    />
+  );
+}
 
 export default function DashboardPage() {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -54,7 +122,12 @@ export default function DashboardPage() {
           ),
           project_members (
             id,
-            user_id
+            user_id,
+            user:users (
+              id,
+              name,
+              email
+            )
           )
         `,
       )
@@ -419,18 +492,10 @@ export default function DashboardPage() {
       ) : (
         <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           {projects.map((project) => {
-            const ownerId = project.owner_id ?? "";
-            const ownerName = project.users?.name ?? "Unknown";
-            const memberCount = project.project_members?.length ?? 0;
-
             return (
-              <ProjectCard
+              <DashboardProjectCard
                 key={project.id}
-                projectId={project.id}
-                projectName={project.name}
-                ownerName={ownerName}
-                ownerId={ownerId}
-                memberCount={memberCount}
+                project={project}
                 currentUserId={currentUserId}
                 isSuperAdmin={isSuperAdmin}
                 onDelete={handleDelete}

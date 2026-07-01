@@ -2,7 +2,7 @@
 
 import { KeyboardEvent, MouseEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Trash2, Users, Pencil } from "lucide-react";
+import { ArrowRight, FileDown, Loader2, Trash2, Users, Pencil } from "lucide-react";
 
 interface ProjectCardProps {
   projectId: string;
@@ -14,6 +14,8 @@ interface ProjectCardProps {
   isSuperAdmin: boolean;
   onDelete?: (projectId: string) => Promise<void> | void;
   onEdit?: (projectId: string) => void;
+  onExport?: (projectId: string) => Promise<void> | void;
+  isExporting?: boolean;
 }
 
 export default function ProjectCard({
@@ -26,10 +28,13 @@ export default function ProjectCard({
   isSuperAdmin,
   onDelete,
   onEdit,
+  onExport,
+  isExporting = false,
 }: ProjectCardProps) {
   const router = useRouter();
   const canDelete = Boolean(onDelete && currentUserId && (ownerId === currentUserId || isSuperAdmin));
   const canEdit = Boolean(onEdit && currentUserId && (ownerId === currentUserId || isSuperAdmin));
+  const canExport = Boolean(onExport);
 
   const handleNavigate = () => {
     router.push(`/dashboard/projects/${projectId}`);
@@ -69,6 +74,20 @@ export default function ProjectCard({
     onEdit(projectId);
   };
 
+  const handleExportClick = async (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (!canExport || !onExport || isExporting) {
+      return;
+    }
+
+    try {
+      await onExport(projectId);
+    } catch (error) {
+      console.error("Failed to export project tasks", error);
+      alert("Unable to export tasks. Please try again.");
+    }
+  };
+
   return (
     <div
       role="button"
@@ -83,6 +102,18 @@ export default function ProjectCard({
           <h3 className="mt-2 text-xl font-semibold tracking-[-0.01em] text-slate-900">{projectName}</h3>
         </div>
         <div className="flex items-center gap-2">
+          {canExport ? (
+            <button
+              type="button"
+              aria-label="Export Tasks"
+              title="Export Tasks"
+              onClick={handleExportClick}
+              disabled={isExporting}
+              className="rounded-full border border-emerald-100 bg-emerald-50 p-2 text-emerald-600 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isExporting ? <Loader2 size={16} className="animate-spin" /> : <FileDown size={16} />}
+            </button>
+          ) : null}
           {canEdit ? (
             <button
               type="button"

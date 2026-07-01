@@ -66,6 +66,24 @@ import {
 
 type ProjectInfo = { id: string; name: string | null; start_date?: string | null; end_date?: string | null; created_at?: string | null; owner_id?: string | null };
 type ProjectMemberInfo = { project_id: string; user_id: string; role?: string | null };
+type ProjectReviewerInfo = {
+  project_id: string;
+  user_id: string;
+  reviewer:
+    | {
+        id: string;
+        name: string | null;
+        email: string | null;
+        job_role?: string | null;
+      }
+    | {
+        id: string;
+        name: string | null;
+        email: string | null;
+        job_role?: string | null;
+      }[]
+    | null;
+};
 type TabId = "overview" | "board" | "doclist" | "activity" | "ai";
 type ReportScope = "last_week_progress" | "last_week_activity" | "this_week" | "this_month" | "full_project";
 type TaskSelectionMode = "all" | "selected";
@@ -328,6 +346,7 @@ type ExecutiveReportData = {
   scopeEndDate?: string | null;
   selectedTaskIds?: string[];
   leads: ProjectLeadInfo;
+  reviewers?: string[];
   health: {
     label: string;
     riskLevel: "Low" | "Medium" | "High";
@@ -966,6 +985,20 @@ function formatLeadDisplay(leads: ProjectLeadInfo) {
   };
 }
 
+function getProjectReviewerNames(projectId: string, reviewers: ProjectReviewerInfo[]) {
+  return Array.from(
+    new Set(
+      reviewers
+        .filter((reviewer) => reviewer.project_id === projectId)
+        .map((reviewer) => {
+          const user = Array.isArray(reviewer.reviewer) ? reviewer.reviewer[0] ?? null : reviewer.reviewer;
+          return user?.name ?? user?.email ?? null;
+        })
+        .filter((name): name is string => Boolean(name)),
+    ),
+  );
+}
+
 function buildGanttPdfData(
   tasks: ReportTaskWithDetails[],
   usersById: Map<string, AnalyticsUser>,
@@ -1106,6 +1139,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
   const healthLabel = report.health.riskLevel === "High" ? "At Risk" : report.health.riskLevel === "Medium" ? "Attention Required" : "Healthy";
   const activeTasks = Math.max(0, report.kpis.total - report.kpis.completed);
   const leadDisplay = formatLeadDisplay(report.leads);
+  const reviewerDisplay = report.reviewers?.length ? report.reviewers.join(", ") : null;
 
   return (
     <div className="space-y-6">
@@ -1119,6 +1153,12 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
           <span>Owner: <strong className="text-white">{report.leads.owner}</strong></span>
           <span className="text-slate-600">•</span>
           <span>{leadDisplay.label}: <strong className="text-white">{leadDisplay.value}</strong></span>
+          {reviewerDisplay && (
+            <>
+              <span className="text-slate-600">•</span>
+              <span>Reviewer: <strong className="text-white">{reviewerDisplay}</strong></span>
+            </>
+          )}
           <span className="text-slate-600">•</span>
           <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
           <span className="text-slate-600">•</span>
@@ -1451,6 +1491,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
 }
 
 function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
+  const reviewerDisplay = report.reviewers?.length ? report.reviewers.join(", ") : null;
   const draftReviewTasks = report.draftReviewTasks ?? report.taskRegister.filter((task) => task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review" || normalizeStatus(task.status) === "draft_review");
   const pendingInputTasks = report.pendingInputTasks ?? report.taskRegister.filter((task) => (task.pendingDependencyCount ?? 0) > 0);
   const activitySummary = report.activitySummary ?? buildClientActivitySummary(report.taskRegister);
@@ -1496,6 +1537,7 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         <h2 className="mt-6 text-3xl font-bold tracking-tight">{report.projectName}</h2>
         <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-300">
           <span>Owner: <strong className="text-white">{BRAND_NAME}</strong></span>
+          {reviewerDisplay && <span>Reviewer: <strong className="text-white">{reviewerDisplay}</strong></span>}
           <span>Generated: <strong className="text-white">{formatDate(report.generatedAt)}</strong></span>
           <span>Scope: <strong className="text-white">{report.scopeLabel ?? "Full Project Report"}</strong></span>
           <span>Date Range: <strong className="text-white">{scopeRange}</strong></span>
@@ -1888,6 +1930,7 @@ export default function ReportsPage() {
   const [assignees, setAssignees] = useState<AnalyticsAssignee[]>([]);
   const [users, setUsers] = useState<AnalyticsUser[]>([]);
   const [projectMembers, setProjectMembers] = useState<ProjectMemberInfo[]>([]);
+  const [projectReviewers, setProjectReviewers] = useState<ProjectReviewerInfo[]>([]);
 
   // Activity feed
   const [comments, setComments] = useState<EnrichedComment[]>([]);
@@ -1947,11 +1990,12 @@ export default function ReportsPage() {
         setAssignees([]);
         setUsers([]);
         setComments([]);
+        setProjectReviewers([]);
         return;
       }
 
-      // Fetch tasks, logs, assignees, users, comments, project_members in parallel
-      const [tasksRes, logsRes, assigneesRes, usersRes, commentsRes, pmRes] = await Promise.all([
+      // Fetch tasks, logs, assignees, users, comments, project members, and reviewers in parallel
+      const [tasksRes, logsRes, assigneesRes, usersRes, commentsRes, pmRes, reviewersRes] = await Promise.all([
         supabase
           .from("tasks")
           .select("id, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, created_at, updated_at, completed_at, project_id, title, description")
@@ -1976,6 +2020,10 @@ export default function ReportsPage() {
           .from("project_members")
           .select("project_id, user_id, role")
           .in("project_id", projectIds),
+        supabase
+          .from("project_reviewers")
+          .select("project_id, user_id, reviewer:users!project_reviewers_user_id_fkey(id, name, email, job_role)")
+          .in("project_id", projectIds),
       ]);
 
       const allTasks = (tasksRes.data ?? []) as (AnalyticsTask & { project_id?: string; title?: string })[];
@@ -1985,6 +2033,7 @@ export default function ReportsPage() {
       const allUsers = (usersRes.data ?? []) as AnalyticsUser[];
       setUsers(allUsers);
       setProjectMembers((pmRes.data ?? []) as ProjectMemberInfo[]);
+      setProjectReviewers((reviewersRes.data ?? []) as ProjectReviewerInfo[]);
 
       // Enrich comments
       const usersById = new Map(allUsers.map((u) => [u.id, u]));
@@ -2524,6 +2573,12 @@ Utilization: ${utilizationScore}%`;
           leadNames: teamRows.slice(0, 4).map((row) => row.name),
         }
         : getProjectLeadInfo(aiProjectFilter, projectMembers, reportUsersById, teamRows);
+      const reviewerProjectIds = aiProjectFilter === "all"
+        ? Array.from(new Set(aiTasks.map((task) => task.project_id).filter((id): id is string => Boolean(id))))
+        : [aiProjectFilter];
+      const reviewers = Array.from(
+        new Set(reviewerProjectIds.flatMap((id) => getProjectReviewerNames(id, projectReviewers))),
+      );
       const actionItems = taskRegister.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
 
       let recommendations = buildFallbackRecommendations({
@@ -2577,6 +2632,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
           scopeEndDate: reportAudience === "client" ? clientScope.window.end?.toISOString() ?? null : undefined,
           selectedTaskIds: reportAudience === "client" ? selectedIdsForReport : undefined,
           leads,
+          reviewers,
           health: {
             label: healthLabel,
             riskLevel,
@@ -2629,7 +2685,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, supabase]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, supabase]);
 
   const refreshClientReportDataForPdf = useCallback(async (report: ExecutiveReportData): Promise<ExecutiveReportData> => {
     const taskIds = Array.from(new Set(report.taskRegister.map((task) => task.id).filter(Boolean)));

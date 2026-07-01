@@ -75,6 +75,7 @@ type ExecutiveReportData = {
   scopeEndDate?: string | null;
   selectedTaskIds?: string[];
   leads: ProjectLeadInfo;
+  reviewers?: string[];
   health: {
     label: string;
     riskLevel: "Low" | "Medium" | "High";
@@ -1182,6 +1183,7 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
   ];
   const statusTotal = statusRows.reduce((sum, item) => sum + item.value, 0);
   const activitySummary = getClientActivitySummary(report);
+  const reviewerLine = report.reviewers?.length ? `Reviewer: ${report.reviewers.join(", ")}` : null;
 
   pdf.addPage((c, pageNo, pageCount) => {
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
@@ -1190,9 +1192,11 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
     c.text("CLIENT PROJECT REPORT", M, 102, 34, "#ffffff", true);
     c.text(report.projectName, M, 148, 18, "#c7d2fe", true);
     c.text(`Owner: ${BRAND_NAME}`, M, 194, 12, "#dbeafe");
-    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 214, 12, "#dbeafe");
-    c.text(`Report Scope: ${report.scopeLabel ?? "Full Project Report"}`, M, 234, 12, "#dbeafe");
-    c.text(`Scope Dates: ${scopeRangeText(report)}`, M, 254, 12, "#dbeafe");
+    if (reviewerLine) c.text(reviewerLine, M, 214, 12, "#dbeafe");
+    const generatedY = reviewerLine ? 234 : 214;
+    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, generatedY, 12, "#dbeafe");
+    c.text(`Report Scope: ${report.scopeLabel ?? "Full Project Report"}`, M, generatedY + 20, 12, "#dbeafe");
+    c.text(`Scope Dates: ${scopeRangeText(report)}`, M, generatedY + 40, 12, "#dbeafe");
     const cards = [
       ["Total Tasks in Scope", report.kpis.total, CLIENT_STATUS_COLORS.todo],
       ["Completed in Scope", report.kpis.completed, CLIENT_STATUS_COLORS.completed],
@@ -1342,6 +1346,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
 
   pdf.addPage((c, pageNo, pageCount) => {
     const leadLines = wrap(formatLeadLine(report.leads), 76, 2);
+    const reviewerLine = report.reviewers?.length ? `Reviewer: ${report.reviewers.join(", ")}` : null;
     c.rect(0, 0, PAGE_W, PAGE_H, COLORS.dark);
     c.text("POWERED BY", M, 36, 9, "#a7b0d6", true);
     c.text(BRAND_NAME_UPPER, M, 52, 15, "#ffffff", true);
@@ -1350,7 +1355,8 @@ function buildProjectPdf(report: ExecutiveReportData) {
     c.text("Project Details", M, 184, 12, "#ffffff", true);
     c.text(`Owner: ${report.leads.owner}`, M, 206, 12, "#dbeafe");
     c.textLines(leadLines, M, 224, 12, "#dbeafe", false, 15);
-    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, 262, 12, "#dbeafe");
+    if (reviewerLine) c.text(reviewerLine, M, 258, 12, "#dbeafe");
+    c.text(`Generated Date: ${formatDate(report.generatedAt)}`, M, reviewerLine ? 280 : 262, 12, "#dbeafe");
     const cards = [
       ["Completion %", `${report.health.completionRate}%`, COLORS.green],
       ["Health Status", report.health.label, statusBannerColor],

@@ -1,5 +1,6 @@
-import { Plus } from "lucide-react";
-import type { DragEvent } from "react";
+import { FileDown, MoreHorizontal, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import type { DragEvent, MouseEvent } from "react";
 import TaskCard from "./TaskCard";
 import type { ColumnId, Task } from "./types";
 
@@ -17,6 +18,7 @@ interface BoardColumnProps {
   onEditTask?: (taskId: string) => void;
   onOpenTaskDetails?: (taskId: string, column: ColumnId) => void;
   onQuickAddTask?: (columnId: ColumnId) => void;
+  onExportTasks?: (columnId: ColumnId) => Promise<void> | void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
   canClaim?: boolean;
   canDelete?: boolean;
@@ -37,11 +39,15 @@ export default function BoardColumn({
   onEditTask,
   onOpenTaskDetails,
   onQuickAddTask,
+  onExportTasks,
   onClaimTask,
   canClaim = false,
   canDelete = true,
   canEdit = false,
 }: BoardColumnProps) {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
   const columnAccent: Record<ColumnId, { ring: string; text: string; bg: string }> = {
     todo: { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" },
     inProgress: { ring: "border-blue-200", text: "text-blue-700", bg: "bg-blue-50/70" },
@@ -73,6 +79,39 @@ export default function BoardColumn({
     }
   };
 
+  const handleMenuClick = (event: MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+  };
+
+  const handleAddTask = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onQuickAddTask?.(columnId);
+    setIsMenuOpen(false);
+  };
+
+  const handleExportTasks = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    void onExportTasks?.(columnId);
+    setIsMenuOpen(false);
+  };
+
+  useEffect(() => {
+    if (!isMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [isMenuOpen]);
+
   return (
     <div
       onDragOver={handleDragOver}
@@ -88,13 +127,40 @@ export default function BoardColumn({
           <span className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] ${columnAccent[columnId].ring} ${columnAccent[columnId].text} ${columnAccent[columnId].bg}`}>
             {tasks.length}
           </span>
-          <button
-            type="button"
-            onClick={() => onQuickAddTask?.(columnId)}
-            className="rounded-full border border-gray-200 p-1 transition hover:border-gray-300 hover:bg-white"
-          >
-            <Plus size={14} />
-          </button>
+          <div ref={menuRef} className="relative" onClick={handleMenuClick}>
+            <button
+              type="button"
+              aria-label={`${title} actions`}
+              aria-expanded={isMenuOpen}
+              onClick={(event) => {
+                event.stopPropagation();
+                setIsMenuOpen((open) => !open);
+              }}
+              className="rounded-full border border-gray-200 p-1 transition hover:border-gray-300 hover:bg-white"
+            >
+              <MoreHorizontal size={14} />
+            </button>
+            {isMenuOpen ? (
+              <div className="absolute right-0 top-8 z-30 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-lg">
+                <button
+                  type="button"
+                  onClick={handleAddTask}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-slate-50"
+                >
+                  <Plus size={14} />
+                  Add Task
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportTasks}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-slate-50"
+                >
+                  <FileDown size={14} />
+                  Export Tasks
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
       <div className="mt-4 flex flex-1 flex-col gap-3">

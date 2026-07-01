@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus } from "lucide-react";
+import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus, Loader2 } from "lucide-react";
 import { useExportTasks } from "@/lib/useExportTasks";
 import BoardColumn from "@/components/board/BoardColumn";
 import Button from "@/components/ui/button";
@@ -72,6 +72,20 @@ type DbProjectMember = {
     } | null;
 };
 
+type ProjectReviewer = {
+  id: string;
+  project_id: string;
+  user_id: string;
+  created_at: string;
+  user: {
+    id: string;
+    name: string | null;
+    email: string | null;
+    job_role: string | null;
+    avatar_url?: string | null;
+  } | null;
+};
+
 const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
   { id: "todo", title: "TO DO" },
   { id: "inProgress", title: "IN PROGRESS" },
@@ -110,6 +124,14 @@ const STATUS_LABEL: Record<ColumnId, string> = {
   draftReview: "DRAFT REVIEW",
   review: "IN REVIEW",
   done: "DONE",
+};
+
+const COLUMN_EXPORT_LABEL: Record<ColumnId, string> = {
+  todo: "To Do",
+  inProgress: "In Progress",
+  draftReview: "Draft Review",
+  review: "In Review",
+  done: "Done",
 };
 
 const getDraftReviewDateFields = (enteredAt = new Date()) => ({
@@ -197,6 +219,7 @@ export default function ProjectBoardPage({
   // Project state (new)
   const [project, setProject] = useState<DbProject | null>(null);
   const [members, setMembers] = useState<DbProjectMember[]>([]);
+  const [reviewers, setReviewers] = useState<ProjectReviewer[]>([]);
   const [projectLoading, setProjectLoading] = useState(true);
   
   // Modal state (new)
@@ -231,10 +254,13 @@ export default function ProjectBoardPage({
   const [showFilters, setShowFilters] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [managingMemberId, setManagingMemberId] = useState<string | null>(null);
-  const [projectTeamTab, setProjectTeamTab] = useState<"add" | "manage">("add");
+  const [projectTeamTab, setProjectTeamTab] = useState<"add" | "manage" | "reviewer">("add");
   const [teamMemberSearch, setTeamMemberSearch] = useState("");
   const [openTeamMemberMenuId, setOpenTeamMemberMenuId] = useState<string | null>(null);
   const [memberPendingRemoval, setMemberPendingRemoval] = useState<DbProjectMember | null>(null);
+  const [reviewerSearch, setReviewerSearch] = useState("");
+  const [selectedReviewerId, setSelectedReviewerId] = useState("");
+  const [managingReviewerId, setManagingReviewerId] = useState<string | null>(null);
 
   // Excel export hook
   const { isExporting, handleExportTasks } = useExportTasks({
@@ -262,6 +288,43 @@ export default function ProjectBoardPage({
   );
   const canViewTaskUpdates = isProjectMember || canManageProject;
   const canParticipateInTaskUpdates = isProjectMember || isProjectOwnerMember || isSuperAdmin;
+
+  const loadProjectReviewers = useCallback(async () => {
+    if (!projectId) {
+      setReviewers([]);
+      return;
+    }
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+
+      if (!accessToken) {
+        setReviewers([]);
+        return;
+      }
+
+      const response = await fetch(`/api/projects/${projectId}/reviewers`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      const result = (await response.json()) as { reviewers?: ProjectReviewer[]; error?: string };
+
+      if (!response.ok) {
+        throw new Error(result.error ?? "Failed to load project reviewers.");
+      }
+
+      setReviewers(result.reviewers ?? []);
+    } catch (error) {
+      console.error("Failed to load project reviewers", error);
+      setReviewers([]);
+    }
+  }, [projectId, supabase]);
+
+  useEffect(() => {
+    void loadProjectReviewers();
+  }, [loadProjectReviewers]);
 
   useEffect(() => {
     setTimerNow(Date.now());
@@ -326,6 +389,36 @@ export default function ProjectBoardPage({
       );
     });
   }, [members, teamMemberSearch]);
+
+  const filteredReviewerMembers = useMemo(() => {
+    const search = reviewerSearch.trim().toLowerCase();
+    const reviewerIds = new Set(reviewers.map((reviewer) => reviewer.user_id));
+    const eligibleMembers = members.filter((member) => member.user && !reviewerIds.has(member.user_id));
+
+    if (!search) {
+      return eligibleMembers;
+    }
+
+    return eligibleMembers
+      .filter((member) => {
+        const user = member.user;
+        if (!user) return false;
+        const name = user.name?.toLowerCase() ?? "";
+        const email = user.email?.toLowerCase() ?? "";
+        const role = user.job_role?.toLowerCase() ?? "";
+        const projectRole = member.role?.toLowerCase() ?? "";
+        return name.includes(search) || email.includes(search) || role.includes(search) || projectRole.includes(search);
+      })
+      .slice(0, 8);
+  }, [members, reviewerSearch, reviewers]);
+
+  const reviewerNames = useMemo(
+    () =>
+      reviewers
+        .map((reviewer) => reviewer.user?.name ?? reviewer.user?.email ?? null)
+        .filter((name): name is string => Boolean(name)),
+    [reviewers],
+  );
 
   const canMoveTask = useCallback(
     (assignedTo: string | null, assignees?: { id: string }[], startDate?: string | null) => {
@@ -859,6 +952,116 @@ export default function ProjectBoardPage({
       }
     },
     [projectId, supabase, canManageProjectMembers, members, selectedMemberIds],
+  );
+
+  const handleAddReviewer = useCallback(
+    async () => {
+      if (!projectId || !selectedReviewerId) {
+        return;
+      }
+
+      if (!canManageProjectMembers) {
+        alert("Only project owners, leads, admins, or super admins can assign reviewers.");
+        return;
+      }
+
+      setManagingReviewerId(selectedReviewerId);
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+
+        if (!accessToken) {
+          alert("Please sign in again to manage project reviewers.");
+          return;
+        }
+
+        const response = await fetch(`/api/projects/${projectId}/reviewers`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ userId: selectedReviewerId }),
+        });
+        const result = (await response.json()) as { reviewer?: ProjectReviewer; error?: string };
+
+        if (!response.ok) {
+          throw new Error(result.error ?? "Failed to assign project reviewer.");
+        }
+
+        await loadProjectReviewers();
+
+        if (!members.some((member) => member.user_id === selectedReviewerId)) {
+          const { data: updatedMembers } = await supabase
+            .from("project_members")
+            .select(
+              `
+              user_id,
+              role,
+              user:users(id, name, email, job_role, system_role, avatar_url)
+            `,
+            )
+            .eq("project_id", projectId);
+
+          setMembers(((updatedMembers as unknown) as DbProjectMember[]) ?? []);
+        }
+
+        setReviewerSearch("");
+        setSelectedReviewerId("");
+      } catch (error) {
+        console.error("Failed to assign reviewer", error);
+        alert(error instanceof Error ? error.message : "Failed to assign project reviewer.");
+      } finally {
+        setManagingReviewerId(null);
+      }
+    },
+    [canManageProjectMembers, loadProjectReviewers, members, projectId, selectedReviewerId, supabase],
+  );
+
+  const handleRemoveReviewer = useCallback(
+    async (userId: string) => {
+      if (!projectId || !userId) {
+        return;
+      }
+
+      if (!canManageProjectMembers) {
+        alert("Only project owners, leads, admins, or super admins can remove reviewers.");
+        return;
+      }
+
+      setManagingReviewerId(userId);
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+
+        if (!accessToken) {
+          alert("Please sign in again to manage project reviewers.");
+          return;
+        }
+
+        const response = await fetch(`/api/projects/${projectId}/reviewers/${userId}`, {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+        const result = (await response.json()) as { error?: string };
+
+        if (!response.ok) {
+          throw new Error(result.error ?? "Failed to remove project reviewer.");
+        }
+
+        setReviewers((current) => current.filter((reviewer) => reviewer.user_id !== userId));
+      } catch (error) {
+        console.error("Failed to remove reviewer", error);
+        alert(error instanceof Error ? error.message : "Failed to remove project reviewer.");
+      } finally {
+        setManagingReviewerId(null);
+      }
+    },
+    [canManageProjectMembers, projectId, supabase],
   );
 
   const handlePromoteMember = useCallback(
@@ -2043,6 +2246,12 @@ export default function ProjectBoardPage({
                     })}
                   </div>
                 )}
+                {reviewerNames.length > 0 && (
+                  <p className="mt-3 text-xs text-slate-500">
+                    <span className="font-semibold uppercase tracking-[0.14em] text-slate-400">Reviewers:</span>{" "}
+                    <span className="font-medium text-slate-700">{reviewerNames.join(", ")}</span>
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -2228,6 +2437,12 @@ export default function ProjectBoardPage({
                   setNewTaskStatus(columnId);
                   setShowCreateTaskModal(true);
                 }}
+                onExportTasks={(columnId) =>
+                  handleExportTasks({
+                    statusFilter: COLUMN_TO_STATUS[columnId],
+                    statusLabel: COLUMN_EXPORT_LABEL[columnId],
+                  })
+                }
                 onClaimTask={claimTask}
                 canClaim={!canManageProject}
                 canDelete={true}
@@ -2467,6 +2682,8 @@ export default function ProjectBoardPage({
         isOpen={showAddMemberModal}
         onClose={() => {
           setSelectedMemberIds([]);
+          setReviewerSearch("");
+          setSelectedReviewerId("");
           setShowAddMemberModal(false);
         }}
         maxWidth="max-w-4xl"
@@ -2490,6 +2707,15 @@ export default function ProjectBoardPage({
               }`}
             >
               Manage Team
+            </button>
+            <button
+              type="button"
+              onClick={() => setProjectTeamTab("reviewer")}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold transition ${
+                projectTeamTab === "reviewer" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              Add Reviewer
             </button>
           </div>
 
@@ -2571,7 +2797,7 @@ export default function ProjectBoardPage({
                 </Button>
               </div>
             </>
-          ) : (
+          ) : projectTeamTab === "manage" ? (
             <div className="space-y-3">
               <div className="relative">
                 <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -2674,6 +2900,126 @@ export default function ProjectBoardPage({
                     );
                   })
                 )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <div>
+                <label htmlFor="reviewer-select" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+                  Search Reviewer by Name
+                </label>
+                <input
+                  id="reviewer-select"
+                  type="text"
+                  placeholder="Type reviewer name"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+                  value={reviewerSearch}
+                  onChange={(event) => {
+                    setReviewerSearch(event.target.value);
+                    setSelectedReviewerId("");
+                  }}
+                  disabled={Boolean(managingReviewerId)}
+                />
+                <p className="mt-1 text-xs text-slate-500">Assign reviewers without changing their project member role.</p>
+                {filteredReviewerMembers.length > 0 ? (
+                  <div className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                    {filteredReviewerMembers.map((member) => {
+                      const user = member.user;
+                      if (!user) return null;
+                      const isSelected = selectedReviewerId === user.id;
+
+                      return (
+                        <label
+                          key={user.id}
+                          className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 hover:bg-gray-100"
+                        >
+                          <input
+                            type="radio"
+                            name="project-reviewer"
+                            checked={isSelected}
+                            onChange={() => setSelectedReviewerId(user.id)}
+                            disabled={Boolean(managingReviewerId)}
+                            className="h-4 w-4 border-slate-300 text-slate-900 focus:ring-slate-900"
+                          />
+                          <Avatar
+                            userId={user.id}
+                            name={user.name}
+                            email={user.email}
+                            avatarUrl={user.avatar_url}
+                            size="xs"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-medium">{user.name ?? user.email ?? "Unknown"}</span>
+                            <span className="block truncate text-xs text-slate-400">{user.email ?? user.job_role ?? "No details"}</span>
+                          </span>
+                          <span className="text-xs italic text-gray-400">
+                            {member.role ?? "member"}{user.job_role ? ` - ${user.job_role}` : ""}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                ) : reviewerSearch.trim() ? (
+                  <p className="mt-2 text-xs text-slate-400">No matching users available to add as reviewer.</p>
+                ) : members.length > 0 && reviewers.length >= members.filter((member) => member.user).length ? (
+                  <p className="mt-2 text-xs text-slate-400">All project members are already reviewers.</p>
+                ) : null}
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    onClick={() => void handleAddReviewer()}
+                    disabled={Boolean(managingReviewerId) || !selectedReviewerId}
+                    className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    {managingReviewerId === selectedReviewerId ? "Adding..." : "Add Reviewer"}
+                  </Button>
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Current Reviewers</p>
+                <div className="mt-2 overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  {reviewers.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-sm text-slate-500">No reviewers assigned.</div>
+                  ) : (
+                    reviewers.map((reviewer) => {
+                      const user = reviewer.user;
+                      const isBusy = managingReviewerId === reviewer.user_id;
+
+                      return (
+                        <div key={reviewer.user_id} className="flex items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-b-0">
+                          <Avatar
+                            userId={user?.id}
+                            name={user?.name}
+                            email={user?.email}
+                            avatarUrl={user?.avatar_url}
+                            size="sm"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="truncate text-sm font-semibold text-slate-900">{user?.name ?? user?.email ?? "Unknown user"}</p>
+                              <span className="rounded-md bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">
+                                Reviewer
+                              </span>
+                            </div>
+                            <p className="mt-0.5 truncate text-xs text-slate-500">{user?.email ?? user?.job_role ?? "No details"}</p>
+                          </div>
+                          {canManageProjectMembers && (
+                            <button
+                              type="button"
+                              aria-label={`Remove ${user?.name ?? user?.email ?? "reviewer"}`}
+                              title="Remove reviewer"
+                              disabled={Boolean(managingReviewerId)}
+                              onClick={() => void handleRemoveReviewer(reviewer.user_id)}
+                              className="rounded-md p-2 text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                            >
+                              {isBusy ? <Loader2 size={16} className="animate-spin" /> : <X size={16} />}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
               </div>
             </div>
           )}
