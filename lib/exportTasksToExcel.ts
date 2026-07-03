@@ -127,6 +127,9 @@ const HEADER_COLUMNS = [
   { header: "Target Approval Date", key: "targetApprovalDate", width: 22 },
   { header: "Attachments", key: "attachmentCount", width: 13 },
   { header: "Days Remaining", key: "daysRemaining", width: 16 },
+  { header: "Fleet Management", key: "fleetManagementReviewDate", width: 16 },
+  { header: "Marine Standards", key: "marineStandardsReviewDate", width: 16 },
+  { header: "Talent Development", key: "talentDevelopmentReviewDate", width: 16 },
 ];
 
 // Column width caps for auto-fit
@@ -140,6 +143,9 @@ const COL_MAX_WIDTH: Record<string, number> = {
   nextAction: 35,
   targetRevisionDate: 22,
   targetApprovalDate: 22,
+  fleetManagementReviewDate: 16,
+  marineStandardsReviewDate: 16,
+  talentDevelopmentReviewDate: 16,
 };
 
 // Keys that should wrap text
@@ -654,7 +660,9 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   ts.columns = taskSheetColumns;
 
   // Style header row
-  styleHeaderRow(ts.getRow(1));
+  const headerRow = ts.getRow(1);
+  styleHeaderRow(headerRow);
+  headerRow.height = Math.min(headerRow.height ?? 32, 36);
 
   // Freeze header row + enable autofilter
   ts.views = [{ state: "frozen", ySplit: 1 }];
@@ -696,6 +704,9 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       nextAction: sanitizeExcelText(task.nextAction ?? ""),
       targetRevisionDate: sanitizeExcelText(task.targetRevisionDate ?? ""),
       targetApprovalDate: sanitizeExcelText(task.targetApprovalDate ?? ""),
+      fleetManagementReviewDate: "",
+      marineStandardsReviewDate: "",
+      talentDevelopmentReviewDate: "",
       attachmentCount: task.attachmentCount,
       daysRemaining: daysRemaining !== null ? daysRemaining : "",
     };
@@ -751,13 +762,14 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
         if (lines > maxLines) maxLines = lines;
       }
     }
-    row.height = Math.min(Math.max(20, maxLines * 15), 150);
+    row.height = Math.min(Math.max(20, maxLines * 15), 60);
 
     // ---- Alternating row shading (behind other fills) ----
     if (idx % 2 === 1) {
-      row.eachCell({ includeEmpty: true }, (cell) => {
+      for (let colIndex = 1; colIndex <= taskSheetColumns.length; colIndex += 1) {
+        const cell = row.getCell(colIndex);
         cell.fill = ALT_ROW_FILL;
-      });
+      }
     }
 
     // ---- Status cell color ----
@@ -798,32 +810,36 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     const daysColKey = "daysRemaining";
 
     if (isDone) {
-      row.eachCell({ includeEmpty: true }, (cell) => {
-        if (cell.address === statusCell.address) return; // protect status
-        if (row.getCell(daysColKey).address === cell.address) return; // protect days remaining
+      for (let colIndex = 1; colIndex <= taskSheetColumns.length; colIndex += 1) {
+        const cell = row.getCell(colIndex);
+        if (cell.address === statusCell.address) continue; // protect status
+        if (row.getCell(daysColKey).address === cell.address) continue; // protect days remaining
         cell.fill = ROW_DONE_FILL;
-      });
+      }
     } else if (isOverdue) {
-      row.eachCell({ includeEmpty: true }, (cell) => {
-        if (cell.address === statusCell.address) return;
-        if (row.getCell(daysColKey).address === cell.address) return;
+      for (let colIndex = 1; colIndex <= taskSheetColumns.length; colIndex += 1) {
+        const cell = row.getCell(colIndex);
+        if (cell.address === statusCell.address) continue;
+        if (row.getCell(daysColKey).address === cell.address) continue;
         cell.fill = ROW_OVERDUE_FILL;
-      });
+      }
       statusCell.fill = STATUS_FILLS.overdue as ExcelJS.Fill;
       statusCell.font = { color: { argb: "FFFFFFFF" }, bold: true };
       setSafeCellText(statusCell, "Overdue");
     } else if (isDueSoon) {
-      row.eachCell({ includeEmpty: true }, (cell) => {
-        if (cell.address === statusCell.address) return;
-        if (row.getCell(daysColKey).address === cell.address) return;
+      for (let colIndex = 1; colIndex <= taskSheetColumns.length; colIndex += 1) {
+        const cell = row.getCell(colIndex);
+        if (cell.address === statusCell.address) continue;
+        if (row.getCell(daysColKey).address === cell.address) continue;
         cell.fill = ROW_DUE_SOON_FILL;
-      });
+      }
     }
 
     // ---- Cell borders ----
-    row.eachCell((cell) => {
-      cell.border = ALL_BORDERS;
-    });
+    for (let colIndex = 1; colIndex <= taskSheetColumns.length; colIndex += 1) {
+      row.getCell(colIndex).border = ALL_BORDERS;
+    }
+
   });
 
   // ---- Auto-fit column widths (respect caps) ----
