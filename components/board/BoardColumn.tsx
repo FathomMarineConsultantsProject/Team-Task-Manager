@@ -20,6 +20,7 @@ interface BoardColumnProps {
   onQuickAddTask?: (columnId: ColumnId) => void;
   onExportTasks?: (columnId: ColumnId) => Promise<void> | void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
+  onMarkReviewed?: (taskId: string) => Promise<void> | void;
   canClaim?: boolean;
   canDelete?: boolean;
   canEdit?: boolean;
@@ -41,6 +42,7 @@ export default function BoardColumn({
   onQuickAddTask,
   onExportTasks,
   onClaimTask,
+  onMarkReviewed,
   canClaim = false,
   canDelete = true,
   canEdit = false,
@@ -174,6 +176,7 @@ export default function BoardColumn({
             onEditTask={onEditTask}
             onOpenDetails={() => onOpenTaskDetails?.(task.id, columnId)}
             onClaimTask={onClaimTask}
+            onMarkReviewed={onMarkReviewed}
             canClaim={canClaim}
             canDelete={canDelete}
             canEdit={canEdit}

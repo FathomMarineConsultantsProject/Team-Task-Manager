@@ -8,7 +8,7 @@ import BoardColumn from "@/components/board/BoardColumn";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
 import Avatar from "@/components/ui/Avatar";
-import type { ColumnId, Task } from "@/components/board/types";
+import type { ColumnId, Task, TaskReviewProgress } from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
 import { createEmptyColumns } from "@/lib/data";
 import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
@@ -84,6 +84,23 @@ type ProjectReviewer = {
     job_role: string | null;
     avatar_url?: string | null;
   } | null;
+};
+
+type StatusUpdateResult = {
+  task?: {
+    id: string;
+    status: string | null;
+    draft_review_started_at: string | null;
+    draft_review_due_at: string | null;
+  };
+  error?: string;
+  pendingReviewers?: string[];
+};
+
+type TaskReviewRow = {
+  task_id: string | null;
+  reviewer_id: string | null;
+  status: string | null;
 };
 
 const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
@@ -237,6 +254,7 @@ export default function ProjectBoardPage({
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [taskUpdateCounts, setTaskUpdateCounts] = useState<Record<string, number>>({});
+  const [reviewProgressByTaskId, setReviewProgressByTaskId] = useState<Record<string, TaskReviewProgress>>({});
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
@@ -424,8 +442,8 @@ export default function ProjectBoardPage({
     (assignedTo: string | null, assignees?: { id: string }[], startDate?: string | null) => {
       if (!profile?.id) return false;
 
-      // Admin / owner always allowed
-      if (canManageProject) return true;
+      // Project owner, project lead, admin, or super admin can move tasks.
+      if (canManageProject || isProjectLead) return true;
 
       const isAssignee = assignedTo === profile.id;
       const isMultiAssignee = assignees?.some(u => u.id === profile.id) ?? false;
@@ -443,7 +461,7 @@ export default function ProjectBoardPage({
 
       return true;
     },
-    [profile?.id, canManageProject],
+    [profile?.id, canManageProject, isProjectLead],
   );
 
   const insertTaskLog = useCallback(
@@ -475,6 +493,50 @@ export default function ProjectBoardPage({
       }
     },
     [supabase],
+  );
+
+  const initializeTaskReviewCycle = useCallback(
+    async (taskId: string) => {
+      if (!taskId || !projectId) return;
+
+      const { error: deleteError } = await supabase
+        .from("task_reviewer_reviews")
+        .delete()
+        .eq("task_id", taskId);
+
+      if (deleteError) {
+        console.error("Failed to reset task review cycle", deleteError);
+        return;
+      }
+
+      const { data: reviewerRows, error: reviewerError } = await supabase
+        .from("project_reviewers")
+        .select("user_id")
+        .eq("project_id", projectId);
+
+      if (reviewerError) {
+        console.error("Failed to load project reviewers for task review cycle", reviewerError);
+        return;
+      }
+
+      const rows = ((reviewerRows as { user_id: string | null }[] | null) ?? [])
+        .filter((row): row is { user_id: string } => Boolean(row.user_id))
+        .map((row) => ({
+          task_id: taskId,
+          project_id: projectId,
+          reviewer_id: row.user_id,
+          status: "pending",
+          reviewed_at: null,
+        }));
+
+      if (rows.length === 0) return;
+
+      const { error: insertError } = await supabase.from("task_reviewer_reviews").insert(rows);
+      if (insertError) {
+        console.error("Failed to initialize task review cycle", insertError);
+      }
+    },
+    [projectId, supabase],
   );
 
   const applyTaskUpdateCounts = useCallback(
@@ -524,6 +586,65 @@ export default function ProjectBoardPage({
       setTaskUpdateCounts({});
     }
   }, [projectId, supabase]);
+
+  const inReviewTaskIds = useMemo(() => columns.review.map((task) => task.id), [columns.review]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadReviewProgress = async () => {
+      if (!profile?.id || inReviewTaskIds.length === 0) {
+        if (isMounted) setReviewProgressByTaskId({});
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from("task_reviewer_reviews")
+          .select("task_id, reviewer_id, status")
+          .in("task_id", inReviewTaskIds);
+
+        if (error) {
+          if (isMounted) setReviewProgressByTaskId({});
+          return;
+        }
+
+        const nextProgress = ((data as TaskReviewRow[] | null | undefined) ?? []).reduce<Record<string, TaskReviewProgress>>(
+          (acc, row) => {
+            if (!row.task_id) return acc;
+            const current = acc[row.task_id] ?? {
+              total: 0,
+              reviewed: 0,
+              pending: 0,
+              currentUserStatus: null,
+            };
+            const isReviewed = row.status === "reviewed";
+            current.total += 1;
+            current.reviewed += isReviewed ? 1 : 0;
+            current.pending += isReviewed ? 0 : 1;
+            if (row.reviewer_id === profile.id) {
+              current.currentUserStatus = isReviewed ? "reviewed" : "pending";
+            }
+            acc[row.task_id] = current;
+            return acc;
+          },
+          {},
+        );
+
+        if (isMounted) {
+          setReviewProgressByTaskId(nextProgress);
+        }
+      } catch {
+        if (isMounted) setReviewProgressByTaskId({});
+      }
+    };
+
+    void loadReviewProgress();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [inReviewTaskIds, profile?.id, supabase]);
 
   const { openTaskDetails, renderTaskDetails } = useTaskDetailsWorkflow({
     supabase,
@@ -589,7 +710,7 @@ export default function ProjectBoardPage({
         projectId,
         title: task.title,
         description: descriptionValue,
-        status: task.statusLabel ?? STATUS_LABEL[column],
+        status: COLUMN_TO_STATUS[column],
         assignee: task.assigneeName ?? task.assigneeEmail ?? "Unassigned",
         createdAt,
         createdByName: null,
@@ -751,6 +872,10 @@ export default function ProjectBoardPage({
         // Immediately append new task to local state
         if (data && data.length > 0) {
           const newTask = data[0];
+          if (newTask.status === "in_review") {
+            await initializeTaskReviewCycle(newTask.id);
+          }
+
           await insertTaskLog({
             taskId: newTask.id,
             action: "created",
@@ -884,7 +1009,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, selectedAdditionalAssignees, pendingAttachments, newTaskDescription],
+    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, initializeTaskReviewCycle, selectedAdditionalAssignees, pendingAttachments, newTaskDescription],
   );
 
   const handleAddMembers = useCallback(
@@ -1457,64 +1582,52 @@ export default function ProjectBoardPage({
 
       if (!canMove) {
         console.warn("Unauthorized action");
-        return;
+        return null;
       }
 
       const nextStatus = COLUMN_TO_STATUS[destination];
-      const previousStatus = COLUMN_TO_STATUS[source];
-      const statusUpdatePayload = {
-        status: nextStatus,
-        updated_at: new Date().toISOString(),
-        ...(nextStatus === "draft_review" && previousStatus !== "draft_review"
-          ? getDraftReviewDateFields()
-          : {}),
-      };
 
-      const { error } = await supabase
-        .from("tasks")
-        .update(statusUpdatePayload)
-        .eq("id", taskId)
-        .eq("project_id", projectId);
-
-      if (error) {
-        setColumns((current) => {
-          const destinationTasks = current[destination];
-          const movedTask = destinationTasks.find((task) => task.id === taskId);
-          if (!movedTask) {
-            return current;
-          }
-
-          return {
-            ...current,
-            [destination]: destinationTasks.filter((task) => task.id !== taskId),
-            [source]: [
-              ...current[source],
-              {
-                ...movedTask,
-                statusLabel: STATUS_LABEL[source],
-                accent: COLUMN_ACCENT[source],
-              },
-            ],
-          };
-        });
-      } else {
-        const { data: authData } = await supabase.auth.getUser();
-        const currentUserId = authData.user?.id;
-        if (!currentUserId) {
-          console.error("Task log insert skipped: missing authenticated user");
-          return;
-        }
-
-        await insertTaskLog({
-          taskId,
-          action: "moved",
-          fromStatus: COLUMN_TO_STATUS[source],
-          toStatus: COLUMN_TO_STATUS[destination],
-          userId: currentUserId,
-        });
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        alert("Please sign in again to update task status.");
+        return null;
       }
+
+      const response = await fetch(`/api/tasks/${taskId}/status`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const result = (await response.json()) as StatusUpdateResult;
+
+      if (!response.ok) {
+        const pendingNames = result.pendingReviewers?.filter(Boolean) ?? [];
+        alert(pendingNames.length > 0 ? `Pending reviews: ${pendingNames.join(", ")}` : result.error ?? "Failed to update task status.");
+        return null;
+      }
+
+      const { data: authData } = await supabase.auth.getUser();
+      const currentUserId = authData.user?.id;
+      if (!currentUserId) {
+        console.error("Task log insert skipped: missing authenticated user");
+        return result.task ?? null;
+      }
+
+      await insertTaskLog({
+        taskId,
+        action: "moved",
+        fromStatus: COLUMN_TO_STATUS[source],
+        toStatus: COLUMN_TO_STATUS[destination],
+        userId: currentUserId,
+      });
+
+      return result.task ?? null;
     },
-    [projectId, supabase, columns, canMoveTask, insertTaskLog],
+    [supabase, columns, canMoveTask, insertTaskLog],
   );
 
   const onColumnDrop = useCallback(
@@ -1531,44 +1644,46 @@ export default function ProjectBoardPage({
         return;
       }
 
-      setColumns((current) => {
-        const sourceTasks = current[from];
-        const movedTask = sourceTasks.find((task) => task.id === taskId);
-        if (!movedTask) {
-          return current;
-        }
+      const sourceTask = columns[from].find((task) => task.id === taskId);
+      const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees, sourceTask?.start_date);
+      if (!sourceTask || !canMove) {
+        console.warn("Unauthorized action");
+        setActiveDrag(null);
+        setDragOverColumn(null);
+        return;
+      }
 
-        const canMove = canMoveTask(movedTask.assigneeId ?? null, movedTask.assignees, movedTask.start_date);
-        if (!canMove) {
-          console.warn("Unauthorized action");
-          return current;
-        }
+      void (async () => {
+        const updatedTask = await updateTaskStatus(taskId, destination, from);
+        if (!updatedTask) return;
 
-        const optimisticDraftReviewFields =
-          destination === "draftReview" && from !== "draftReview"
-            ? getDraftReviewDateFields()
-            : {};
+        setColumns((current) => {
+          const sourceTasks = current[from];
+          const movedTask = sourceTasks.find((task) => task.id === taskId);
+          if (!movedTask) {
+            return current;
+          }
 
-        return {
-          ...current,
-          [from]: sourceTasks.filter((task) => task.id !== taskId),
-          [destination]: [
+          return {
+            ...current,
+            [from]: sourceTasks.filter((task) => task.id !== taskId),
+            [destination]: [
               {
                 ...movedTask,
                 statusLabel: STATUS_LABEL[destination],
                 accent: COLUMN_ACCENT[destination],
-                ...optimisticDraftReviewFields,
+                draft_review_started_at: updatedTask.draft_review_started_at ?? movedTask.draft_review_started_at,
+                draft_review_due_at: updatedTask.draft_review_due_at ?? movedTask.draft_review_due_at,
               },
-            ...current[destination],
-          ],
-        };
-      });
-
-      void updateTaskStatus(taskId, destination, from);
+              ...current[destination],
+            ],
+          };
+        });
+      })();
       setActiveDrag(null);
       setDragOverColumn(null);
     },
-    [activeDrag, updateTaskStatus],
+    [activeDrag, canMoveTask, columns, updateTaskStatus],
   );
 
   const onRemoveTask = useCallback((taskId: string, column: ColumnId) => {
@@ -1615,6 +1730,47 @@ export default function ProjectBoardPage({
       }
     },
     [columns, projectId, supabase, canManageProject, profile?.id],
+  );
+
+  const handleMarkTaskReviewed = useCallback(
+    async (taskId: string) => {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+
+      if (!accessToken) {
+        alert("Please sign in again to mark your review complete.");
+        return;
+      }
+
+      const response = await fetch(`/api/tasks/${taskId}/review-approvals/mark-reviewed`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const result = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        alert(result.error ?? "Failed to mark review complete.");
+        return;
+      }
+
+      setReviewProgressByTaskId((current) => {
+        const progress = current[taskId];
+        if (!progress || progress.currentUserStatus !== "pending") {
+          return current;
+        }
+
+        return {
+          ...current,
+          [taskId]: {
+            ...progress,
+            reviewed: progress.reviewed + 1,
+            pending: Math.max(0, progress.pending - 1),
+            currentUserStatus: "reviewed",
+          },
+        };
+      });
+    },
+    [supabase],
   );
 
   const findTaskFromColumns = useCallback(
@@ -2423,7 +2579,10 @@ export default function ProjectBoardPage({
                 key={column.id}
                 columnId={column.id}
                 title={column.title}
-                tasks={sorted}
+                tasks={sorted.map((task) => ({
+                  ...task,
+                  reviewProgress: reviewProgressByTaskId[task.id],
+                }))}
                 isDragOver={dragOverColumn === column.id}
                 onColumnDragOver={setDragOverColumn}
                 onColumnDrop={onColumnDrop}
@@ -2444,6 +2603,7 @@ export default function ProjectBoardPage({
                   })
                 }
                 onClaimTask={claimTask}
+                onMarkReviewed={handleMarkTaskReviewed}
                 canClaim={!canManageProject}
                 canDelete={true}
                 canEdit={true}

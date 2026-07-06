@@ -7,6 +7,7 @@ import ChatPanel from "@/components/ui/ChatPanel";
 import TaskAttachments from "@/components/tasks/TaskAttachments";
 import TaskDependencies from "@/components/tasks/TaskDependencies";
 import TaskLinks from "@/components/tasks/TaskLinks";
+import TaskReviewApprovals from "@/components/tasks/TaskReviewApprovals";
 import LinkifiedText from "@/components/ui/LinkifiedText";
 
 export type TaskDetailsSeed = {
@@ -130,6 +131,7 @@ type ProjectMemberRow = {
 type SupabaseClient = {
   from: (table: string) => any;
   storage: { from: (bucket: string) => any };
+  auth?: { getSession: () => Promise<{ data: { session: { access_token: string } | null } }> };
 };
 
 type WorkflowOptions = {
@@ -213,6 +215,10 @@ const describeLog = (log: TaskLogEntry) => {
     return "Task created";
   }
 
+  if (log.action === "review_completed") {
+    return "Marked review as completed";
+  }
+
   return "Task updated";
 };
 
@@ -234,8 +240,10 @@ export function useTaskDetailsWorkflow({
   const [isSubmittingUpdate, setIsSubmittingUpdate] = useState(false);
   const [isTitleExpanded, setIsTitleExpanded] = useState(false);
   const [isDependenciesOpen, setIsDependenciesOpen] = useState(false);
+  const [isReviewApprovalsOpen, setIsReviewApprovalsOpen] = useState(false);
   const [isLinksOpen, setIsLinksOpen] = useState(false);
   const [dependencyPendingCount, setDependencyPendingCount] = useState<number | null>(null);
+  const [reviewApprovalCounts, setReviewApprovalCounts] = useState<{ reviewedCount: number; totalCount: number } | null>(null);
   const [linksCount, setLinksCount] = useState<number | null>(null);
   const taskId = selectedTaskDetails?.id ?? null;
   const projectId = selectedTaskDetails?.projectId ?? null;
@@ -283,8 +291,10 @@ export function useTaskDetailsWorkflow({
     setSelectedTaskDetails(null);
     setIsTitleExpanded(false);
     setIsDependenciesOpen(false);
+    setIsReviewApprovalsOpen(false);
     setIsLinksOpen(false);
     setDependencyPendingCount(null);
+    setReviewApprovalCounts(null);
     setLinksCount(null);
   }, []);
 
@@ -306,6 +316,8 @@ export function useTaskDetailsWorkflow({
       description: seed.description ?? null,
       createdById: null, // Will be loaded from DB
     });
+    setIsReviewApprovalsOpen(false);
+    setReviewApprovalCounts(null);
   }, [projectOwnerId]);
 
   const loadTaskLogs = useCallback(async () => {
@@ -449,6 +461,46 @@ export function useTaskDetailsWorkflow({
       isMounted = false;
     };
   }, [supabase, taskId]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    setReviewApprovalCounts(null);
+    setIsReviewApprovalsOpen(false);
+
+    const auth = supabase.auth;
+    if (!taskId || !auth) return;
+
+    const loadReviewCounts = async () => {
+      try {
+        const { data: sessionData } = await auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+        if (!accessToken) {
+          if (isMounted) setReviewApprovalCounts({ reviewedCount: 0, totalCount: 0 });
+          return;
+        }
+
+        const response = await fetch(`/api/tasks/${taskId}/review-approvals`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const result = (await response.json()) as { reviewedCount?: number; totalCount?: number };
+        if (isMounted && response.ok) {
+          setReviewApprovalCounts({
+            reviewedCount: result.reviewedCount ?? 0,
+            totalCount: result.totalCount ?? 0,
+          });
+        }
+      } catch {
+        if (isMounted) setReviewApprovalCounts({ reviewedCount: 0, totalCount: 0 });
+      }
+    };
+
+    void loadReviewCounts();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase, taskId, selectedTaskDetails?.status]);
 
   useEffect(() => {
     let isMounted = true;
@@ -785,6 +837,45 @@ export function useTaskDetailsWorkflow({
                     canManageDependencies={canManageDependencies}
                     showHeader={false}
                     onPendingCountChange={setDependencyPendingCount}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setIsReviewApprovalsOpen((value) => !value)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                aria-expanded={isReviewApprovalsOpen}
+              >
+                <span className="min-w-0">
+                  <span className="block text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">
+                    Review Approvals
+                  </span>
+                  <span className="mt-0.5 block text-xs text-slate-500">
+                    Track required project reviewer approvals for this review cycle.
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {reviewApprovalCounts !== null && (
+                    <span className="inline-flex min-w-fit shrink-0 whitespace-nowrap items-center justify-center rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold leading-none text-indigo-700">
+                      {reviewApprovalCounts.reviewedCount} / {reviewApprovalCounts.totalCount} reviewed
+                    </span>
+                  )}
+                  {isReviewApprovalsOpen ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+                </span>
+              </button>
+              {isReviewApprovalsOpen && (
+                <div className="border-t border-slate-100 px-4 py-3">
+                  <TaskReviewApprovals
+                    supabase={supabase}
+                    taskId={selectedTaskDetails.id}
+                    projectId={selectedTaskDetails.projectId}
+                    currentUserId={profileId}
+                    taskStatus={selectedTaskDetails.status}
+                    onCountsChange={setReviewApprovalCounts}
+                    onReviewCompleted={loadTaskLogs}
                   />
                 </div>
               )}

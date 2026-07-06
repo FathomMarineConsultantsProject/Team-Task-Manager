@@ -282,6 +282,48 @@ export default function AiAssistantPanel({
     }
   }, [isOpen]);
 
+  const initializeTaskReviewCycle = useCallback(
+    async (taskId: string, projectId: string) => {
+      const { error: deleteError } = await supabase
+        .from("task_reviewer_reviews")
+        .delete()
+        .eq("task_id", taskId);
+
+      if (deleteError) {
+        console.error("Failed to reset AI-created task review cycle", deleteError);
+        return;
+      }
+
+      const { data: reviewerRows, error: reviewerError } = await supabase
+        .from("project_reviewers")
+        .select("user_id")
+        .eq("project_id", projectId);
+
+      if (reviewerError) {
+        console.error("Failed to load project reviewers for AI-created task", reviewerError);
+        return;
+      }
+
+      const rows = ((reviewerRows as { user_id: string | null }[] | null) ?? [])
+        .filter((row): row is { user_id: string } => Boolean(row.user_id))
+        .map((row) => ({
+          task_id: taskId,
+          project_id: projectId,
+          reviewer_id: row.user_id,
+          status: "pending",
+          reviewed_at: null,
+        }));
+
+      if (rows.length === 0) return;
+
+      const { error: insertError } = await supabase.from("task_reviewer_reviews").insert(rows);
+      if (insertError) {
+        console.error("Failed to initialize AI-created task review cycle", insertError);
+      }
+    },
+    [supabase],
+  );
+
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
@@ -432,6 +474,10 @@ export default function AiAssistantPanel({
           throw error;
         }
 
+        if (status === "in_review" && createdTask?.id) {
+          await initializeTaskReviewCycle(createdTask.id, pid);
+        }
+
         const statusLabel = status.replace(/_/g, " ").toUpperCase();
         setMessages(prev => [
           ...prev,
@@ -557,7 +603,7 @@ export default function AiAssistantPanel({
     } finally {
       setIsExecuting(false);
     }
-  }, [pendingAction, profile?.id, context, supabase, onTaskCreated, onCommentAdded, onTaskUpdated]);
+  }, [pendingAction, profile?.id, context, supabase, initializeTaskReviewCycle, onTaskCreated, onCommentAdded, onTaskUpdated]);
 
   const cancelAction = useCallback(() => {
     setPendingAction(null);

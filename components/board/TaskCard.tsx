@@ -14,6 +14,7 @@ interface TaskCardProps extends Task {
   onDeleteTask: (taskId: string, column: ColumnId) => Promise<void> | void;
   onEditTask?: (taskId: string) => void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
+  onMarkReviewed?: (taskId: string) => Promise<void> | void;
   canClaim?: boolean;
   canDelete?: boolean;
   canEdit?: boolean;
@@ -49,9 +50,10 @@ const formatDueDelta = (ms: number) => {
   return `${minutes}m`;
 };
 
-export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, canClaim = false, canDelete = true, canEdit = false, onDragStart, onDragEnd, ...task }: TaskCardProps) {
+export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, onMarkReviewed, canClaim = false, canDelete = true, canEdit = false, onDragStart, onDragEnd, ...task }: TaskCardProps) {
   const [isRemoving, setIsRemoving] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [isMarkingReviewed, setIsMarkingReviewed] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const canDrag = task.canDrag ?? false;
   const now = Date.now();
@@ -110,6 +112,21 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
     "Unassigned";
   const isUnassigned = !task.assigneeId;
   const commentCount = task.updatesCount ?? 0;
+  const reviewProgress = columnId === "review" ? task.reviewProgress : undefined;
+  const showReviewBadge = Boolean(reviewProgress && reviewProgress.total > 0);
+  const reviewBadgeText = reviewProgress
+    ? reviewProgress.pending > 1
+      ? `${reviewProgress.pending} reviews left`
+      : reviewProgress.pending === 1
+        ? "1 review left"
+        : "Reviewed"
+    : null;
+  const canMarkReviewed = Boolean(
+    columnId === "review" &&
+      reviewProgress &&
+      reviewProgress.currentUserStatus === "pending" &&
+      onMarkReviewed,
+  );
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -156,7 +173,18 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
     }, 200);
   };
 
-  const showContextMenu = canEdit || canDelete;
+  const handleMarkReviewed = async () => {
+    if (!canMarkReviewed || !onMarkReviewed || isMarkingReviewed) return;
+    setIsMarkingReviewed(true);
+    try {
+      await onMarkReviewed(task.id);
+      setShowMenu(false);
+    } finally {
+      setIsMarkingReviewed(false);
+    }
+  };
+
+  const showContextMenu = canEdit || canDelete || canMarkReviewed;
 
   return (
     <div
@@ -206,6 +234,19 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
                       Edit
                     </button>
                   )}
+                  {canMarkReviewed && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleMarkReviewed();
+                      }}
+                      disabled={isMarkingReviewed}
+                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-emerald-700 transition hover:bg-emerald-50 disabled:opacity-50"
+                    >
+                      {isMarkingReviewed ? "Saving..." : "Mark as Reviewed"}
+                    </button>
+                  )}
                   {canDelete && (
                     <button
                       type="button"
@@ -244,6 +285,11 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
           {columnId === "draftReview" && reviewDueDateLabel ? (
             <span className="inline-flex items-center rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700">
               Review due {reviewDueDateLabel}
+            </span>
+          ) : null}
+          {showReviewBadge && reviewBadgeText ? (
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${reviewProgress?.pending === 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+              {reviewBadgeText}
             </span>
           ) : null}
         </div>

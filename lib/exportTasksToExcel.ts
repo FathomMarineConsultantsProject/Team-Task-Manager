@@ -104,6 +104,13 @@ const DAYS_GREEN: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: {
 const EXCEL_CELL_TEXT_LIMIT = 32000;
 const EXCEL_HYPERLINK_LIMIT = 2000;
 const EXCEL_TRUNCATION_NOTICE = "\n\n[Text truncated for Excel compatibility]";
+const REVIEW_STATUS_OPTIONS = "Not Started,In Progress,Review Completed";
+const REVIEW_STATUS_COLUMN_KEYS = [
+  "projectManagementShipyardTeamReviewStatus",
+  "fleetManagementReviewDate",
+  "marineStandardsReviewDate",
+  "talentDevelopmentReviewDate",
+];
 
 const HEADER_COLUMNS = [
   { header: "S.No", key: "serialNo", width: 8 },
@@ -127,6 +134,7 @@ const HEADER_COLUMNS = [
   { header: "Target Approval Date", key: "targetApprovalDate", width: 22 },
   { header: "Attachments", key: "attachmentCount", width: 13 },
   { header: "Days Remaining", key: "daysRemaining", width: 16 },
+  { header: "Project Management / Shipyard Team", key: "projectManagementShipyardTeamReviewStatus", width: 28 },
   { header: "Fleet Management", key: "fleetManagementReviewDate", width: 16 },
   { header: "Marine Standards", key: "marineStandardsReviewDate", width: 16 },
   { header: "Talent Development", key: "talentDevelopmentReviewDate", width: 16 },
@@ -146,6 +154,7 @@ const COL_MAX_WIDTH: Record<string, number> = {
   fleetManagementReviewDate: 16,
   marineStandardsReviewDate: 16,
   talentDevelopmentReviewDate: 16,
+  projectManagementShipyardTeamReviewStatus: 28,
 };
 
 // Keys that should wrap text
@@ -386,6 +395,61 @@ function safeWorksheetName(name: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 31) || "Sheet";
+}
+
+function excelColumnName(index: number): string {
+  let columnName = "";
+  let current = index;
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    columnName = String.fromCharCode(65 + remainder) + columnName;
+    current = Math.floor((current - 1) / 26);
+  }
+  return columnName;
+}
+
+function applyReviewStatusValidation(cell: ExcelJS.Cell): void {
+  cell.dataValidation = {
+    type: "list",
+    allowBlank: false,
+    formulae: [`"${REVIEW_STATUS_OPTIONS}"`],
+    showErrorMessage: true,
+    errorTitle: "Invalid review status",
+    error: "Select a review status from the list.",
+  };
+  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  cell.font = { ...(cell.font ?? {}), color: { argb: "FF0F172A" } };
+}
+
+function addReviewStatusConditionalFormatting(worksheet: ExcelJS.Worksheet, ranges: Array<{ ref: string; firstCell: string }>): void {
+  const addConditionalFormatting = (worksheet as unknown as {
+    addConditionalFormatting?: (options: unknown) => void;
+  }).addConditionalFormatting;
+
+  if (!addConditionalFormatting) return;
+
+  ranges.forEach(({ ref, firstCell }) => {
+    addConditionalFormatting.call(worksheet, {
+      ref,
+      rules: [
+        {
+          type: "expression",
+          formulae: [`${firstCell}="Not Started"`],
+          style: { fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFFFC7CE" }, fgColor: { argb: "FFFFC7CE" } } },
+        },
+        {
+          type: "expression",
+          formulae: [`${firstCell}="In Progress"`],
+          style: { fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFFFEB9C" }, fgColor: { argb: "FFFFEB9C" } } },
+        },
+        {
+          type: "expression",
+          formulae: [`${firstCell}="Review Completed"`],
+          style: { fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFC6EFCE" }, fgColor: { argb: "FFC6EFCE" } } },
+        },
+      ],
+    });
+  });
 }
 
 // -------------------------------------------------------------------
@@ -704,9 +768,10 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       nextAction: sanitizeExcelText(task.nextAction ?? ""),
       targetRevisionDate: sanitizeExcelText(task.targetRevisionDate ?? ""),
       targetApprovalDate: sanitizeExcelText(task.targetApprovalDate ?? ""),
-      fleetManagementReviewDate: "",
-      marineStandardsReviewDate: "",
-      talentDevelopmentReviewDate: "",
+      fleetManagementReviewDate: "Not Started",
+      marineStandardsReviewDate: "Not Started",
+      talentDevelopmentReviewDate: "Not Started",
+      projectManagementShipyardTeamReviewStatus: "Not Started",
       attachmentCount: task.attachmentCount,
       daysRemaining: daysRemaining !== null ? daysRemaining : "",
     };
@@ -840,7 +905,27 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       row.getCell(colIndex).border = ALL_BORDERS;
     }
 
+    REVIEW_STATUS_COLUMN_KEYS.forEach((key) => {
+      applyReviewStatusValidation(row.getCell(key));
+    });
+
   });
+
+  if (preparedTasks.length > 0) {
+    const reviewStatusRanges = REVIEW_STATUS_COLUMN_KEYS
+      .map((key) => {
+        const columnIndex = taskSheetColumns.findIndex((column) => column.key === key) + 1;
+        if (columnIndex <= 0) return null;
+        const columnName = excelColumnName(columnIndex);
+        return {
+          ref: `${columnName}2:${columnName}${preparedTasks.length + 1}`,
+          firstCell: `${columnName}2`,
+        };
+      })
+      .filter((range): range is { ref: string; firstCell: string } => Boolean(range));
+
+    addReviewStatusConditionalFormatting(ts, reviewStatusRanges);
+  }
 
   // ---- Auto-fit column widths (respect caps) ----
   for (const col of taskSheetColumns) {

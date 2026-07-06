@@ -2,6 +2,13 @@ export type ColumnId = "todo" | "inProgress" | "draftReview" | "review" | "done"
 
 export type TaskDirection = "up" | "down" | "right";
 
+export type TaskReviewProgress = {
+  total: number;
+  reviewed: number;
+  pending: number;
+  currentUserStatus: "pending" | "reviewed" | null;
+};
+
 export type Task = {
   title: string;
   id: string;
@@ -21,6 +28,7 @@ export type Task = {
   avatarUrl?: string | null;
   canDrag?: boolean;
   updatesCount?: number;
+  reviewProgress?: TaskReviewProgress;
   assignees?: { id: string; name: string | null; email: string | null; avatar_url?: string | null }[];
 };
 
