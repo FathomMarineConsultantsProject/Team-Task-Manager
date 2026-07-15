@@ -12,6 +12,10 @@ export type TaskReviewProgress = {
 export type Task = {
   title: string;
   id: string;
+  status?: string | null;
+  progress?: number | null;
+  completed_at?: string | null;
+  updated_at?: string | null;
   description?: string | null;
   start_date?: string | null;
   end_date?: string | null;

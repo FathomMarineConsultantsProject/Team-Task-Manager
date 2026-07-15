@@ -49,36 +49,39 @@ export async function PATCH(req: Request, { params }: RouteContext) {
       return json({ error: "Task not found." }, 404);
     }
 
-    const { data: project, error: projectError } = await adminClient
-      .from("projects")
-      .select("id, owner_id")
-      .eq("id", typedTask.project_id)
-      .single();
+    const [projectResult, membershipResult, profileResult, assigneeResult] = await Promise.all([
+      adminClient
+        .from("projects")
+        .select("id, owner_id")
+        .eq("id", typedTask.project_id)
+        .single(),
+      adminClient
+        .from("project_members")
+        .select("role")
+        .eq("project_id", typedTask.project_id)
+        .eq("user_id", user.id)
+        .maybeSingle(),
+      adminClient
+        .from("users")
+        .select("system_role")
+        .eq("id", user.id)
+        .maybeSingle(),
+      adminClient
+        .from("task_assignees")
+        .select("user_id")
+        .eq("task_id", taskId)
+        .eq("user_id", user.id)
+        .maybeSingle(),
+    ]);
 
-    const typedProject = project as ProjectRow | null;
-    if (projectError || !typedProject) {
+    const typedProject = projectResult.data as ProjectRow | null;
+    if (projectResult.error || !typedProject) {
       return json({ error: "Project not found." }, 404);
     }
 
-    const { data: leadMember } = await adminClient
-      .from("project_members")
-      .select("role")
-      .eq("project_id", typedTask.project_id)
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    const { data: profile } = await adminClient
-      .from("users")
-      .select("system_role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    const { data: taskAssignee } = await adminClient
-      .from("task_assignees")
-      .select("user_id")
-      .eq("task_id", taskId)
-      .eq("user_id", user.id)
-      .maybeSingle();
+    const leadMember = membershipResult.data;
+    const profile = profileResult.data;
+    const taskAssignee = assigneeResult.data;
 
     const isProjectOwner = typedProject.owner_id === user.id;
     const isProjectLead = normalizeRole((leadMember as { role: string | null } | null)?.role) === "lead";
@@ -131,11 +134,29 @@ export async function PATCH(req: Request, { params }: RouteContext) {
       .update(statusPayload)
       .eq("id", taskId)
       .eq("project_id", typedTask.project_id)
-      .select("id, status, draft_review_started_at, draft_review_due_at")
+      .select("id, status, completed_at, updated_at, draft_review_started_at, draft_review_due_at")
       .single();
 
     if (updateError) {
       return json({ error: updateError.message }, 500);
+    }
+
+    const { error: logError } = await adminClient.from("task_logs").insert([
+      {
+        task_id: taskId,
+        action: "moved",
+        from_status: previousStatus,
+        to_status: status,
+        user_id: user.id,
+      },
+    ]);
+
+    if (logError) {
+      console.warn("Failed to insert task status move log", {
+        taskId,
+        userId: user.id,
+        error: logError.message,
+      });
     }
 
     return json({ task: updatedTask, reviewCycleReset: enteredInReview });

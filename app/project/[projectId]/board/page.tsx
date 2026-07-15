@@ -90,12 +90,19 @@ type StatusUpdateResult = {
   task?: {
     id: string;
     status: string | null;
+    progress?: number | null;
+    completed_at: string | null;
+    updated_at: string | null;
     draft_review_started_at: string | null;
     draft_review_due_at: string | null;
   };
   error?: string;
   pendingReviewers?: string[];
 };
+
+type StatusUpdateOutcome =
+  | { success: true; task?: StatusUpdateResult["task"] }
+  | { success: false; error: string; pendingReviewers?: string[] };
 
 type TaskReviewRow = {
   task_id: string | null;
@@ -232,6 +239,7 @@ export default function ProjectBoardPage({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<ColumnId | null>(null);
   const [activeDrag, setActiveDrag] = useState<{ taskId: string; from: ColumnId } | null>(null);
+  const [pendingStatusTaskIds, setPendingStatusTaskIds] = useState<Set<string>>(() => new Set());
   
   // Project state (new)
   const [project, setProject] = useState<DbProject | null>(null);
@@ -255,6 +263,7 @@ export default function ProjectBoardPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [taskUpdateCounts, setTaskUpdateCounts] = useState<Record<string, number>>({});
   const [reviewProgressByTaskId, setReviewProgressByTaskId] = useState<Record<string, TaskReviewProgress>>({});
+  const [reviewProgressRefreshVersion, setReviewProgressRefreshVersion] = useState(0);
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
@@ -644,7 +653,7 @@ export default function ProjectBoardPage({
     return () => {
       isMounted = false;
     };
-  }, [inReviewTaskIds, profile?.id, supabase]);
+  }, [inReviewTaskIds, profile?.id, reviewProgressRefreshVersion, supabase]);
 
   const { openTaskDetails, renderTaskDetails } = useTaskDetailsWorkflow({
     supabase,
@@ -1557,6 +1566,10 @@ export default function ProjectBoardPage({
 
   const onTaskDragStart = useCallback(
     (taskId: string, from: ColumnId) => {
+      if (pendingStatusTaskIds.has(taskId)) {
+        return;
+      }
+
       const task = columns[from].find((item) => item.id === taskId);
       const canMove = canMoveTask(task?.assigneeId ?? null, task?.assignees, task?.start_date);
 
@@ -1567,7 +1580,7 @@ export default function ProjectBoardPage({
 
       setActiveDrag({ taskId, from });
     },
-    [columns, canMoveTask],
+    [columns, canMoveTask, pendingStatusTaskIds],
   );
 
   const onTaskDragEnd = useCallback(() => {
@@ -1576,58 +1589,51 @@ export default function ProjectBoardPage({
   }, []);
 
   const updateTaskStatus = useCallback(
-    async (taskId: string, destination: ColumnId, source: ColumnId) => {
+    async (taskId: string, destination: ColumnId, source: ColumnId): Promise<StatusUpdateOutcome> => {
       const sourceTask = columns[source].find((task) => task.id === taskId);
       const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees, sourceTask?.start_date);
 
       if (!canMove) {
         console.warn("Unauthorized action");
-        return null;
+        return { success: false, error: "You do not have permission to update this task status." };
       }
 
       const nextStatus = COLUMN_TO_STATUS[destination];
 
-      const { data: sessionData } = await supabase.auth.getSession();
-      const accessToken = sessionData.session?.access_token;
-      if (!accessToken) {
-        alert("Please sign in again to update task status.");
-        return null;
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+        if (!accessToken) {
+          return { success: false, error: "Please sign in again to update task status." };
+        }
+
+        const response = await fetch(`/api/tasks/${taskId}/status`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        const result = (await response.json()) as StatusUpdateResult;
+
+        if (!response.ok) {
+          return {
+            success: false,
+            error: result.error ?? "Failed to update task status.",
+            pendingReviewers: result.pendingReviewers,
+          };
+        }
+
+        return { success: true, task: result.task };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Failed to update task status.",
+        };
       }
-
-      const response = await fetch(`/api/tasks/${taskId}/status`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      const result = (await response.json()) as StatusUpdateResult;
-
-      if (!response.ok) {
-        const pendingNames = result.pendingReviewers?.filter(Boolean) ?? [];
-        alert(pendingNames.length > 0 ? `Pending reviews: ${pendingNames.join(", ")}` : result.error ?? "Failed to update task status.");
-        return null;
-      }
-
-      const { data: authData } = await supabase.auth.getUser();
-      const currentUserId = authData.user?.id;
-      if (!currentUserId) {
-        console.error("Task log insert skipped: missing authenticated user");
-        return result.task ?? null;
-      }
-
-      await insertTaskLog({
-        taskId,
-        action: "moved",
-        fromStatus: COLUMN_TO_STATUS[source],
-        toStatus: COLUMN_TO_STATUS[destination],
-        userId: currentUserId,
-      });
-
-      return result.task ?? null;
     },
-    [supabase, columns, canMoveTask, insertTaskLog],
+    [supabase, columns, canMoveTask],
   );
 
   const onColumnDrop = useCallback(
@@ -1637,6 +1643,12 @@ export default function ProjectBoardPage({
       }
 
       const { taskId, from } = activeDrag;
+
+      if (pendingStatusTaskIds.has(taskId)) {
+        setActiveDrag(null);
+        setDragOverColumn(null);
+        return;
+      }
 
       if (from === destination) {
         setActiveDrag(null);
@@ -1653,37 +1665,98 @@ export default function ProjectBoardPage({
         return;
       }
 
-      void (async () => {
-        const updatedTask = await updateTaskStatus(taskId, destination, from);
-        if (!updatedTask) return;
+      const originalIndex = columns[from].findIndex((task) => task.id === taskId);
+      const optimisticTask: Task = {
+        ...sourceTask,
+        status: COLUMN_TO_STATUS[destination],
+        statusLabel: STATUS_LABEL[destination],
+        accent: COLUMN_ACCENT[destination],
+      };
 
-        setColumns((current) => {
-          const sourceTasks = current[from];
-          const movedTask = sourceTasks.find((task) => task.id === taskId);
-          if (!movedTask) {
-            return current;
+      setPendingStatusTaskIds((current) => {
+        const next = new Set(current);
+        next.add(taskId);
+        return next;
+      });
+
+      // Optimistic move: update the board before waiting for the status API.
+      setColumns((current) => ({
+        ...current,
+        [from]: current[from].filter((task) => task.id !== taskId),
+        [destination]: [
+          optimisticTask,
+          ...current[destination].filter((task) => task.id !== taskId),
+        ],
+      }));
+
+      void (async () => {
+        try {
+          const result = await updateTaskStatus(taskId, destination, from);
+
+          if (!result.success) {
+            // Roll back only this task so other concurrent task moves are preserved.
+            setColumns((current) => {
+              const withoutTask = createEmptyColumns();
+              BOARD_COLUMNS.forEach((column) => {
+                withoutTask[column.id] = current[column.id].filter((task) => task.id !== taskId);
+              });
+              const sourceTasks = withoutTask[from];
+              const rollbackIndex = Math.max(0, Math.min(originalIndex, sourceTasks.length));
+
+              return {
+                ...withoutTask,
+                [from]: [
+                  ...sourceTasks.slice(0, rollbackIndex),
+                  sourceTask,
+                  ...sourceTasks.slice(rollbackIndex),
+                ],
+              };
+            });
+
+            const pendingNames = result.pendingReviewers?.filter(Boolean) ?? [];
+            alert(
+              pendingNames.length > 0
+                ? `Pending reviews: ${pendingNames.join(", ")}`
+                : result.error ?? "All assigned reviewers must complete their review before this task can be moved to Done.",
+            );
+            return;
           }
 
-          return {
-            ...current,
-            [from]: sourceTasks.filter((task) => task.id !== taskId),
-            [destination]: [
-              {
-                ...movedTask,
-                statusLabel: STATUS_LABEL[destination],
-                accent: COLUMN_ACCENT[destination],
-                draft_review_started_at: updatedTask.draft_review_started_at ?? movedTask.draft_review_started_at,
-                draft_review_due_at: updatedTask.draft_review_due_at ?? movedTask.draft_review_due_at,
-              },
-              ...current[destination],
-            ],
-          };
-        });
+          if (result.task) {
+            const updatedTask = result.task;
+            setColumns((current) => ({
+              ...current,
+              [destination]: current[destination].map((task) =>
+                task.id === taskId
+                  ? {
+                      ...task,
+                      status: updatedTask.status,
+                      ...(updatedTask.progress !== undefined ? { progress: updatedTask.progress } : {}),
+                      completed_at: updatedTask.completed_at,
+                      updated_at: updatedTask.updated_at,
+                      draft_review_started_at: updatedTask.draft_review_started_at,
+                      draft_review_due_at: updatedTask.draft_review_due_at,
+                    }
+                  : task,
+              ),
+            }));
+          }
+
+          if (from === "review" || destination === "review") {
+            setReviewProgressRefreshVersion((current) => current + 1);
+          }
+        } finally {
+          setPendingStatusTaskIds((current) => {
+            const next = new Set(current);
+            next.delete(taskId);
+            return next;
+          });
+        }
       })();
       setActiveDrag(null);
       setDragOverColumn(null);
     },
-    [activeDrag, canMoveTask, columns, updateTaskStatus],
+    [activeDrag, canMoveTask, columns, pendingStatusTaskIds, updateTaskStatus],
   );
 
   const onRemoveTask = useCallback((taskId: string, column: ColumnId) => {
@@ -1769,6 +1842,7 @@ export default function ProjectBoardPage({
           },
         };
       });
+      setReviewProgressRefreshVersion((current) => current + 1);
     },
     [supabase],
   );
@@ -2582,6 +2656,7 @@ export default function ProjectBoardPage({
                 tasks={sorted.map((task) => ({
                   ...task,
                   reviewProgress: reviewProgressByTaskId[task.id],
+                  canDrag: Boolean(task.canDrag && !pendingStatusTaskIds.has(task.id)),
                 }))}
                 isDragOver={dragOverColumn === column.id}
                 onColumnDragOver={setDragOverColumn}
