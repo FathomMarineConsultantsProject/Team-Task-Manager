@@ -1,25 +1,37 @@
 'use client';
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { LayoutDashboard, ListChecks, Map, Table2, FileText, Users } from "lucide-react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { BarChart3, LayoutDashboard, ListChecks, Map, Table2, FileText, Users, type LucideIcon } from "lucide-react";
 import { useAppData } from "@/components/providers/AppDataProvider";
 
-const navLinks = [
+type NavLink = {
+  label: string;
+  href: string;
+  icon: LucideIcon;
+  activeMode?: "statistics" | "report-generator";
+};
+
+const navLinks: NavLink[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Backlog", href: "/backlog", icon: ListChecks },
   { label: "Roadmap", href: "/roadmap", icon: Map },
   { label: "Spreadsheet", href: "/spreadsheet", icon: Table2 },
-  { label: "Reports", href: "/dashboard/reports", icon: FileText },
+  { label: "Statistics", href: "/dashboard/reports", icon: BarChart3, activeMode: "statistics" },
+  { label: "Report Generator", href: "/dashboard/reports?tab=report", icon: FileText, activeMode: "report-generator" },
 ];
 
 const linkBaseClass = "flex items-center justify-between rounded-2xl px-3 py-2.5 text-[13px] font-medium transition";
 
 export default function Sidebar() {
   const pathname = usePathname() || "/dashboard";
+  const searchParams = useSearchParams();
+  const reportsTab = searchParams.get("tab");
+  const isReportGeneratorMode = reportsTab === "report" || reportsTab === "ai";
+  const isReportsRoute = pathname === "/dashboard/reports";
   const isProjectRoute = pathname.startsWith("/project/");
   const { profile } = useAppData();
   const isAdmin = (profile?.system_role ?? profile?.role ?? "").toLowerCase() === "admin";
-  const links = [
+  const links: NavLink[] = [
     ...navLinks,
     ...(isAdmin ? [{ label: "Employees", href: "/dashboard/employees", icon: Users }] : []),
   ];
@@ -40,7 +52,13 @@ export default function Sidebar() {
         {links.map((link) => {
           const Icon = link.icon;
           const isDashboardLike = link.href === "/dashboard" && (pathname === "/dashboard" || isProjectRoute);
-          const active = link.href !== "/dashboard" ? pathname.startsWith(link.href) : isDashboardLike;
+          const active = link.activeMode === "statistics"
+            ? isReportsRoute && !isReportGeneratorMode
+            : link.activeMode === "report-generator"
+              ? isReportsRoute && isReportGeneratorMode
+              : link.href !== "/dashboard"
+                ? pathname.startsWith(link.href)
+                : isDashboardLike;
           const navClass = [
             linkBaseClass,
             active ? "bg-white/90 text-slate-900" : "text-slate-300 hover:bg-white/5",

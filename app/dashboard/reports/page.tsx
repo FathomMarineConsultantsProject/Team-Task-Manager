@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   BarChart3,
   TrendingUp,
@@ -85,6 +86,24 @@ type ProjectReviewerInfo = {
     | null;
 };
 type TabId = "overview" | "board" | "doclist" | "activity" | "ai";
+
+function getTabFromQuery(value: string | null): TabId {
+  switch (value) {
+    case "board":
+      return "board";
+    case "doclist":
+      return "doclist";
+    case "activity":
+      return "activity";
+    case "report":
+    case "ai":
+      return "ai";
+    case "overview":
+    default:
+      return "overview";
+  }
+}
+
 type ReportScope = "last_week_progress" | "last_week_activity" | "this_week" | "this_month" | "full_project";
 type TaskSelectionMode = "all" | "selected";
 
@@ -1918,7 +1937,10 @@ function AssessmentList({ title, items }: { title: string; items: string[] }) {
 
 export default function ReportsPage() {
   const { profile, supabase } = useAppData();
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const router = useRouter();
+  const pathname = usePathname() || "/dashboard/reports";
+  const searchParams = useSearchParams();
+  const activeTab = getTabFromQuery(searchParams.get("tab"));
   const [projectFilter, setProjectFilter] = useState("all");
   const [allProjects, setAllProjects] = useState<ProjectInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -2878,6 +2900,19 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
     { id: "ai", label: "Report", icon: FileText },
   ];
 
+  const handleTabChange = useCallback((tab: TabId) => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (tab === "overview") {
+      params.delete("tab");
+    } else {
+      params.set("tab", tab === "ai" ? "report" : tab);
+    }
+
+    const query = params.toString();
+    router.push(`${pathname}${query ? `?${query}` : ""}`, { scroll: false });
+  }, [pathname, router, searchParams]);
+
   // ════════════════════════════════════════════════
   // ── RENDER ─────────────────────────────────────
   // ════════════════════════════════════════════════
@@ -2888,7 +2923,9 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-[11px] font-medium uppercase tracking-[0.25em] text-slate-400">Analytics</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-[-0.02em] text-slate-900">Reports</h1>
+          <h1 className="mt-2 text-3xl font-semibold tracking-[-0.02em] text-slate-900">
+            {activeTab === "ai" ? "Report Generator" : "Statistics"}
+          </h1>
         </div>
         <div className="flex flex-col items-end gap-2">
           <div className="flex items-center gap-1.5 rounded-xl border border-slate-200/60 bg-white/80 px-3 py-2 shadow-[0_8px_24px_-16px_rgba(15,23,42,0.5)] backdrop-blur-sm -translate-y-2">
@@ -2942,7 +2979,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => handleTabChange(tab.id)}
               className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${active
                   ? "bg-white text-slate-900 shadow-sm"
                   : "text-slate-500 hover:text-slate-700"
