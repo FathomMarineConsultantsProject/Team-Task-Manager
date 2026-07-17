@@ -4,6 +4,8 @@ import { Clock, MessageSquare, MoreHorizontal } from "lucide-react";
 import type { ColumnId, Task } from "./types";
 import Avatar from "@/components/ui/Avatar";
 import { workingDaysUntil } from "@/lib/workingDays";
+import { formatDuration } from "@/lib/manHours";
+import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 
 interface TaskCardProps extends Task {
   columnId: ColumnId;
@@ -18,6 +20,7 @@ interface TaskCardProps extends Task {
   canClaim?: boolean;
   canDelete?: boolean;
   canEdit?: boolean;
+  manHoursSummary?: LiveTaskManHoursSummary;
 }
 
 const STATUS_TONES: Record<string, { border: string; glow: string; pill: string }> = {
@@ -50,7 +53,7 @@ const formatDueDelta = (ms: number) => {
   return `${minutes}m`;
 };
 
-export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, onMarkReviewed, canClaim = false, canDelete = true, canEdit = false, onDragStart, onDragEnd, ...task }: TaskCardProps) {
+export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, onMarkReviewed, canClaim = false, canDelete = true, canEdit = false, manHoursSummary, onDragStart, onDragEnd, ...task }: TaskCardProps) {
   const [isRemoving, setIsRemoving] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [isMarkingReviewed, setIsMarkingReviewed] = useState(false);
@@ -290,6 +293,15 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
           {showReviewBadge && reviewBadgeText ? (
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${reviewProgress?.pending === 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
               {reviewBadgeText}
+            </span>
+          ) : null}
+          {manHoursSummary?.trackingState === "tracked" ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700"
+              title="Total tracked man-hours"
+            >
+              <Clock size={11} />
+              MH {formatDuration(manHoursSummary.liveTotalManHoursSeconds)}
             </span>
           ) : null}
         </div>

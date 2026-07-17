@@ -9,6 +9,8 @@ import TaskDependencies from "@/components/tasks/TaskDependencies";
 import TaskLinks from "@/components/tasks/TaskLinks";
 import TaskReviewApprovals from "@/components/tasks/TaskReviewApprovals";
 import LinkifiedText from "@/components/ui/LinkifiedText";
+import TaskManHoursPanel from "@/components/tasks/TaskManHoursPanel";
+import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 
 export type TaskDetailsSeed = {
   id: string;
@@ -145,6 +147,7 @@ type WorkflowOptions = {
   canAddUpdate?: boolean;
   canViewUpdates?: boolean;
   onTaskUpdated?: () => void | Promise<void>;
+  manHoursByTaskId?: Map<string, LiveTaskManHoursSummary>;
 };
 
 const formatDateLabel = (value: string | null | undefined) => {
@@ -231,6 +234,7 @@ export function useTaskDetailsWorkflow({
   canAddUpdate = true,
   canViewUpdates = true,
   onTaskUpdated,
+  manHoursByTaskId,
 }: WorkflowOptions) {
   const [selectedTaskDetails, setSelectedTaskDetails] = useState<TaskDetailsState | null>(null);
   const [taskLogs, setTaskLogs] = useState<TaskLogEntry[]>([]);
@@ -247,6 +251,7 @@ export function useTaskDetailsWorkflow({
   const [linksCount, setLinksCount] = useState<number | null>(null);
   const taskId = selectedTaskDetails?.id ?? null;
   const projectId = selectedTaskDetails?.projectId ?? null;
+  const selectedTaskManHours = taskId ? manHoursByTaskId?.get(taskId) : undefined;
   const chatMembers = useMemo(() => {
     const merged = new Map<string, TaskDetailMember>();
     [...projectMembers, ...members].forEach((member) => {
@@ -753,6 +758,8 @@ export function useTaskDetailsWorkflow({
                 </p>
               </div>
 
+              {selectedTaskManHours ? <TaskManHoursPanel summary={selectedTaskManHours} variant="inline" /> : null}
+
               {selectedTaskDetails.description && (
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">Description</p>
@@ -957,6 +964,8 @@ export function useTaskDetailsWorkflow({
           </div>
         )}
       </Modal>
+
+      {selectedTaskDetails && selectedTaskManHours ? <TaskManHoursPanel summary={selectedTaskManHours} /> : null}
 
       <ChatPanel
         isOpen={Boolean(selectedTaskDetails)}

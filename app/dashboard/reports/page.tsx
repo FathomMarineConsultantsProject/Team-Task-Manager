@@ -28,6 +28,12 @@ import { normalizeStatus, STATUS_CONFIG } from "@/lib/statusConfig";
 import { getTaskBarSpan, startOfWeek, endOfWeek } from "@/lib/roadmap";
 import { workingDaysUntil } from "@/lib/workingDays";
 import {
+  formatDuration as formatManHours,
+  type ProjectManHoursResponse,
+  type ReportEffortData,
+  type ReportEffortTaskSummary,
+} from "@/lib/manHours";
+import {
   computeKPIs,
   computeStatusDistribution,
   computeWorkload,
@@ -426,6 +432,8 @@ type ExecutiveReportData = {
   draftReviewTasks?: DetailedTaskRegisterItem[];
   pendingInputTasks?: DetailedTaskRegisterItem[];
   recommendations: string[];
+  effort?: ReportEffortData;
+  effortStatus?: "ready" | "loading" | "error" | "unsupported";
 };
 
 type UserWorkHistoryItem = ReportTaskItem & {
@@ -798,6 +806,12 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
       ? `Review the next ${Math.min(upcomingCount, 3)} upcoming ${upcomingCount === 1 ? "deliverable" : "deliverables"} with stakeholders and confirm whether any client input is needed.`
       : "Review the next planned deliverables with stakeholders and confirm whether any client input is needed before work advances.",
   ];
+  const generatedRecommendations = report.recommendations.filter((item) => item.trim()).slice(0, 5);
+  if (generatedRecommendations[0]) deliveryFocus.unshift(generatedRecommendations[0]);
+  if (generatedRecommendations[1]) priorityActions.unshift(generatedRecommendations[1]);
+  if (generatedRecommendations[2]) scheduleConfidence.unshift(generatedRecommendations[2]);
+  if (generatedRecommendations[3]) clientNextSteps.unshift(generatedRecommendations[3]);
+  if (generatedRecommendations[4]) clientNextSteps.splice(1, 0, generatedRecommendations[4]);
 
   return [
     { title: "Delivery Focus", color: "#2563eb", bullets: deliveryFocus.slice(0, 4) },
@@ -856,6 +870,78 @@ function getReportScopeWindow(scope: ReportScope, now = new Date()): ReportScope
   }
 
   return { scope, label: "This Week", start: currentWeekStart, end: endOfWeek(currentWeekStart) };
+}
+
+function toExclusiveRangeEnd(window: ReportScopeWindow) {
+  return window.end ? new Date(window.end.getTime() + 1).toISOString() : null;
+}
+
+function deriveReportEffort(
+  response: ProjectManHoursResponse,
+  window: ReportScopeWindow,
+  includedTaskIds: Set<string>,
+): ReportEffortData {
+  const tasks: ReportEffortTaskSummary[] = response.tasks
+    .filter((task) => includedTaskIds.has(task.taskId))
+    .map(({ taskTitle, ...task }) => ({ ...task, title: taskTitle }));
+  const trackedTasks = tasks.filter((task) => task.trackingState === "tracked");
+  const completedTrackedTasks = trackedTasks.filter((task) => normalizeStatus(task.status) === "done");
+  const teamMap = new Map<string, {
+    userId: string | null;
+    name: string;
+    manHoursSeconds: number;
+    activeTaskIds: Set<string>;
+    completedTaskIds: Set<string>;
+  }>();
+
+  trackedTasks.forEach((task) => {
+    task.assignees.forEach((assignee) => {
+      const key = assignee.userId ? `id:${assignee.userId}` : `name:${assignee.name.trim().toLowerCase()}`;
+      const current = teamMap.get(key) ?? {
+        userId: assignee.userId,
+        name: assignee.name || "Unassigned",
+        manHoursSeconds: 0,
+        activeTaskIds: new Set<string>(),
+        completedTaskIds: new Set<string>(),
+      };
+      current.manHoursSeconds += assignee.manHoursSeconds;
+      if (normalizeStatus(task.status) === "done") current.completedTaskIds.add(task.taskId);
+      else current.activeTaskIds.add(task.taskId);
+      teamMap.set(key, current);
+    });
+  });
+
+  const totalManHoursSeconds = trackedTasks.reduce((sum, task) => sum + task.totalManHoursSeconds, 0);
+  const completedManHoursSeconds = completedTrackedTasks.reduce((sum, task) => sum + task.totalManHoursSeconds, 0);
+  const team = Array.from(teamMap.values())
+    .map((member) => ({
+      userId: member.userId,
+      name: member.name,
+      manHoursSeconds: member.manHoursSeconds,
+      activeTaskCount: member.activeTaskIds.size,
+      completedTaskCount: member.completedTaskIds.size,
+      sharePercent: totalManHoursSeconds > 0 ? Math.round(member.manHoursSeconds / totalManHoursSeconds * 100) : 0,
+    }))
+    .sort((left, right) => right.manHoursSeconds - left.manHoursSeconds || left.name.localeCompare(right.name));
+
+  return {
+    asOf: response.asOf,
+    rangeLabel: window.label,
+    rangeStart: window.start?.toISOString() ?? null,
+    rangeEndExclusive: toExclusiveRangeEnd(window),
+    activeWorkDurationSeconds: trackedTasks.reduce((sum, task) => sum + task.activeDurationSeconds, 0),
+    totalManHoursSeconds,
+    runningTaskCount: trackedTasks.filter((task) => task.isRunning).length,
+    completedTrackedTaskCount: completedTrackedTasks.length,
+    averageCompletedTaskManHoursSeconds: completedTrackedTasks.length > 0
+      ? Math.floor(completedManHoursSeconds / completedTrackedTasks.length)
+      : 0,
+    highestEffortTasks: [...trackedTasks]
+      .sort((left, right) => right.totalManHoursSeconds - left.totalManHoursSeconds || left.title.localeCompare(right.title))
+      .slice(0, 5),
+    team,
+    tasks,
+  };
 }
 
 function isWithinScope(value: string | null | undefined, window: ReportScopeWindow) {
@@ -1150,6 +1236,59 @@ function TaskTable({ tasks, emptyLabel = "No tasks" }: { tasks: ReportTaskItem[]
   );
 }
 
+function ReportEffortSection({ report, clientSafe = false }: { report: ExecutiveReportData; clientSafe?: boolean }) {
+  const title = clientSafe ? "Tracked Project Effort" : "Man-Hours & Effort";
+  const effort = report.effort;
+  if (report.effortStatus === "loading") {
+    return <ReportSection title={title}><div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">Loading tracked effort...</div></ReportSection>;
+  }
+  if (report.effortStatus === "error") {
+    return <ReportSection title={title}><div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-800">Man-hour data could not be loaded.</div></ReportSection>;
+  }
+  if (!effort || (effort.tasks.every((task) => task.trackingState === "untracked") && effort.totalManHoursSeconds === 0)) {
+    return <ReportSection title={title}><div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">No tracked man-hour data is available for this period.</div></ReportSection>;
+  }
+
+  const taskRows = [...effort.tasks]
+    .sort((left, right) => Number(right.trackingState === "tracked") - Number(left.trackingState === "tracked") || right.totalManHoursSeconds - left.totalManHoursSeconds)
+    .slice(0, 10);
+  return (
+    <ReportSection title={title}>
+      <p className="mb-4 text-xs text-slate-500">{effort.rangeLabel} - measured through {formatDate(effort.asOf)}</p>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <MiniMetric label={clientSafe ? "Total Tracked Man-Hours" : "Total Man-Hours"} value={formatManHours(effort.totalManHoursSeconds)} tone="green" />
+        <MiniMetric label="Active Work Duration" value={formatManHours(effort.activeWorkDurationSeconds)} tone="blue" />
+        <MiniMetric label="Running Tasks" value={effort.runningTaskCount} tone={effort.runningTaskCount ? "amber" : "green"} />
+        <MiniMetric label="Average Completed Effort" value={formatManHours(effort.averageCompletedTaskManHoursSeconds)} tone="blue" />
+      </div>
+      <div className={`mt-5 grid gap-5 ${clientSafe ? "" : "xl:grid-cols-2"}`}>
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Highest-Effort Tasks</p>
+          <div className="overflow-hidden rounded-lg border border-slate-200"><table className="w-full text-xs">
+            <thead className="bg-slate-50 text-left text-[9px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-3 py-2">Task</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Active</th><th className="px-3 py-2 text-right">Total</th></tr></thead>
+            <tbody>{effort.highestEffortTasks.map((task) => <tr key={task.taskId} className="border-t border-slate-100"><td className="break-words px-3 py-2 font-medium text-slate-900">{task.title}</td><td className="px-3 py-2 text-slate-600">{friendlyStatus(task.status)}{task.isRunning ? " - Running" : ""}</td><td className="px-3 py-2 text-right text-slate-700">{formatManHours(task.activeDurationSeconds)}</td><td className="px-3 py-2 text-right font-semibold text-slate-800">{formatManHours(task.totalManHoursSeconds)}</td></tr>)}</tbody>
+          </table></div>
+        </div>
+        {!clientSafe && <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Individual Team Effort</p>
+          <div className="overflow-hidden rounded-lg border border-slate-200"><table className="w-full text-xs">
+            <thead className="bg-slate-50 text-left text-[9px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-3 py-2">Member</th><th className="px-3 py-2 text-right">Effort</th><th className="px-3 py-2 text-right">Share</th><th className="px-3 py-2 text-right">Active</th></tr></thead>
+            <tbody>{effort.team.map((member) => <tr key={member.userId ?? member.name} className="border-t border-slate-100"><td className="px-3 py-2 font-medium text-slate-900">{member.name}</td><td className="px-3 py-2 text-right">{formatManHours(member.manHoursSeconds)}</td><td className="px-3 py-2 text-right">{member.sharePercent}%</td><td className="px-3 py-2 text-right">{member.activeTaskCount}</td></tr>)}</tbody>
+          </table></div>
+        </div>}
+      </div>
+      <div className="mt-5">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">Task Effort Details</p>
+        <div className="overflow-x-auto rounded-lg border border-slate-200"><table className="w-full min-w-[620px] text-xs">
+          <thead className="bg-slate-50 text-left text-[9px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-3 py-2">Task</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Active Work</th><th className="px-3 py-2 text-right">Total Effort</th>{!clientSafe && <th className="px-3 py-2">Assignees</th>}</tr></thead>
+          <tbody>{taskRows.map((task) => <tr key={task.taskId} className="border-t border-slate-100 align-top"><td className="break-words px-3 py-2 font-medium text-slate-900">{task.title}</td><td className="px-3 py-2 text-slate-600">{friendlyStatus(task.status)}{task.isRunning ? " - Running" : ""}</td><td className="px-3 py-2 text-right">{task.trackingState === "tracked" ? formatManHours(task.activeDurationSeconds) : "Not tracked"}</td><td className="px-3 py-2 text-right font-semibold">{task.trackingState === "tracked" ? formatManHours(task.totalManHoursSeconds) : "Not tracked"}</td>{!clientSafe && <td className="px-3 py-2 text-slate-600">{task.assignees.map((assignee) => `${assignee.name} (${formatManHours(assignee.manHoursSeconds)})`).join(", ") || "Unassigned"}</td>}</tr>)}</tbody>
+        </table></div>
+        {effort.tasks.length > taskRows.length && <p className="mt-2 text-xs text-slate-500">Showing 10 of {effort.tasks.length} tasks. The PDF includes the full effort table.</p>}
+      </div>
+    </ReportSection>
+  );
+}
+
 function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
   if (report.audience === "client") return <ClientExecutiveReport report={report} />;
 
@@ -1294,6 +1433,8 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
           </div>
         </ReportSection>
       </div>
+
+      <ReportEffortSection report={report} />
 
       {/* ── 6. Gantt Timeline ── */}
       <ReportSection title="6. Gantt Timeline">
@@ -1679,6 +1820,8 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         </div>
       </ReportSection>
 
+      <ReportEffortSection report={report} clientSafe />
+
       <ReportSection title="Project Timeline">
         {report.gantt.tasks.length === 0 ? <div className="text-sm text-slate-400">No tasks with date ranges.</div> : (
           <div className="overflow-x-auto">
@@ -1967,6 +2110,10 @@ export default function ReportsPage() {
   const [selectedTaskSearch, setSelectedTaskSearch] = useState("");
   const [aiReportError, setAiReportError] = useState<string | null>(null);
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [manHoursData, setManHoursData] = useState<ProjectManHoursResponse | null>(null);
+  const [manHoursDataKey, setManHoursDataKey] = useState<string | null>(null);
+  const [manHoursLoading, setManHoursLoading] = useState(false);
+  const [manHoursError, setManHoursError] = useState<string | null>(null);
 
   // Report status filter
   const [reportStatusFilter, setReportStatusFilter] = useState<ReportStatusKey | "all">("all");
@@ -2255,6 +2402,56 @@ export default function ReportsPage() {
   // Report generation
   const [aiProjectFilter, setAiProjectFilter] = useState("all");
   const [aiUserFilter, setAiUserFilter] = useState("all");
+  const manHoursScope = useMemo(
+    () => getReportScopeWindow(reportAudience === "client" ? reportScope : "full_project"),
+    [reportAudience, reportScope],
+  );
+  const manHoursQueryKey = `${aiProjectFilter}|${manHoursScope.start?.toISOString() ?? "all"}|${toExclusiveRangeEnd(manHoursScope) ?? "all"}`;
+
+  useEffect(() => {
+    if (aiReportType !== "project" || aiProjectFilter === "all" || !profile?.id) {
+      setManHoursData(null);
+      setManHoursDataKey(null);
+      setManHoursError(null);
+      setManHoursLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const loadManHours = async () => {
+      setManHoursLoading(true);
+      setManHoursError(null);
+      setManHoursData(null);
+      setManHoursDataKey(null);
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData.session?.access_token;
+        if (!token) throw new Error("Authentication is required");
+        const params = new URLSearchParams();
+        if (manHoursScope.start) params.set("rangeStart", manHoursScope.start.toISOString());
+        const rangeEndExclusive = toExclusiveRangeEnd(manHoursScope);
+        if (rangeEndExclusive) params.set("rangeEndExclusive", rangeEndExclusive);
+        const query = params.toString();
+        const response = await fetch(`/api/projects/${aiProjectFilter}/man-hours${query ? `?${query}` : ""}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Man-hour request failed (${response.status})`);
+        const data = await response.json() as ProjectManHoursResponse;
+        if (!data || !Array.isArray(data.tasks) || !data.projectTotals) throw new Error("Invalid man-hour response");
+        setManHoursData(data);
+        setManHoursDataKey(manHoursQueryKey);
+      } catch (loadError) {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        console.warn("Report man-hours unavailable", loadError);
+        setManHoursError("Man-hour data could not be loaded.");
+      } finally {
+        if (!controller.signal.aborted) setManHoursLoading(false);
+      }
+    };
+    void loadManHours();
+    return () => controller.abort();
+  }, [aiProjectFilter, aiReportType, manHoursQueryKey, manHoursScope, profile?.id, supabase]);
 
   // Reset user filter when project changes
   useEffect(() => {
@@ -2470,6 +2667,18 @@ Utilization: ${utilizationScore}%`;
         ? buildScopedClientTasks(aiTasks, reportLogs, comments, reportScope, selectedIdsForReport)
         : { tasks: aiTasks, window: getReportScopeWindow("full_project" as ReportScope) };
       aiTasks = clientScope.tasks;
+      const effort = manHoursData && manHoursDataKey === manHoursQueryKey && aiProjectFilter !== "all"
+        ? deriveReportEffort(manHoursData, clientScope.window, new Set(aiTasks.map((task) => task.id)))
+        : undefined;
+      const effortStatus: ExecutiveReportData["effortStatus"] = aiProjectFilter === "all"
+        ? "unsupported"
+        : manHoursLoading
+          ? "loading"
+          : manHoursError
+            ? "error"
+            : effort
+              ? "ready"
+              : "error";
 
       const pendingDependenciesByTaskId = new Map<string, TaskDependency[]>();
       if (reportAudience === "client" && aiTasks.length > 0) {
@@ -2607,27 +2816,83 @@ Utilization: ${utilizationScore}%`;
         overdueCount: overdueItems.length,
         nearDueCount: nearDueItems.length,
         staleCount: staleItems.length,
-        overloadedUsers: overloaded.length,
+        overloadedUsers: reportAudience === "internal" ? overloaded.length : 0,
         completionRate: aiReportKpis.completionRate,
       });
 
-      if (reportAudience === "internal") {
-        try {
-          const selectedUser = aiUserFilter !== "all" ? users.find((u) => u.id === aiUserFilter) : null;
-          const reportPrompt = `Generate PMO executive recommendations only. Return 5 concise bullet recommendations, no introduction.
-Project: ${projectName}
-Focus user: ${selectedUser?.name ?? "All users"}
-Completion: ${aiReportKpis.completionRate}%
-Overdue tasks: ${overdueItems.length}
-Near due tasks: ${nearDueItems.length}
-Stale tasks: ${staleItems.length}
-Overloaded users: ${overloaded.map((u) => u.name).join(", ") || "None"}
-Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.owner})`).join("; ") || "None"}`;
+      try {
+          const selectedUser = reportAudience === "internal" && aiUserFilter !== "all" ? users.find((u) => u.id === aiUserFilter) : null;
+          const effortTasksById = new Map((effort?.tasks ?? []).map((task) => [task.taskId, task]));
+          const highEffortTasks = [...(effort?.tasks ?? [])]
+            .filter((task) => task.trackingState === "tracked")
+            .sort((left, right) => right.totalManHoursSeconds - left.totalManHoursSeconds)
+            .slice(0, 10)
+            .map((task) => ({ taskId: task.taskId, title: task.title, status: task.status, totalManHoursSeconds: task.totalManHoursSeconds }));
+          const longRunningTasks = [...(effort?.tasks ?? [])]
+            .filter((task) => task.trackingState === "tracked" && task.activeDurationSeconds > 0 && normalizeStatus(task.status) !== "done")
+            .sort((left, right) => right.activeDurationSeconds - left.activeDurationSeconds)
+            .slice(0, 10)
+            .map((task) => ({ taskId: task.taskId, title: task.title, status: task.status, activeDurationSeconds: task.activeDurationSeconds }));
+          const lowProgressHighEffortTasks = taskRegister
+            .map((task) => ({ task, effort: effortTasksById.get(task.id) }))
+            .filter((item) => item.effort?.trackingState === "tracked" && item.task.progress <= 50 && (item.effort?.totalManHoursSeconds ?? 0) > 0)
+            .sort((left, right) => (right.effort?.totalManHoursSeconds ?? 0) - (left.effort?.totalManHoursSeconds ?? 0))
+            .slice(0, 10)
+            .map(({ task, effort: taskEffort }) => ({ taskId: task.id, title: task.title, progress: task.progress, totalManHoursSeconds: taskEffort?.totalManHoursSeconds ?? 0 }));
+          const trackedEffortTasks = [...(effort?.tasks ?? [])].filter((task) => task.trackingState === "tracked");
+          const positiveActiveDurations = trackedEffortTasks.map((task) => task.activeDurationSeconds).filter((seconds) => seconds > 0).sort((left, right) => left - right);
+          const positiveTotalEffort = trackedEffortTasks.map((task) => task.totalManHoursSeconds).filter((seconds) => seconds > 0).sort((left, right) => left - right);
+          const medianActiveDuration = positiveActiveDurations[Math.floor(positiveActiveDurations.length / 2)] ?? Number.POSITIVE_INFINITY;
+          const medianTotalEffort = positiveTotalEffort[Math.floor(positiveTotalEffort.length / 2)] ?? Number.POSITIVE_INFINITY;
+          const reviewBottlenecks = taskRegister
+            .filter((task) => {
+              if (!["draft_review", "in_review"].includes(task.workflowStatusKey ?? normalizeStatus(task.status))) return false;
+              const taskEffort = effortTasksById.get(task.id);
+              return Boolean(taskEffort && (taskEffort.activeDurationSeconds >= medianActiveDuration || taskEffort.totalManHoursSeconds >= medianTotalEffort));
+            })
+            .sort((left, right) => (effortTasksById.get(right.id)?.activeDurationSeconds ?? 0) - (effortTasksById.get(left.id)?.activeDurationSeconds ?? 0))
+            .slice(0, 10)
+            .map((task) => ({ taskId: task.id, title: task.title, status: task.status, activeDurationSeconds: effortTasksById.get(task.id)?.activeDurationSeconds ?? 0 }));
+          const orderedTeamEffort = effort?.team.map((member) => member.manHoursSeconds).sort((left, right) => left - right) ?? [];
+          const medianTeamEffort = orderedTeamEffort.length > 0 ? orderedTeamEffort[Math.floor(orderedTeamEffort.length / 2)] : 0;
+          const highestTeamEffort = orderedTeamEffort.at(-1) ?? 0;
+          const workloadImbalance = effort && effort.team.length >= 3 && effort.totalManHoursSeconds >= 3600 && medianTeamEffort > 0 && highestTeamEffort / medianTeamEffort >= 2
+            ? { highestToMedianRatio: Number((highestTeamEffort / medianTeamEffort).toFixed(2)), highestSharePercent: effort.team[0]?.sharePercent ?? 0, sampleSize: effort.team.length }
+            : null;
 
           const res = await fetch("/api/ai/report", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: reportPrompt }),
+            body: JSON.stringify({
+              kind: "project_manager_recommendation",
+              audience: reportAudience,
+              project: {
+                id: aiProjectFilter,
+                name: projectName,
+                focusUser: reportAudience === "internal" ? selectedUser?.name ?? null : undefined,
+                rangeLabel: clientScope.window.label,
+                rangeStart: clientScope.window.start?.toISOString() ?? null,
+                rangeEndExclusive: toExclusiveRangeEnd(clientScope.window),
+              },
+              progress: {
+                completionRate: aiReportKpis.completionRate,
+                overdueTaskCount: overdueItems.length,
+                nearDueTaskCount: nearDueItems.length,
+                staleTaskCount: staleItems.length,
+              },
+              effort: effort ? {
+                totalProjectManHoursSeconds: effort.totalManHoursSeconds,
+                activeWorkDurationSeconds: effort.activeWorkDurationSeconds,
+                averageCompletedTaskManHoursSeconds: effort.averageCompletedTaskManHoursSeconds,
+                runningTaskCount: effort.runningTaskCount,
+                highEffortTasks,
+                longRunningTasks,
+                lowProgressHighEffortTasks,
+                reviewBottlenecks,
+                team: reportAudience === "internal" ? effort.team.slice(0, 10) : undefined,
+                workloadImbalance: reportAudience === "internal" ? workloadImbalance : undefined,
+              } : null,
+            }),
           });
           const data = await res.json();
           if (typeof data?.content === "string") {
@@ -2636,9 +2901,8 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
               recommendations = parsed;
             }
           }
-        } catch (recommendationError) {
-          console.warn("AI recommendations unavailable", recommendationError);
-        }
+      } catch (recommendationError) {
+        console.warn("AI recommendations unavailable", recommendationError);
       }
 
       setAiReport({
@@ -2699,6 +2963,8 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
           draftReviewTasks: reportAudience === "client" ? draftReviewTasks : undefined,
           pendingInputTasks: reportAudience === "client" ? pendingInputTasks : undefined,
           recommendations,
+          effort,
+          effortStatus,
         },
       });
     } catch (err) {
@@ -2707,7 +2973,7 @@ Top overdue: ${overdueItems.slice(0, 5).map((task) => `${task.title} (${task.own
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, supabase]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, supabase, manHoursData, manHoursDataKey, manHoursQueryKey, manHoursLoading, manHoursError]);
 
   const refreshClientReportDataForPdf = useCallback(async (report: ExecutiveReportData): Promise<ExecutiveReportData> => {
     const taskIds = Array.from(new Set(report.taskRegister.map((task) => task.id).filter(Boolean)));

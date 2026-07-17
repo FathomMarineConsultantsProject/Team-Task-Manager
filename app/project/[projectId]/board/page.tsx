@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus, Loader2 } from "lucide-react";
 import { useExportTasks } from "@/lib/useExportTasks";
 import BoardColumn from "@/components/board/BoardColumn";
+import ProjectManHours from "@/components/board/ProjectManHours";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
 import Avatar from "@/components/ui/Avatar";
@@ -15,6 +16,7 @@ import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
 import type { PendingAttachment } from "@/components/tasks/CreateTaskAttachments";
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
 import { addWorkingDays } from "@/lib/workingDays";
+import { useProjectManHours } from "@/lib/useProjectManHours";
 
 type DbTask = {
   id: string;
@@ -264,6 +266,8 @@ export default function ProjectBoardPage({
   const [taskUpdateCounts, setTaskUpdateCounts] = useState<Record<string, number>>({});
   const [reviewProgressByTaskId, setReviewProgressByTaskId] = useState<Record<string, TaskReviewProgress>>({});
   const [reviewProgressRefreshVersion, setReviewProgressRefreshVersion] = useState(0);
+  const [manHoursRefreshKey, setManHoursRefreshKey] = useState(0);
+  const manHours = useProjectManHours(projectId, manHoursRefreshKey);
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
@@ -676,6 +680,7 @@ export default function ProjectBoardPage({
     canAddUpdate: canParticipateInTaskUpdates,
     canViewUpdates: canViewTaskUpdates,
     onTaskUpdated: loadTaskUpdateCounts,
+    manHoursByTaskId: manHours.taskSummaryById,
   });
 
   const handleOpenTaskDetails = useCallback(
@@ -1722,6 +1727,8 @@ export default function ProjectBoardPage({
             return;
           }
 
+          setManHoursRefreshKey((current) => current + 1);
+
           if (result.task) {
             const updatedTask = result.task;
             setColumns((current) => ({
@@ -1953,17 +1960,37 @@ export default function ProjectBoardPage({
         }
       });
 
-      const { error: updateError } = await supabase
-        .from("tasks")
-        .update({ assigned_to: profile.id, updated_at: new Date().toISOString() })
-        .eq("id", taskId)
-        .eq("project_id", projectId);
-
-      if (updateError) {
-        console.error("Failed to claim task", updateError);
-        alert("Failed to claim task.");
+      const sourceTask = findTaskFromColumns(taskId);
+      const additionalAssigneeIds = (sourceTask?.assignees ?? [])
+        .map((assignee) => assignee.id)
+        .filter((userId) => userId !== profile.id && userId !== previousAssignee);
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        alert("Please sign in again to claim this task.");
         return;
       }
+
+      const response = await fetch(`/api/tasks/${taskId}/assignees`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          primaryAssigneeId: profile.id,
+          additionalAssigneeIds,
+        }),
+      });
+      const result = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        console.error("Failed to claim task", result.error);
+        alert(result.error ?? "Failed to claim task.");
+        return;
+      }
+
+      setManHoursRefreshKey((current) => current + 1);
 
       if (previousAssignee !== profile.id) {
         const { data: authData } = await supabase.auth.getUser();
@@ -2104,7 +2131,7 @@ export default function ProjectBoardPage({
 
       setColumns(groupedColumns);
     },
-    [profile?.id, supabase, projectId, canMoveTask, columns, insertTaskLog],
+    [profile?.id, supabase, projectId, canMoveTask, columns, insertTaskLog, findTaskFromColumns],
   );
 
   useEffect(() => {
@@ -2682,11 +2709,22 @@ export default function ProjectBoardPage({
                 canClaim={!canManageProject}
                 canDelete={true}
                 canEdit={true}
+                resetKey={projectId}
+                taskSummaryById={manHours.taskSummaryById}
               />
             );
           })}
         </div>
       </div>
+
+      <ProjectManHours
+        asOf={manHours.data?.asOf}
+        taskSummaries={manHours.taskSummaries}
+        projectTotals={manHours.projectTotals}
+        loading={manHours.loading}
+        error={manHours.error}
+        retry={manHours.retry}
+      />
 
       {loading ? <div className="text-xs text-slate-500">Loading board tasks...</div> : null}
       {errorMessage ? <div className="text-xs text-red-600">{errorMessage}</div> : null}

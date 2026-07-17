@@ -1,3 +1,5 @@
+import { formatDuration, type ReportEffortData } from "@/lib/manHours";
+
 export const runtime = "nodejs";
 
 type ReportStatusKey = "not_started" | "in_progress" | "draft_review" | "near_due" | "done_early" | "completed" | "overdue";
@@ -136,6 +138,8 @@ type ExecutiveReportData = {
   draftReviewTasks?: DetailedTaskRegisterItem[];
   pendingInputTasks?: DetailedTaskRegisterItem[];
   recommendations: string[];
+  effort?: ReportEffortData;
+  effortStatus?: "ready" | "loading" | "error" | "unsupported";
 };
 
 type UserWorkHistoryItem = ReportTaskItem & {
@@ -588,7 +592,7 @@ function safeWrapText(value: unknown, maxChars: number, maxLines = 3) {
   return lines;
 }
 
-function miniTableDynamicRows(c: Canvas, x: number, y: number, widths: number[], headers: string[], rows: unknown[][], baseRowH = 28, maxBottom = 540) {
+function miniTableDynamicRows(c: Canvas, x: number, y: number, widths: number[], headers: string[], rows: unknown[][], baseRowH = 28, maxBottom = 540, maxCellLines = 2) {
   const total = widths.reduce((sum, width) => sum + width, 0);
   c.rect(x, y, total, baseRowH, "#24124d");
   let cursor = x;
@@ -599,7 +603,7 @@ function miniTableDynamicRows(c: Canvas, x: number, y: number, widths: number[],
 
   let top = y + baseRowH;
   rows.forEach((row, rowIndex) => {
-    const wrapped = row.map((cell, index) => wrapCell(cell, Math.max(8, Math.floor(widths[index] / 6)), 2));
+    const wrapped = row.map((cell, index) => wrapCell(cell, Math.max(8, Math.floor(widths[index] / 6)), maxCellLines));
     const maxLines = Math.max(...wrapped.map((lines) => lines.length), 1);
     const computedRowH = Math.max(baseRowH, maxLines * 12 + 14);
     if (top + computedRowH > maxBottom) return;
@@ -761,6 +765,12 @@ function buildClientRecommendationCards(report: ExecutiveReportData): ProjectMan
       ? `Review the next ${Math.min(upcomingCount, 3)} upcoming ${upcomingCount === 1 ? "deliverable" : "deliverables"} with stakeholders and confirm whether any client input is needed.`
       : `Review the next planned deliverables with stakeholders and confirm whether any client input is needed before work advances.`,
   ];
+  const generatedRecommendations = report.recommendations.filter((item) => item.trim()).slice(0, 5);
+  if (generatedRecommendations[0]) deliveryFocus.unshift(generatedRecommendations[0]);
+  if (generatedRecommendations[1]) priorityActions.unshift(generatedRecommendations[1]);
+  if (generatedRecommendations[2]) scheduleConfidence.unshift(generatedRecommendations[2]);
+  if (generatedRecommendations[3]) clientNextSteps.unshift(generatedRecommendations[3]);
+  if (generatedRecommendations[4]) clientNextSteps.splice(1, 0, generatedRecommendations[4]);
 
   return [
     { title: "Delivery Focus", color: COLORS.blue, bullets: deliveryFocus.slice(0, 4) },
@@ -785,6 +795,66 @@ function clientSectionHeader(c: Canvas, title: string, y = 24) {
   const textY = y + (h - size) / 2;
   c.rect(M, y, PAGE_W - M * 2, h, COLORS.dark);
   c.text(title.toUpperCase(), M + 14, textY, size, "#ffffff", true);
+}
+
+function hasTrackedEffort(effort: ReportEffortData | undefined) {
+  return Boolean(effort && (effort.totalManHoursSeconds > 0 || effort.tasks.some((task) => task.trackingState === "tracked")));
+}
+
+function buildEffortPages(pdf: PdfDoc, report: ExecutiveReportData, clientSafe: boolean) {
+  const effort = report.effort;
+  if (!hasTrackedEffort(effort) || !effort) return;
+  const title = clientSafe ? "Tracked Project Effort" : "Man-Hours & Effort";
+  const header = clientSafe ? clientSectionHeader : sectionHeader;
+  const topTasks = effort.highestEffortTasks.slice(0, 5);
+  const firstTeamRows = clientSafe ? [] : effort.team.slice(0, 5);
+
+  pdf.addPage((c, pageNo, pageCount) => {
+    header(c, title);
+    c.text(`${effort.rangeLabel} | As of ${formatDate(effort.asOf)}`, M, 70, 10, COLORS.muted);
+    const metrics = [
+      [clientSafe ? "Total Tracked Man-Hours" : "Total Man-Hours", formatDuration(effort.totalManHoursSeconds), COLORS.green],
+      ["Active Work Duration", formatDuration(effort.activeWorkDurationSeconds), COLORS.blue],
+      ["Running Tasks", effort.runningTaskCount, effort.runningTaskCount ? COLORS.orange : COLORS.green],
+      ["Average Completed Effort", formatDuration(effort.averageCompletedTaskManHoursSeconds), COLORS.purple],
+    ] as const;
+    metrics.forEach((metric, index) => kpi(c, M + index * 190, 88, 175, metric[0], metric[1], metric[2]));
+    c.text("HIGHEST-EFFORT TASKS", M, 180, 11, COLORS.ink, true);
+    miniTableDynamicRows(c, M, 198, [300, 140, 140, 175], ["Task", "Status", "Active", "Total Effort"], topTasks.map((task) => [task.title, `${clean(task.status).replace(/_/g, " ")}${task.isRunning ? " - Running" : ""}`, formatDuration(task.activeDurationSeconds), formatDuration(task.totalManHoursSeconds)]), 26, clientSafe ? 526 : 360);
+    if (!clientSafe) {
+      c.text("INDIVIDUAL TEAM EFFORT", M, 374, 11, COLORS.ink, true);
+      miniTableDynamicRows(c, M, 392, [285, 170, 120, 180], ["Member", "Effort", "Share", "Active Tasks"], firstTeamRows.map((member) => [member.name, formatDuration(member.manHoursSeconds), `${member.sharePercent}%`, member.activeTaskCount]), 26, 526);
+    }
+    footer(c, report.generatedAt, pageNo, pageCount);
+  });
+
+  if (!clientSafe) {
+    chunk(effort.team.slice(5), 10).filter((rows) => rows.length > 0).forEach((rows, index) => {
+      pdf.addPage((c, pageNo, pageCount) => {
+        header(c, `Individual Team Effort Continued${index > 0 ? ` ${index + 1}` : ""}`);
+        miniTableDynamicRows(c, M, 82, [285, 170, 120, 180], ["Member", "Effort", "Share", "Active Tasks"], rows.map((member) => [member.name, formatDuration(member.manHoursSeconds), `${member.sharePercent}%`, member.activeTaskCount]), 30, 526);
+        footer(c, report.generatedAt, pageNo, pageCount);
+      });
+    });
+  }
+
+  const taskRows = clientSafe
+    ? [...effort.tasks].filter((task) => task.trackingState === "tracked").sort((left, right) => right.totalManHoursSeconds - left.totalManHoursSeconds).slice(0, 20)
+    : effort.tasks;
+  chunk(taskRows, clientSafe ? 6 : 3).filter((rows) => rows.length > 0).forEach((rows, index) => {
+    pdf.addPage((c, pageNo, pageCount) => {
+      header(c, index === 0 ? "Task Effort Details" : "Task Effort Details Continued");
+      const widths = clientSafe ? [330, 155, 135, 135] : [225, 115, 105, 115, 195];
+      const headers = clientSafe ? ["Task", "Status", "Active Work", "Total Effort"] : ["Task", "Status", "Active", "Total", "Assignees"];
+      const values = rows.map((task) => {
+        const tracked = task.trackingState === "tracked";
+        const base = [task.title, `${clean(task.status).replace(/_/g, " ")}${task.isRunning ? " - Running" : ""}`, tracked ? formatDuration(task.activeDurationSeconds) : "Not tracked", tracked ? formatDuration(task.totalManHoursSeconds) : "Not tracked"];
+        return clientSafe ? base : [...base, task.assignees.map((assignee) => `${assignee.name} (${formatDuration(assignee.manHoursSeconds)})`).join(", ") || "Unassigned"];
+      });
+      miniTableDynamicRows(c, M, 82, widths, headers, values, 30, 526, clientSafe ? 4 : 8);
+      footer(c, report.generatedAt, pageNo, pageCount);
+    });
+  });
 }
 
 function compactDuration(startValue: string | null, endValue: string | null) {
@@ -1240,6 +1310,7 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
 
   buildClientKanbanPage(pdf, report);
   buildClientDraftReviewPage(pdf, report);
+  buildEffortPages(pdf, report, true);
 
   const ganttChunks = report.gantt.tasks.length ? chunk(report.gantt.tasks, 8) : [[]];
   ganttChunks.forEach((ganttRows, chunkIndex) => {
@@ -1432,6 +1503,8 @@ function buildProjectPdf(report: ExecutiveReportData) {
       footer(c, report.generatedAt, pageNo, pageCount);
     });
   });
+
+  buildEffortPages(pdf, report, false);
 
   chunk(report.gantt.tasks, 10).forEach((ganttRows, chunkIndex) => {
     pdf.addPage((c, pageNo, pageCount) => {
@@ -1657,9 +1730,34 @@ function buildUserPdf(report: UserPerformanceReportData) {
   return pdf.build();
 }
 
+function isValidEffortPayload(value: unknown): value is ReportEffortData {
+  if (!value || typeof value !== "object") return false;
+  const effort = value as Partial<ReportEffortData>;
+  const numericFields = [
+    effort.activeWorkDurationSeconds,
+    effort.totalManHoursSeconds,
+    effort.runningTaskCount,
+    effort.completedTrackedTaskCount,
+    effort.averageCompletedTaskManHoursSeconds,
+  ];
+  return typeof effort.asOf === "string"
+    && typeof effort.rangeLabel === "string"
+    && numericFields.every((item) => typeof item === "number" && Number.isFinite(item) && item >= 0)
+    && Array.isArray(effort.highestEffortTasks)
+    && Array.isArray(effort.team)
+    && Array.isArray(effort.tasks)
+    && effort.tasks.every((task) => Boolean(task && typeof task.taskId === "string" && typeof task.title === "string" && (task.trackingState === "tracked" || task.trackingState === "untracked")));
+}
+
 export async function POST(request: Request) {
   try {
     const report = (await request.json()) as GeneratedAiReport;
+    if (!report || (report.type !== "project" && report.type !== "user") || !report.data) {
+      return Response.json({ error: "Invalid report payload" }, { status: 400 });
+    }
+    if (report.type === "project" && report.data.effort !== undefined && !isValidEffortPayload(report.data.effort)) {
+      return Response.json({ error: "Invalid man-hour report payload" }, { status: 400 });
+    }
     const projectData = report.type === "project" && report.audience
       ? { ...report.data, audience: report.audience }
       : report.type === "project" ? report.data : null;

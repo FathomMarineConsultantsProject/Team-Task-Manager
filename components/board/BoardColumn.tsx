@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
 import TaskCard from "./TaskCard";
 import type { ColumnId, Task } from "./types";
+import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 
 interface BoardColumnProps {
   columnId: ColumnId;
@@ -24,7 +25,11 @@ interface BoardColumnProps {
   canClaim?: boolean;
   canDelete?: boolean;
   canEdit?: boolean;
+  resetKey?: string;
+  taskSummaryById?: Map<string, LiveTaskManHoursSummary>;
 }
+
+const DEFAULT_VISIBLE_TASKS = 7;
 
 export default function BoardColumn({
   columnId,
@@ -46,9 +51,17 @@ export default function BoardColumn({
   canClaim = false,
   canDelete = true,
   canEdit = false,
+  resetKey,
+  taskSummaryById,
 }: BoardColumnProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [showAllTasks, setShowAllTasks] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const visibleTasks = showAllTasks ? tasks : tasks.slice(0, DEFAULT_VISIBLE_TASKS);
+
+  useEffect(() => {
+    setShowAllTasks(false);
+  }, [resetKey]);
 
   const columnAccent: Record<ColumnId, { ring: string; text: string; bg: string }> = {
     todo: { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" },
@@ -166,7 +179,7 @@ export default function BoardColumn({
         </div>
       </div>
       <div className="mt-4 flex flex-1 flex-col gap-3">
-        {tasks.map((task) => (
+        {visibleTasks.map((task) => (
           <TaskCard
             key={task.id}
             {...task}
@@ -180,6 +193,7 @@ export default function BoardColumn({
             canClaim={canClaim}
             canDelete={canDelete}
             canEdit={canEdit}
+            manHoursSummary={taskSummaryById?.get(task.id)}
             onDragStart={(event) => onTaskDragStart(task.id, columnId, event)}
             onDragEnd={onTaskDragEnd}
           />
@@ -188,6 +202,16 @@ export default function BoardColumn({
           <div className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-5 text-center text-xs font-medium uppercase tracking-wide text-slate-500">
             No tasks in this column
           </div>
+        ) : null}
+        {tasks.length > DEFAULT_VISIBLE_TASKS ? (
+          <button
+            type="button"
+            aria-expanded={showAllTasks}
+            onClick={() => setShowAllTasks((current) => !current)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            {showAllTasks ? "Show less" : `Show more (${tasks.length - DEFAULT_VISIBLE_TASKS})`}
+          </button>
         ) : null}
         <div
           className={`drag-placeholder mt-2 rounded-xl border-2 border-dashed px-4 py-3 text-center text-xs transition ${
