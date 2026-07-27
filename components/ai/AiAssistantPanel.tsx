@@ -5,7 +5,14 @@ import { Bot, Send, X, Sparkles, Check, Loader2, AlertCircle } from "lucide-reac
 import Avatar from "@/components/ui/Avatar";
 import Button from "@/components/ui/button";
 import { useAppData } from "@/components/providers/AppDataProvider";
-import { addWorkingDays } from "@/lib/workingDays";
+import {
+  addDaysToDateOnly,
+  compareDateOnly,
+  getProjectLocalDate,
+  getProjectTimeSettings,
+  isDateOnly,
+  listDateOnlyRange,
+} from "@/lib/projectDateTime";
 
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi;
 
@@ -23,6 +30,9 @@ type AiMessage = {
 type AiContext = {
   projectName?: string;
   projectId?: string;
+  timeZone?: string | null;
+  normalWorkdayStart?: string | null;
+  normalWorkdayEnd?: string | null;
   currentUser?: {
     id: string;
     name: string | null;
@@ -446,33 +456,41 @@ export default function AiAssistantPanel({
 
         const description = typeof d.description === "string" ? d.description.trim() : null;
         const status = String(d.status ?? "todo");
-        const now = new Date();
-        const draftReviewFields = status === "draft_review"
-          ? {
-            draft_review_started_at: now.toISOString(),
-            draft_review_due_at: addWorkingDays(now, 5).toISOString(),
-          }
-          : {};
-        const { data: createdTask, error } = await supabase
-          .from("tasks")
-          .insert({
+        if (typeof d.start_date === "string" && !isDateOnly(d.start_date)) throw new Error("The start date is invalid.");
+        if (typeof d.end_date === "string" && !isDateOnly(d.end_date)) throw new Error("The due date is invalid.");
+        const startDate = typeof d.start_date === "string" ? d.start_date : null;
+        const endDate = typeof d.end_date === "string" ? d.end_date : null;
+        if (startDate && endDate && compareDateOnly(endDate, startDate) < 0) {
+          throw new Error("The due date cannot be earlier than the start date.");
+        }
+        const projectTime = getProjectTimeSettings({
+          timeZone: context?.timeZone,
+          normalWorkdayStart: context?.normalWorkdayStart,
+          normalWorkdayEnd: context?.normalWorkdayEnd,
+        });
+        const today = getProjectLocalDate(projectTime.timeZone);
+        const scheduleStart = startDate ?? (endDate && compareDateOnly(endDate, today) >= 0 ? today : endDate) ?? today;
+        const requestedEnd = endDate ?? addDaysToDateOnly(scheduleStart, 30);
+        const maximumEnd = addDaysToDateOnly(scheduleStart, 365);
+        const scheduleEnd = compareDateOnly(requestedEnd, maximumEnd) > 0 ? maximumEnd : requestedEnd;
+        const workingDates = listDateOnlyRange(scheduleStart, scheduleEnd);
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData.session?.access_token;
+        if (!token) throw new Error("Please sign in again to create tasks.");
+        const response = await fetch(`/api/projects/${pid}/tasks`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
             title: d.title,
             description: description || null,
             status,
-            project_id: pid,
-            assigned_to: assigneeId ?? null,
-            start_date: d.start_date ?? null,
-            end_date: d.end_date ?? null,
-            created_by: profile.id,
-            ...draftReviewFields,
-          })
-          .select("id")
-          .single();
-
-        if (error) {
-          console.error("Task creation error:", error);
-          throw error;
-        }
+            primaryAssigneeId: assigneeId ?? null,
+            workingDates,
+          }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error ?? "Task creation failed.");
+        const createdTask = result.task as { id?: string } | undefined;
 
         if (status === "in_review" && createdTask?.id) {
           await initializeTaskReviewCycle(createdTask.id, pid);

@@ -141,11 +141,15 @@ export function useExportTasks({
   projectId,
   projectName,
   members,
+  timeZone,
+  normalWorkdayEnd,
 }: {
   supabase: SupabaseClient;
   projectId: string;
   projectName: string | null;
   members: MemberRow[];
+  timeZone?: string | null;
+  normalWorkdayEnd?: string | null;
 }) {
   const [isExporting, setIsExporting] = useState(false);
 
@@ -154,6 +158,17 @@ export function useExportTasks({
     setIsExporting(true);
 
     try {
+      let exportTimeZone = timeZone;
+      let exportWorkdayEnd = normalWorkdayEnd;
+      if (!exportTimeZone || !exportWorkdayEnd) {
+        const { data: projectTimeData } = await supabase
+          .from("projects")
+          .select("time_zone, normal_workday_end")
+          .eq("id", projectId)
+          .single();
+        exportTimeZone = projectTimeData?.time_zone ?? exportTimeZone;
+        exportWorkdayEnd = projectTimeData?.normal_workday_end ?? exportWorkdayEnd;
+      }
       // 1. Fetch all tasks with full data
       const { data: tasksData, error: tasksErr } = await supabase
         .from("tasks")
@@ -443,6 +458,8 @@ export function useExportTasks({
         projectReviewers: projectReviewerNames,
         teamMembers: teamMemberNames,
         tasks: exportTasks,
+        timeZone: exportTimeZone,
+        normalWorkdayEnd: exportWorkdayEnd,
       });
     } catch (err) {
       console.error("[Export] Unexpected error:", err);
@@ -450,7 +467,7 @@ export function useExportTasks({
     } finally {
       setIsExporting(false);
     }
-  }, [projectId, projectName, supabase, members]);
+  }, [projectId, projectName, supabase, members, timeZone, normalWorkdayEnd]);
 
   return { isExporting, handleExportTasks };
 }

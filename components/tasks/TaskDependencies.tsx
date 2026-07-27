@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import LinkifiedText from "@/components/ui/LinkifiedText";
+import {
+  DEFAULT_PROJECT_TIME_ZONE,
+  DEFAULT_PROJECT_WORKDAY_END,
+  formatProjectDate,
+  getProjectTimeSettings,
+  getTaskDueState,
+} from "@/lib/projectDateTime";
 
 type SupabaseClient = {
   from: (table: string) => any;
@@ -28,6 +35,8 @@ type TaskDependenciesProps = {
   projectId: string | null;
   currentUserId: string | null;
   canManageDependencies: boolean;
+  projectTimeZone?: string | null;
+  normalWorkdayEnd?: string | null;
   showHeader?: boolean;
   onPendingCountChange?: (count: number) => void;
 };
@@ -39,17 +48,9 @@ const formatDate = (value: string | null | undefined) => {
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" });
 };
 
-const formatDueDate = (value: string | null | undefined) => {
+const formatDueDate = (value: string | null | undefined, timeZone: string) => {
   if (!value) return "Not set";
-  return formatDate(value);
-};
-
-const isPendingDependencyOverdue = (item: TaskDependency) => {
-  if (item.status !== "pending" || !item.due_at) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const due = new Date(`${item.due_at}T00:00:00`);
-  return !Number.isNaN(due.getTime()) && due < today;
+  return formatProjectDate(value, timeZone);
 };
 
 const sortDependencies = (items: TaskDependency[]) =>
@@ -64,6 +65,8 @@ export default function TaskDependencies({
   projectId,
   currentUserId,
   canManageDependencies,
+  projectTimeZone = DEFAULT_PROJECT_TIME_ZONE,
+  normalWorkdayEnd = DEFAULT_PROJECT_WORKDAY_END,
   showHeader = true,
   onPendingCountChange,
 }: TaskDependenciesProps) {
@@ -82,6 +85,11 @@ export default function TaskDependencies({
   const hasProjectId = Boolean(projectId);
   const canMutateDependencies = canManageDependencies && Boolean(currentUserId) && hasTaskId && hasProjectId;
   const pendingItemsCount = items.filter((item) => item.status === "pending").length;
+  const now = new Date();
+  const projectTime = getProjectTimeSettings({
+    timeZone: projectTimeZone,
+    normalWorkdayEnd,
+  });
 
   const loadDependencies = useCallback(async () => {
     if (!taskId) {
@@ -341,7 +349,14 @@ export default function TaskDependencies({
           items.map((item) => {
             const isResolved = item.status === "resolved";
             const isEditing = editingId === item.id;
-            const isOverdue = isPendingDependencyOverdue(item);
+            const dueState = getTaskDueState({
+              dueDate: item.due_at,
+              completedAt: isResolved ? item.resolved_at ?? item.updated_at : null,
+              now,
+              timeZone: projectTime.timeZone,
+              workdayEnd: projectTime.normalWorkdayEnd,
+            });
+            const isOverdue = dueState.state === "overdue";
             return (
               <div
                 key={item.id}
@@ -399,7 +414,9 @@ export default function TaskDependencies({
                           </p>
                         )}
                         <div className="mt-1 flex flex-wrap items-center gap-2">
-                          <p className="text-[11px] text-slate-500">Due: {formatDueDate(item.due_at)}</p>
+                          <p className="text-[11px] text-slate-500">
+                            {dueState.state === "due_today" ? "Due today" : `Due: ${formatDueDate(item.due_at, projectTime.timeZone)}`}
+                          </p>
                           {isOverdue && (
                             <span className="inline-flex items-center whitespace-nowrap rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold text-red-700">
                               Input overdue

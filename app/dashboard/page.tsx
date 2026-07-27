@@ -25,6 +25,8 @@ type ProjectRow = {
   description: string | null;
   end_date: string | null;
   owner_id: string | null;
+  time_zone: string | null;
+  normal_workday_end: string | null;
   users: {
     id: string | null;
     name: string | null;
@@ -68,6 +70,8 @@ function DashboardProjectCard({
     projectId: project.id,
     projectName: project.name,
     members: exportMembers,
+    timeZone: project.time_zone,
+    normalWorkdayEnd: project.normal_workday_end,
   });
 
   return (
@@ -116,6 +120,8 @@ export default function DashboardPage() {
           description,
           end_date,
           owner_id,
+          time_zone,
+          normal_workday_end,
           users!projects_owner_id_fkey (
             id,
             name

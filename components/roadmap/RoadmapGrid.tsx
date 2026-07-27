@@ -21,6 +21,7 @@ import {
   type RoadmapWeek,
   type RoadmapMonth,
 } from "@/lib/roadmap";
+import { getTaskDueState } from "@/lib/projectDateTime";
 
 type ProjectRow = {
   id: string;
@@ -31,6 +32,8 @@ type ProjectRow = {
   is_completed: boolean | null;
   is_deleted: boolean | null;
   created_at: string | null;
+  time_zone: string | null;
+  normal_workday_end: string | null;
 };
 
 type TaskRow = {
@@ -63,6 +66,8 @@ type RoadmapProjectRecord = RoadmapProject & {
   end_date: string | null;
   is_completed: boolean;
   created_at: string | null;
+  time_zone: string | null;
+  normal_workday_end: string | null;
   tasksInWeek: RoadmapTask[];
 };
 
@@ -243,8 +248,8 @@ export default function RoadmapGrid() {
             .from("projects")
             .select(
               includeDeletedColumn
-                ? "id, name, start_date, end_date, is_completed, is_deleted, created_at, owner_id"
-                : "id, name, start_date, end_date, is_completed, created_at, owner_id",
+                ? "id, name, start_date, end_date, is_completed, is_deleted, created_at, owner_id, time_zone, normal_workday_end"
+                : "id, name, start_date, end_date, is_completed, created_at, owner_id, time_zone, normal_workday_end",
             )
             .order("is_completed", { ascending: true })
             .order("created_at", { ascending: false });
@@ -313,6 +318,7 @@ export default function RoadmapGrid() {
         }
 
         const tasksByProjectId = new Map<string, RoadmapTask[]>();
+        const projectsById = new Map(projectRows.map((project) => [project.id, project]));
 
         ((taskRows ?? []) as unknown as TaskRow[]).forEach((task) => {
           if (!task.project_id) {
@@ -334,6 +340,7 @@ export default function RoadmapGrid() {
           ];
 
           const existingTasks = tasksByProjectId.get(task.project_id) ?? [];
+          const taskProject = projectsById.get(task.project_id);
           existingTasks.push({
             id: task.id,
             title: task.title,
@@ -347,6 +354,8 @@ export default function RoadmapGrid() {
             created_at: task.created_at,
             completed_at: task.completed_at,
             assignees,
+            timeZone: taskProject?.time_zone,
+            normalWorkdayEnd: taskProject?.normal_workday_end,
           });
           tasksByProjectId.set(task.project_id, existingTasks);
         });
@@ -360,6 +369,8 @@ export default function RoadmapGrid() {
             end_date: project.end_date ?? null,
             is_completed: project.is_completed === true,
             created_at: project.created_at ?? null,
+            time_zone: project.time_zone ?? null,
+            normal_workday_end: project.normal_workday_end ?? null,
             tasks: tasksByProjectId.get(project.id) ?? [],
             tasksInWeek: [],
           }))
@@ -644,6 +655,8 @@ export default function RoadmapGrid() {
       startDate: task.start_date ?? null,
       endDate: task.end_date ?? null,
       creator: null,
+      projectTimeZone: project.time_zone,
+      normalWorkdayEnd: project.normal_workday_end,
     });
   };
 
@@ -1053,7 +1066,12 @@ export default function RoadmapGrid() {
                         {dayTasks.slice(0, 4).map((task) => {
                           const sKey = normalizeStatus(task.status);
                           const cfg = STATUS_CONFIG[sKey];
-                          const isOverdue = task.end_date && new Date(task.end_date) < today && sKey !== "done";
+                          const isOverdue = sKey !== "done" && getTaskDueState({
+                            dueDate: task.end_date,
+                            now,
+                            timeZone: task.timeZone,
+                            workdayEnd: task.normalWorkdayEnd,
+                          }).state === "overdue";
                           return (
                             <div
                               key={task.id}

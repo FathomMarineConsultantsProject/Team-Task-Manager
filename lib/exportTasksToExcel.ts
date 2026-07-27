@@ -1,6 +1,7 @@
 "use client";
 
 import ExcelJS from "exceljs";
+import { getProjectTimeSettings, getSignedDaysRemaining } from "@/lib/projectDateTime";
 
 // -------------------------------------------------------------------
 // Types
@@ -58,6 +59,8 @@ export type ExportProjectData = {
   projectReviewers?: string[];
   teamMembers: string[];
   tasks: ExportTask[];
+  timeZone?: string | null;
+  normalWorkdayEnd?: string | null;
 };
 
 // -------------------------------------------------------------------
@@ -265,14 +268,8 @@ function formatDateTime(iso: string | null): string {
   });
 }
 
-function getDaysRemaining(dueDate: string | null): number | null {
-  if (!dueDate) return null;
-  const due = new Date(dueDate);
-  if (Number.isNaN(due.getTime())) return null;
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
-  due.setHours(0, 0, 0, 0);
-  return Math.ceil((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+function getDaysRemaining(dueDate: string | null, timeZone: string, normalWorkdayEnd: string, now: Date): number | null {
+  return getSignedDaysRemaining({ dueDate, timeZone, workdayEnd: normalWorkdayEnd, now });
 }
 
 function getProgress(status: string): number {
@@ -468,6 +465,8 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   const wb = new ExcelJS.Workbook();
   wb.creator = "Team Task Manager";
   wb.created = new Date();
+  const projectTime = getProjectTimeSettings({ timeZone: data.timeZone, normalWorkdayEnd: data.normalWorkdayEnd });
+  const exportNow = new Date();
   const preparedTasks = prepareTasks(data.tasks);
   const maxLinkCount = Math.max(0, ...data.tasks.map((task) => task.linkItems?.length ?? 0));
   const linkColumns = Array.from({ length: maxLinkCount }, (_, index) => ({
@@ -495,7 +494,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   }).length;
   const inProgressTasks = data.tasks.filter((t) => normalizeStatus(t.status) === "in_progress").length;
   const overdueTasks = data.tasks.filter((t) => {
-    const days = getDaysRemaining(t.dueDate);
+    const days = getDaysRemaining(t.dueDate, projectTime.timeZone, projectTime.normalWorkdayEnd, exportNow);
     return days !== null && days < 0;
   }).length;
   const completionPct = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
@@ -745,7 +744,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   preparedTasks.forEach((prepared, idx) => {
     const task = prepared.task;
     const norm = normalizeStatus(task.status);
-    const daysRemaining = getDaysRemaining(task.dueDate);
+    const daysRemaining = getDaysRemaining(task.dueDate, projectTime.timeZone, projectTime.normalWorkdayEnd, exportNow);
     const progress = getProgress(task.status);
 
     const rowValues: Record<string, string | number> = {

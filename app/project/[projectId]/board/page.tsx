@@ -17,6 +17,23 @@ import type { PendingAttachment } from "@/components/tasks/CreateTaskAttachments
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
 import { addWorkingDays } from "@/lib/workingDays";
 import { useProjectManHours } from "@/lib/useProjectManHours";
+import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
+import TaskWorkingDatesCalendar from "@/components/tasks/TaskWorkingDatesCalendar";
+import WorkdayExtensionModal from "@/components/tasks/WorkdayExtensionModal";
+import type { TaskWorkingSchedule } from "@/lib/manHours";
+import {
+  addDaysToDateOnly,
+  compareDateOnly,
+  formatProjectDate,
+  getEffectiveTaskDueAt,
+  getProjectLocalDate,
+  getProjectTimeSettings,
+  getSignedDaysRemaining,
+  getTaskDueState,
+  isDateOnly,
+  listDateOnlyRange,
+  parseTimeOnly,
+} from "@/lib/projectDateTime";
 
 type DbTask = {
   id: string;
@@ -28,6 +45,7 @@ type DbTask = {
   end_date: string | null;
   draft_review_started_at: string | null;
   draft_review_due_at: string | null;
+  completed_at?: string | null;
 };
 
 type DbUser = {
@@ -46,6 +64,9 @@ type DbProject = {
   owner_id: string;
   start_date: string | null;
   end_date: string | null;
+  time_zone: string;
+  normal_workday_start: string;
+  normal_workday_end: string;
   created_at?: string | null;
   owner?: {
     id: string | null;
@@ -208,6 +229,28 @@ const formatProjectOverviewDate = (value: string | null | undefined) => {
   });
 };
 
+const formatWorkingDate = (value: string | null, timeZone: string) => value
+  ? formatProjectDate(value, timeZone, { day: "2-digit", month: "short", year: "numeric" })
+  : "—";
+
+const formatWorkdayTime = (value: string) => {
+  const time = parseTimeOnly(value);
+  if (!time) return value;
+  return `${time.hour % 12 || 12}:${String(time.minute).padStart(2, "0")} ${time.hour >= 12 ? "PM" : "AM"}`;
+};
+
+const legacyWorkingDates = (task: Task, projectToday: string) => {
+  if (task.start_date && task.end_date && compareDateOnly(task.end_date, task.start_date) >= 0) {
+    const latest = addDaysToDateOnly(task.start_date, 365);
+    return listDateOnlyRange(
+      task.start_date,
+      compareDateOnly(task.end_date, latest) > 0 ? latest : task.end_date,
+    );
+  }
+  if (task.start_date) return [task.start_date];
+  return [projectToday];
+};
+
 const formatDuration = (ms: number) => {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const days = Math.floor(totalSeconds / 86400);
@@ -234,7 +277,7 @@ export default function ProjectBoardPage({
   const deepLinkTaskId = searchParams?.get("taskId");
   const hasOpenedDeepLinkRef = React.useRef(false);
   const { supabase, profile } = useAppData();
-  
+
   // Board state (existing)
   const [columns, setColumns] = useState<Record<ColumnId, Task[]>>(createEmptyColumns);
   const [loading, setLoading] = useState(true);
@@ -242,13 +285,13 @@ export default function ProjectBoardPage({
   const [dragOverColumn, setDragOverColumn] = useState<ColumnId | null>(null);
   const [activeDrag, setActiveDrag] = useState<{ taskId: string; from: ColumnId } | null>(null);
   const [pendingStatusTaskIds, setPendingStatusTaskIds] = useState<Set<string>>(() => new Set());
-  
+
   // Project state (new)
   const [project, setProject] = useState<DbProject | null>(null);
   const [members, setMembers] = useState<DbProjectMember[]>([]);
   const [reviewers, setReviewers] = useState<ProjectReviewer[]>([]);
   const [projectLoading, setProjectLoading] = useState(true);
-  
+
   // Modal state (new)
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
@@ -256,9 +299,11 @@ export default function ProjectBoardPage({
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskStatus, setNewTaskStatus] = useState<ColumnId>("todo");
   const [newTaskAssignee, setNewTaskAssignee] = useState("");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
   const [newTaskDescription, setNewTaskDescription] = useState("");
+  const [newTaskWorkingDates, setNewTaskWorkingDates] = useState<string[]>([]);
+  const [workingDatesDirty, setWorkingDatesDirty] = useState(false);
+  const [createTaskError, setCreateTaskError] = useState<string | null>(null);
+  const [extensionTask, setExtensionTask] = useState<{ task: Task; summary: LiveTaskManHoursSummary } | null>(null);
   const [newMemberSearch, setNewMemberSearch] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
@@ -271,6 +316,11 @@ export default function ProjectBoardPage({
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
+  const [editWorkingDates, setEditWorkingDates] = useState<string[]>([]);
+  const [editOriginalWorkingDates, setEditOriginalWorkingDates] = useState<string[]>([]);
+  const [editScheduleState, setEditScheduleState] = useState<"configured" | "legacy" | null>(null);
+  const [editScheduleLoading, setEditScheduleLoading] = useState(false);
+  const [editScheduleError, setEditScheduleError] = useState<string | null>(null);
   const [unreadTaskNotifs, setUnreadTaskNotifs] = useState<Record<string, number>>({});
   const [timerNow, setTimerNow] = useState<number | null>(null);
 
@@ -293,12 +343,46 @@ export default function ProjectBoardPage({
   const [selectedReviewerId, setSelectedReviewerId] = useState("");
   const [managingReviewerId, setManagingReviewerId] = useState<string | null>(null);
 
+  const projectTimeSettings = useMemo(() => getProjectTimeSettings({
+    timeZone: manHours.data?.timeZone ?? project?.time_zone,
+    normalWorkdayStart: manHours.data?.normalWorkdayStart ?? project?.normal_workday_start,
+    normalWorkdayEnd: manHours.data?.normalWorkdayEnd ?? project?.normal_workday_end,
+  }), [manHours.data?.normalWorkdayEnd, manHours.data?.normalWorkdayStart, manHours.data?.timeZone, project?.normal_workday_end, project?.normal_workday_start, project?.time_zone]);
+  const projectTimeZone = projectTimeSettings.timeZone;
+  const projectWorkdayEnd = projectTimeSettings.normalWorkdayEnd;
+  const boardNow = useMemo(() => new Date(timerNow ?? Date.now()), [timerNow]);
+  const projectToday = useMemo(
+    () => getProjectLocalDate(projectTimeZone, boardNow),
+    [boardNow, projectTimeZone],
+  );
+  const newTaskBounds = useMemo(() => {
+    const dates = [...new Set(newTaskWorkingDates)].sort();
+    return { start: dates[0] ?? null, end: dates.at(-1) ?? null };
+  }, [newTaskWorkingDates]);
+  const editTaskBounds = useMemo(() => {
+    const dates = [...new Set(editWorkingDates)].sort();
+    return { start: dates[0] ?? null, end: dates.at(-1) ?? null };
+  }, [editWorkingDates]);
+  const workingDatesValidation = useMemo(() => {
+    if (newTaskWorkingDates.length === 0) return "Select at least one working date.";
+    if (newTaskWorkingDates.length > 366) return "Select no more than 366 working dates.";
+    if (newTaskWorkingDates.some((date) => !isDateOnly(date))) return "Working dates must use YYYY-MM-DD.";
+    return null;
+  }, [newTaskWorkingDates]);
+
+  useEffect(() => {
+    if (!showCreateTaskModal || workingDatesDirty) return;
+    setNewTaskWorkingDates([projectToday]);
+  }, [projectToday, showCreateTaskModal, workingDatesDirty]);
+
   // Excel export hook
   const { isExporting, handleExportTasks } = useExportTasks({
     supabase,
     projectId,
     projectName: project?.name ?? null,
     members: members.map((m) => ({ user_id: m.user_id, user: m.user })),
+    timeZone: project?.time_zone,
+    normalWorkdayEnd: project?.normal_workday_end,
   });
 
   const systemRole = normalizeRole(profile?.system_role ?? profile?.role);
@@ -317,6 +401,21 @@ export default function ProjectBoardPage({
     profile?.id &&
       members.some((member) => member.user_id === profile.id && normalizeRole(member.role) === "owner"),
   );
+  const canExtendTaskWorkday = useCallback((task: Task) => Boolean(
+    profile?.id
+    && (
+      isOwner
+      || isProjectLead
+      || isAdmin
+      || isSuperAdmin
+      || task.assigneeId === profile.id
+      || task.assignees?.some((assignee) => assignee.id === profile.id)
+    )
+  ), [isAdmin, isOwner, isProjectLead, isSuperAdmin, profile?.id]);
+  const getAccessToken = useCallback(async () => {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  }, [supabase]);
   const canViewTaskUpdates = isProjectMember || canManageProject;
   const canParticipateInTaskUpdates = isProjectMember || isProjectOwnerMember || isSuperAdmin;
 
@@ -465,16 +564,12 @@ export default function ProjectBoardPage({
 
       // Date lock: future tasks cannot be moved
       if (startDate) {
-        const today = new Date();
-        const taskStart = new Date(startDate);
-        today.setHours(0, 0, 0, 0);
-        taskStart.setHours(0, 0, 0, 0);
-        if (taskStart > today) return false;
+        if (startDate > projectToday) return false;
       }
 
       return true;
     },
-    [profile?.id, canManageProject, isProjectLead],
+    [profile?.id, canManageProject, isProjectLead, projectToday],
   );
 
   const insertTaskLog = useCallback(
@@ -680,6 +775,25 @@ export default function ProjectBoardPage({
     canAddUpdate: canParticipateInTaskUpdates,
     canViewUpdates: canViewTaskUpdates,
     onTaskUpdated: loadTaskUpdateCounts,
+    onManHoursChanged: (change) => {
+      if (change) {
+        setColumns((current) => {
+          const next = { ...current };
+          BOARD_COLUMNS.forEach((column) => {
+            next[column.id] = next[column.id].map((task) => task.id === change.taskId
+              ? {
+                  ...task,
+                  start_date: change.startDate,
+                  end_date: change.endDate,
+                  canDrag: canMoveTask(task.assigneeId ?? null, task.assignees, change.startDate),
+                }
+              : task);
+          });
+          return next;
+        });
+      }
+      setManHoursRefreshKey((value) => value + 1);
+    },
     manHoursByTaskId: manHours.taskSummaryById,
   });
 
@@ -734,9 +848,11 @@ export default function ProjectBoardPage({
         endDate: endDateValue,
         assignees: task.assignees ?? [],
         creator: createdByIdValue ? { id: createdByIdValue, name: null, email: null } : null,
+        projectTimeZone,
+        normalWorkdayEnd: projectWorkdayEnd,
       });
     },
-    [columns, openTaskDetails, project?.name, project?.owner_id, projectId, supabase],
+    [columns, openTaskDetails, project?.name, project?.owner_id, projectId, projectTimeZone, projectWorkdayEnd, supabase],
   );
 
   // Fetch project and members (new)
@@ -764,6 +880,9 @@ export default function ProjectBoardPage({
               owner_id,
               start_date,
               end_date,
+              time_zone,
+              normal_workday_start,
+              normal_workday_end,
               created_at,
               owner:users!projects_owner_id_fkey (
                 id,
@@ -831,100 +950,42 @@ export default function ProjectBoardPage({
   // Handlers for create task and add member (new)
   const handleCreateTask = useCallback(
     async (title: string) => {
-      if (!title.trim() || !projectId) {
+      if (!title.trim() || !projectId || workingDatesValidation) {
+        setCreateTaskError(workingDatesValidation ?? "Task title is required.");
         return;
       }
 
       setIsSubmitting(true);
-
-      // Build strict payload
-      const now = new Date();
-      const draftReviewFields = newTaskStatus === "draftReview" ? getDraftReviewDateFields(now) : {};
-      const payload = {
-        title: title.trim(),
-        description: newTaskDescription.trim() || null,
-        project_id: projectId,
-        status: COLUMN_TO_STATUS[newTaskStatus],
-        assigned_to: newTaskAssignee || null,
-        start_date: startDate || null,
-        end_date: endDate || null,
-        created_by: profile?.id ?? null,
-        ...draftReviewFields,
-      };
-      console.log("Creating task with payload:", payload);
-      console.log("projectId:", projectId);
-      console.log("currentUserId:", profile?.id);
+      setCreateTaskError(null);
 
       try {
-        const { data: authData } = await supabase.auth.getUser();
-        const currentUserId = authData.user?.id;
-        if (!currentUserId) {
-          console.error("Task creation failed: missing authenticated user");
-          alert("Please sign in again to create tasks.");
-          return;
-        }
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData.session?.access_token;
+        const currentUserId = sessionData.session?.user?.id ?? profile?.id;
+        if (!token || !currentUserId) throw new Error("Please sign in again to create tasks.");
 
-        const { data, error } = await supabase
-          .from("tasks")
-          .insert([{ ...payload, created_by: currentUserId }])
-          .select();
+        const response = await fetch(`/api/projects/${projectId}/tasks`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: title.trim(),
+            description: newTaskDescription.trim() || null,
+            status: COLUMN_TO_STATUS[newTaskStatus],
+            primaryAssigneeId: newTaskAssignee || null,
+            additionalAssigneeIds: selectedAdditionalAssignees.map((user) => user.id),
+            workingDates: newTaskWorkingDates,
+          }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error ?? "Failed to create task.");
+        const newTask = result.task as DbTask | undefined;
+        if (!newTask) throw new Error("Task creation returned no task.");
 
-        if (error) {
-          console.error("Task insert error - FULL ERROR:", error);
-          return;
-        }
-
-        console.log("Task created successfully:", data);
-        setNewTaskTitle("");
-        setNewTaskAssignee("");
-        setNewTaskStatus("todo");
-        setStartDate("");
-        setEndDate("");
-        setNewTaskDescription("");
-        setShowCreateTaskModal(false);
-
-        // Immediately append new task to local state
-        if (data && data.length > 0) {
-          const newTask = data[0];
           if (newTask.status === "in_review") {
             await initializeTaskReviewCycle(newTask.id);
           }
 
-          await insertTaskLog({
-            taskId: newTask.id,
-            action: "created",
-            fromStatus: null,
-            toStatus: newTask.status,
-            userId: currentUserId,
-          });
-
-          if (newTask.assigned_to) {
-            await insertTaskLog({
-              taskId: newTask.id,
-              action: "assigned",
-              fromStatus: null,
-              toStatus: null,
-              userId: currentUserId,
-            });
-          }
-
-          // Insert additional assignees into task_assignees
-          const additionalAssigneesToInsert = selectedAdditionalAssignees.filter(
-            (u) => u.id !== newTask.assigned_to
-          );
-          if (newTask.assigned_to && additionalAssigneesToInsert.length > 0) {
-            try {
-              await supabase.from("task_assignees").insert(
-                additionalAssigneesToInsert.map((user) => ({
-                  task_id: newTask.id,
-                  user_id: user.id,
-                }))
-              );
-            } catch {
-              // task_assignees table may not exist yet — fail silently
-            }
-          }
-          setSelectedAdditionalAssignees([]);
+          const additionalAssigneesToInsert = selectedAdditionalAssignees.filter((user) => user.id !== newTask.assigned_to);
 
           const columnId = resolveColumn(newTask.status);
           const assignee = newTask.assigned_to
@@ -1013,17 +1074,25 @@ export default function ProjectBoardPage({
               alert(`Task created successfully, but some attachments failed to upload: ${failedUploads.join(", ")}`);
             }
           }
-          setPendingAttachments([]);
-        }
+        setNewTaskTitle("");
+        setNewTaskAssignee("");
+        setNewTaskStatus("todo");
+        setNewTaskDescription("");
+        setSelectedAdditionalAssignees([]);
+        setNewTaskWorkingDates([]);
+        setWorkingDatesDirty(false);
+        setPendingAttachments([]);
+        setShowCreateTaskModal(false);
+        setManHoursRefreshKey((value) => value + 1);
       } catch (error) {
         console.error("Failed to create task:", error);
         const errorMsg = error instanceof Error ? error.message : "Unknown error";
-        alert(`Failed to create task: ${errorMsg}`);
+        setCreateTaskError(errorMsg);
       } finally {
         setIsSubmitting(false);
       }
     },
-    [projectId, supabase, newTaskAssignee, newTaskStatus, startDate, endDate, profile?.id, members, canMoveTask, insertTaskLog, initializeTaskReviewCycle, selectedAdditionalAssignees, pendingAttachments, newTaskDescription],
+    [projectId, workingDatesValidation, supabase, profile?.id, newTaskDescription, newTaskStatus, newTaskAssignee, selectedAdditionalAssignees, newTaskWorkingDates, initializeTaskReviewCycle, members, canMoveTask, pendingAttachments],
   );
 
   const handleAddMembers = useCallback(
@@ -1385,7 +1454,7 @@ export default function ProjectBoardPage({
       try {
         const { data: taskRows, error: taskError } = await supabase
           .from("tasks")
-          .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at")
+          .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, completed_at")
           .eq("project_id", projectId)
           .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1517,6 +1586,7 @@ export default function ProjectBoardPage({
               end_date: row.end_date,
               draft_review_started_at: row.draft_review_started_at,
               draft_review_due_at: row.draft_review_due_at,
+              completed_at: row.completed_at,
               statusLabel: STATUS_LABEL[columnId],
               canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
               updatesCount: updatesMap[row.id] ?? 0,
@@ -1865,6 +1935,42 @@ export default function ProjectBoardPage({
     [columns],
   );
 
+  const closeEditTask = useCallback(() => {
+    setEditingTask(null);
+    setEditWorkingDates([]);
+    setEditOriginalWorkingDates([]);
+    setEditScheduleState(null);
+    setEditScheduleError(null);
+  }, []);
+
+  const loadEditWorkingDates = useCallback(async (task: Task) => {
+    setEditScheduleLoading(true);
+    setEditScheduleError(null);
+    setEditScheduleState(null);
+    setEditWorkingDates([]);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      if (!token) throw new Error("Please sign in again to load working dates.");
+      const response = await fetch(`/api/tasks/${task.id}/working-dates`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+      const schedule = await response.json().catch(() => ({})) as TaskWorkingSchedule & { error?: string };
+      if (!response.ok) throw new Error(schedule.error ?? "Unable to load working dates.");
+      const dates = schedule.scheduleState === "configured"
+        ? schedule.dates
+        : legacyWorkingDates(task, schedule.todayLocalDate || projectToday);
+      setEditWorkingDates(dates);
+      setEditOriginalWorkingDates(dates);
+      setEditScheduleState(schedule.scheduleState);
+    } catch (error) {
+      setEditScheduleError(error instanceof Error ? error.message : "Unable to load working dates.");
+    } finally {
+      setEditScheduleLoading(false);
+    }
+  }, [projectToday, supabase]);
+
   const handleEditTask = useCallback(
     async (taskId: string) => {
       const task = findTaskFromColumns(taskId);
@@ -1881,70 +1987,78 @@ export default function ProjectBoardPage({
         return;
       }
 
-      // Fetch description from DB
-      let description: string | null = null;
-      try {
-        const { data } = await supabase
+      setEditingTask({ ...task, description: task.description ?? null });
+      void loadEditWorkingDates(task);
+      void supabase
           .from("tasks")
           .select("description")
           .eq("id", taskId)
           .eq("project_id", projectId)
-          .single();
-        description = (data as any)?.description ?? null;
-      } catch { /* silent */ }
-
-      setEditingTask({ ...task, description });
+          .single()
+          .then(({ data }) => {
+            setEditingTask((current) => current?.id === taskId
+              ? { ...current, description: (data as { description?: string | null } | null)?.description ?? null }
+              : current);
+          });
     },
-    [findTaskFromColumns, canManageProject, profile?.id, supabase, projectId],
+    [findTaskFromColumns, canManageProject, profile?.id, loadEditWorkingDates, supabase, projectId],
   );
 
   const handleUpdateTask = useCallback(async () => {
     if (!editingTask) return;
+    if (!editingTask.title.trim()) {
+      setEditScheduleError("Task title is required.");
+      return;
+    }
+    if (!editWorkingDates.length) {
+      setEditScheduleError("Select at least one working date.");
+      return;
+    }
 
     setIsSavingEdit2(true);
+    setEditScheduleError(null);
     try {
-      const { error } = await supabase
-        .from("tasks")
-        .update({
-          title: editingTask.title,
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      if (!token) throw new Error("Please sign in again to update this task.");
+      const response = await fetch(`/api/tasks/${editingTask.id}/working-dates`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: editingTask.title.trim(),
           description: editingTask.description ?? null,
-          start_date: editingTask.start_date ?? null,
-          end_date: editingTask.end_date ?? null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", editingTask.id)
-        .eq("project_id", projectId);
+          dates: editWorkingDates,
+        }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Failed to update task.");
 
-      if (!error) {
-        setColumns((prev) => {
-          const updated = { ...prev };
-          BOARD_COLUMNS.forEach((col) => {
-            updated[col.id] = updated[col.id].map((t) => {
-              if (t.id !== editingTask.id) return t;
-              return {
-                ...t,
-                title: editingTask.title,
-                description: editingTask.description,
-                start_date: editingTask.start_date,
-                end_date: editingTask.end_date,
-                canDrag: canMoveTask(t.assigneeId ?? null, t.assignees, editingTask.start_date),
-              };
-            });
+      setColumns((prev) => {
+        const updated = { ...prev };
+        BOARD_COLUMNS.forEach((col) => {
+          updated[col.id] = updated[col.id].map((task) => {
+            if (task.id !== editingTask.id) return task;
+            return {
+              ...task,
+              title: editingTask.title.trim(),
+              description: editingTask.description,
+              start_date: editTaskBounds.start,
+              end_date: editTaskBounds.end,
+              canDrag: canMoveTask(task.assigneeId ?? null, task.assignees, editTaskBounds.start),
+            };
           });
-          return updated;
         });
-        setEditingTask(null);
-      } else {
-        console.error("Task update error:", error);
-        alert("Failed to update task.");
-      }
+        return updated;
+      });
+      setManHoursRefreshKey((value) => value + 1);
+      closeEditTask();
     } catch (err) {
       console.error("Failed to update task", err);
-      alert("Failed to update task.");
+      setEditScheduleError(err instanceof Error ? err.message : "Failed to update task.");
     } finally {
       setIsSavingEdit2(false);
     }
-  }, [editingTask, projectId, supabase, canMoveTask]);
+  }, [canMoveTask, closeEditTask, editTaskBounds.end, editTaskBounds.start, editWorkingDates, editingTask, supabase]);
 
   const claimTask = useCallback(
     async (taskId: string) => {
@@ -2329,11 +2443,11 @@ export default function ProjectBoardPage({
           break;
         }
       }
-      
+
       if (foundColumn) {
         hasOpenedDeepLinkRef.current = true;
         void handleOpenTaskDetails(deepLinkTaskId, foundColumn);
-        
+
         // Remove the parameter from URL to prevent reopening on subsequent closes
         try {
           const url = new URL(window.location.href);
@@ -2375,7 +2489,7 @@ export default function ProjectBoardPage({
                   <p className="text-sm text-slate-500 mt-1">
                     {project.start_date && `Start: ${new Date(project.start_date).toLocaleDateString()}`}
                     {" "}
-                    {project.end_date && `• Due: ${new Date(project.end_date).toLocaleDateString()}`}
+                    {project.end_date && `• Due: ${formatProjectDate(project.end_date, projectTimeZone)}`}
                   </p>
                 )}
               </button>
@@ -2437,6 +2551,8 @@ export default function ProjectBoardPage({
                   <Button
                     onClick={() => {
                       setNewTaskStatus("todo");
+                      setWorkingDatesDirty(false);
+                      setCreateTaskError(null);
                       setShowCreateTaskModal(true);
                     }}
                     className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
@@ -2595,10 +2711,7 @@ export default function ProjectBoardPage({
       <div className="overflow-x-auto">
         <div className="flex min-h-[500px] gap-6">
           {BOARD_COLUMNS.map((column) => {
-            const now = new Date();
-            const today = new Date(); today.setHours(23, 59, 59, 999);
-            const weekEnd = new Date(now); weekEnd.setDate(weekEnd.getDate() + 7);
-            const monthEnd = new Date(now); monthEnd.setMonth(monthEnd.getMonth() + 1);
+            const now = boardNow;
 
             // 1) Apply search filter
             let filtered = columns[column.id].filter((t) => {
@@ -2621,14 +2734,16 @@ export default function ProjectBoardPage({
             // 3) Apply time filter
             if (boardTimeFilter !== "all") {
               filtered = filtered.filter((t) => {
-                const due = t.end_date ? new Date(t.end_date) : null;
+                const due = getEffectiveTaskDueAt({ dueDate: t.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                const daysRemaining = getSignedDaysRemaining({ dueDate: t.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                const dueState = getTaskDueState({ dueDate: t.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
                 switch (boardTimeFilter) {
-                  case "today": return due && due <= today && due >= new Date(now.toDateString());
-                  case "week": return due && due <= weekEnd && due >= now;
-                  case "month": return due && due <= monthEnd && due >= now;
-                  case "overdue": return due && due < now && column.id !== "done";
+                  case "today": return dueState.state === "due_today";
+                  case "week": return daysRemaining !== null && daysRemaining >= 0 && daysRemaining <= 7;
+                  case "month": return daysRemaining !== null && daysRemaining >= 0 && daysRemaining <= 30;
+                  case "overdue": return dueState.state === "overdue" && column.id !== "done";
                   case "near_due": {
-                    if (!due || column.id === "done") return false;
+                    if (!due || dueState.state === "overdue" || column.id === "done") return false;
                     const diff = (due.getTime() - now.getTime()) / 86400000;
                     return diff >= 0 && diff <= 3;
                   }
@@ -2646,7 +2761,8 @@ export default function ProjectBoardPage({
                   if (!a.end_date && !b.end_date) return 0;
                   if (!a.end_date) return 1;
                   if (!b.end_date) return -1;
-                  return new Date(a.end_date).getTime() - new Date(b.end_date).getTime();
+                  return (getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity)
+                    - (getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity);
                 }
                 case "start": {
                   if (!a.start_date && !b.start_date) return 0;
@@ -2655,19 +2771,25 @@ export default function ProjectBoardPage({
                   return new Date(a.start_date).getTime() - new Date(b.start_date).getTime();
                 }
                 case "near_due": {
-                  const aDue = a.end_date ? Math.abs(new Date(a.end_date).getTime() - now.getTime()) : Infinity;
-                  const bDue = b.end_date ? Math.abs(new Date(b.end_date).getTime() - now.getTime()) : Infinity;
+                  const aDue = Math.abs((getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
+                  const bDue = Math.abs((getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
                   return aDue - bDue;
                 }
                 case "overdue": {
-                  const aOver = a.end_date && new Date(a.end_date) < now ? now.getTime() - new Date(a.end_date).getTime() : -Infinity;
-                  const bOver = b.end_date && new Date(b.end_date) < now ? now.getTime() - new Date(b.end_date).getTime() : -Infinity;
+                  const aDueAt = getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                  const bDueAt = getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                  const aOver = getTaskDueState({ dueDate: a.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && aDueAt
+                    ? now.getTime() - aDueAt.getTime()
+                    : -Infinity;
+                  const bOver = getTaskDueState({ dueDate: b.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && bDueAt
+                    ? now.getTime() - bDueAt.getTime()
+                    : -Infinity;
                   return bOver - aOver;
                 }
                 default: {
                   // Default: future start dates pushed to bottom
-                  const aFuture = a.start_date && new Date(a.start_date) > now;
-                  const bFuture = b.start_date && new Date(b.start_date) > now;
+                  const aFuture = Boolean(a.start_date && a.start_date > projectToday);
+                  const bFuture = Boolean(b.start_date && b.start_date > projectToday);
                   if (aFuture && !bFuture) return 1;
                   if (!aFuture && bFuture) return -1;
                   return 0;
@@ -2696,6 +2818,8 @@ export default function ProjectBoardPage({
                 onOpenTaskDetails={handleOpenTaskDetails}
                 onQuickAddTask={(columnId) => {
                   setNewTaskStatus(columnId);
+                  setWorkingDatesDirty(false);
+                  setCreateTaskError(null);
                   setShowCreateTaskModal(true);
                 }}
                 onExportTasks={(columnId) =>
@@ -2706,11 +2830,19 @@ export default function ProjectBoardPage({
                 }
                 onClaimTask={claimTask}
                 onMarkReviewed={handleMarkTaskReviewed}
+                onExtendWorkday={(taskId) => {
+                  const task = sorted.find((item) => item.id === taskId);
+                  const summary = manHours.taskSummaryById.get(taskId);
+                  if (task && summary) setExtensionTask({ task, summary });
+                }}
+                canExtendWorkday={canExtendTaskWorkday}
                 canClaim={!canManageProject}
                 canDelete={true}
                 canEdit={true}
                 resetKey={projectId}
                 taskSummaryById={manHours.taskSummaryById}
+                projectTimeZone={projectTimeZone}
+                normalWorkdayEnd={projectWorkdayEnd}
               />
             );
           })}
@@ -2730,6 +2862,33 @@ export default function ProjectBoardPage({
       {errorMessage ? <div className="text-xs text-red-600">{errorMessage}</div> : null}
 
       {renderTaskDetails()}
+
+      {extensionTask ? (
+        <WorkdayExtensionModal
+          isOpen
+          taskTitle={extensionTask.task.title}
+          schedule={{
+            taskId: extensionTask.task.id,
+            projectId,
+            scheduleState: extensionTask.summary.scheduleState,
+            timeZone: projectTimeZone,
+            normalWorkdayStart: projectTimeSettings.normalWorkdayStart,
+            normalWorkdayEnd: projectTimeSettings.normalWorkdayEnd,
+            effectiveFrom: null,
+            dates: [],
+            selectedDateCount: 0,
+            todayLocalDate: projectToday,
+            todayIsSelected: extensionTask.summary.todayIsSelected,
+            nextSelectedDate: null,
+            currentExtension: null,
+            canManage: canExtendTaskWorkday(extensionTask.task),
+            canCorrectHistory: false,
+          } satisfies TaskWorkingSchedule}
+          getAccessToken={getAccessToken}
+          onClose={() => setExtensionTask(null)}
+          onChanged={() => setManHoursRefreshKey((value) => value + 1)}
+        />
+      ) : null}
 
 
       {/* PROJECT OVERVIEW MODAL */}
@@ -2767,7 +2926,7 @@ export default function ProjectBoardPage({
       </Modal>
 
       {/* CREATE TASK MODAL */}
-      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setPendingAttachments([]); }}>
+      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setPendingAttachments([]); setWorkingDatesDirty(false); setCreateTaskError(null); }}>
         <div className="space-y-4">
           <div>
             <label htmlFor="task-title" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
@@ -2893,28 +3052,32 @@ export default function ProjectBoardPage({
             </div>
           </div>
 
-          <div className="mt-3">
-            <label htmlFor="task-start-date" className="text-xs text-gray-500">Start Date</label>
-            <input
-              id="task-start-date"
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full border rounded px-2 py-1 mt-1"
+          <div className="mt-4">
+            <div className="mb-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Working Dates</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Select the dates on which work is planned for this task. Times use {projectTimeZone}; normal working window: 9:00 AM–7:00 PM.
+              </p>
+            </div>
+            <TaskWorkingDatesCalendar
+              selectedDates={newTaskWorkingDates}
+              onChange={(dates) => {
+                setWorkingDatesDirty(true);
+                setNewTaskWorkingDates(dates);
+                setCreateTaskError(null);
+              }}
+              timeZone={projectTimeZone}
               disabled={isSubmitting}
+              resetDates={[projectToday]}
+              resetLabel="Reset selection"
             />
-          </div>
-
-          <div className="mt-3">
-            <label htmlFor="task-end-date" className="text-xs text-gray-500">End Date</label>
-            <input
-              id="task-end-date"
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full border rounded px-2 py-1 mt-1"
-              disabled={isSubmitting}
-            />
+            <div className="mt-3 grid gap-1 rounded-lg bg-slate-50 p-3 text-xs text-slate-600 sm:grid-cols-2">
+              <p><span className="font-semibold">Selected working days:</span> {newTaskWorkingDates.length}</p>
+              <p><span className="font-semibold">Planned start:</span> {formatWorkingDate(newTaskBounds.start, projectTimeZone)}</p>
+              <p><span className="font-semibold">Planned end:</span> {formatWorkingDate(newTaskBounds.end, projectTimeZone)}</p>
+              <p><span className="font-semibold">Working hours:</span> {formatWorkdayTime(projectTimeSettings.normalWorkdayStart)}–{formatWorkdayTime(projectTimeSettings.normalWorkdayEnd)}</p>
+              <p className="sm:col-span-2"><span className="font-semibold">Timezone:</span> {projectTimeZone}</p>
+            </div>
           </div>
 
           {/* Attachments */}
@@ -2933,6 +3096,8 @@ export default function ProjectBoardPage({
             onClick={() => {
               setShowCreateTaskModal(false);
               setPendingAttachments([]);
+              setWorkingDatesDirty(false);
+              setCreateTaskError(null);
             }}
             disabled={isSubmitting}
             className="rounded-lg px-4 py-2 text-sm font-semibold"
@@ -2941,12 +3106,15 @@ export default function ProjectBoardPage({
           </Button>
           <Button
             onClick={() => handleCreateTask(newTaskTitle)}
-            disabled={isSubmitting || !newTaskTitle.trim()}
+            disabled={isSubmitting || !newTaskTitle.trim() || Boolean(workingDatesValidation)}
             className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {isSubmitting ? "Creating..." : "Create Task"}
           </Button>
         </div>
+        {createTaskError || workingDatesValidation ? (
+          <p role="alert" className="mt-3 text-sm font-medium text-red-600">{createTaskError ?? workingDatesValidation}</p>
+        ) : null}
       </Modal>
 
       {/* PROJECT TEAM MODAL */}
@@ -3323,7 +3491,7 @@ export default function ProjectBoardPage({
       </Modal>
 
       {/* EDIT TASK MODAL */}
-      <Modal title="Edit Task" isOpen={Boolean(editingTask)} onClose={() => setEditingTask(null)}>
+      <Modal title="Edit Task" isOpen={Boolean(editingTask)} onClose={closeEditTask}>
         {editingTask && (
           <div className="space-y-4">
             <div>
@@ -3354,36 +3522,53 @@ export default function ProjectBoardPage({
                 disabled={isSavingEdit2}
               />
             </div>
-            <div>
-              <label htmlFor="edit-task-start-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-                Start Date
-              </label>
-              <input
-                id="edit-task-start-date"
-                type="date"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
-                value={editingTask.start_date ?? ""}
-                onChange={(e) => setEditingTask({ ...editingTask, start_date: e.target.value || null })}
-                disabled={isSavingEdit2}
-              />
-            </div>
-            <div>
-              <label htmlFor="edit-task-end-date" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-                End Date
-              </label>
-              <input
-                id="edit-task-end-date"
-                type="date"
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
-                value={editingTask.end_date ?? ""}
-                onChange={(e) => setEditingTask({ ...editingTask, end_date: e.target.value || null })}
-                disabled={isSavingEdit2}
-              />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Working Dates</p>
+              {editScheduleLoading ? (
+                <p className="mt-2 text-sm text-slate-500">Loading working dates…</p>
+              ) : editScheduleState ? (
+                <>
+                  {editScheduleState === "legacy" ? (
+                    <div className="my-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                      <p className="font-semibold">Schedule not configured</p>
+                      <p>Saving will configure this task’s working dates.</p>
+                    </div>
+                  ) : null}
+                  <div className="mt-2 max-w-full overflow-x-hidden">
+                    <TaskWorkingDatesCalendar
+                      selectedDates={editWorkingDates}
+                      onChange={(dates) => {
+                        setEditWorkingDates(dates);
+                        setEditScheduleError(null);
+                      }}
+                      timeZone={projectTimeZone}
+                      disabled={isSavingEdit2}
+                      resetDates={editOriginalWorkingDates}
+                      resetLabel="Restore original dates"
+                    />
+                  </div>
+                  <div className="mt-3 grid gap-1 rounded-lg bg-slate-50 p-3 text-xs text-slate-600 sm:grid-cols-2">
+                    <p><span className="font-semibold">Selected working days:</span> {editWorkingDates.length}</p>
+                    <p><span className="font-semibold">Planned start:</span> {formatWorkingDate(editTaskBounds.start, projectTimeZone)}</p>
+                    <p><span className="font-semibold">Planned end:</span> {formatWorkingDate(editTaskBounds.end, projectTimeZone)}</p>
+                    <p><span className="font-semibold">Working hours:</span> {formatWorkdayTime(projectTimeSettings.normalWorkdayStart)}–{formatWorkdayTime(projectTimeSettings.normalWorkdayEnd)}</p>
+                    <p className="sm:col-span-2"><span className="font-semibold">Timezone:</span> {projectTimeZone}</p>
+                  </div>
+                </>
+              ) : null}
+              {editScheduleError ? (
+                <div className="mt-2 flex items-center justify-between gap-3 rounded-lg bg-red-50 p-3">
+                  <p role="alert" className="text-sm font-medium text-red-700">{editScheduleError}</p>
+                  {!editScheduleState ? (
+                    <button type="button" onClick={() => void loadEditWorkingDates(editingTask)} className="text-xs font-semibold text-red-700 underline">Retry</button>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
             <div className="flex justify-end gap-3 pt-2">
               <Button
                 variant="ghost"
-                onClick={() => setEditingTask(null)}
+                onClick={closeEditTask}
                 disabled={isSavingEdit2}
                 className="rounded-lg px-4 py-2 text-sm font-semibold"
               >
@@ -3391,7 +3576,7 @@ export default function ProjectBoardPage({
               </Button>
               <Button
                 onClick={() => void handleUpdateTask()}
-                disabled={isSavingEdit2 || !editingTask.title.trim()}
+                disabled={isSavingEdit2 || editScheduleLoading || !editScheduleState || !editingTask.title.trim() || editWorkingDates.length === 0}
                 className="rounded-lg px-4 py-2 text-sm font-semibold"
               >
                 {isSavingEdit2 ? "Saving..." : "Save"}

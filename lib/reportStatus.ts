@@ -9,6 +9,7 @@
  */
 
 import { normalizeStatus } from "./statusConfig";
+import { getEffectiveTaskDueAt, getTaskDueState } from "./projectDateTime";
 
 // ── Report Status Keys ──────────────────────────────
 
@@ -111,6 +112,8 @@ export type ReportTask = {
   assigned_to?: string | null;
   project_id?: string;
   title?: string;
+  timeZone?: string | null;
+  normalWorkdayEnd?: string | null;
 };
 
 const NEAR_DUE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
@@ -119,10 +122,13 @@ const NEAR_DUE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
  * Derive the report display status from actual task timestamps.
  * Priority order matters: overdue > near_due > done_early > completed > in_progress > not_started
  */
-export function deriveReportStatus(task: ReportTask): ReportStatusKey {
+export function deriveReportStatus(task: ReportTask, now = new Date()): ReportStatusKey {
   const baseStatus = normalizeStatus(task.status);
-  const now = new Date();
-  const endDate = task.end_date ? new Date(task.end_date) : null;
+  const endDate = getEffectiveTaskDueAt({
+    dueDate: task.end_date,
+    timeZone: task.timeZone,
+    workdayEnd: task.normalWorkdayEnd,
+  });
   const completedAt = task.completed_at ? new Date(task.completed_at) : null;
 
   // Completed tasks
@@ -133,8 +139,18 @@ export function deriveReportStatus(task: ReportTask): ReportStatusKey {
     return "completed";
   }
 
-  // Overdue: past due date and not done
-  if (endDate && endDate < now) {
+  // Workflow states remain authoritative; due risk is reported separately.
+  if (baseStatus === "draft_review") {
+    return "draft_review";
+  }
+
+  const dueState = getTaskDueState({
+    dueDate: task.end_date,
+    now,
+    timeZone: task.timeZone,
+    workdayEnd: task.normalWorkdayEnd,
+  });
+  if (dueState.state === "overdue") {
     return "overdue";
   }
 
@@ -147,10 +163,6 @@ export function deriveReportStatus(task: ReportTask): ReportStatusKey {
   }
 
   // In progress (includes in_review)
-  if (baseStatus === "draft_review") {
-    return "draft_review";
-  }
-
   if (baseStatus === "in_progress" || baseStatus === "in_review") {
     return "in_progress";
   }
@@ -181,10 +193,13 @@ export function formatTimeDiff(ms: number): string {
 /**
  * Get the display timer text for a task based on its report status.
  */
-export function getTaskTimerLabel(task: ReportTask): string | null {
-  const status = deriveReportStatus(task);
-  const now = new Date();
-  const endDate = task.end_date ? new Date(task.end_date) : null;
+export function getTaskTimerLabel(task: ReportTask, now = new Date()): string | null {
+  const status = deriveReportStatus(task, now);
+  const endDate = getEffectiveTaskDueAt({
+    dueDate: task.end_date,
+    timeZone: task.timeZone,
+    workdayEnd: task.normalWorkdayEnd,
+  });
   const completedAt = task.completed_at ? new Date(task.completed_at) : null;
 
   switch (status) {
@@ -222,7 +237,7 @@ export type ReportKPIs = {
   completionRate: number;
 };
 
-export function computeReportKPIs(tasks: ReportTask[]): ReportKPIs {
+export function computeReportKPIs(tasks: ReportTask[], now = new Date()): ReportKPIs {
   const counts: Record<ReportStatusKey, number> = {
     not_started: 0,
     in_progress: 0,
@@ -234,7 +249,7 @@ export function computeReportKPIs(tasks: ReportTask[]): ReportKPIs {
   };
 
   for (const t of tasks) {
-    counts[deriveReportStatus(t)]++;
+    counts[deriveReportStatus(t, now)]++;
   }
 
   const total = tasks.length;
@@ -260,7 +275,7 @@ export type ReportStatusDistribution = {
   color: string;
 };
 
-export function computeReportStatusDistribution(tasks: ReportTask[]): ReportStatusDistribution[] {
+export function computeReportStatusDistribution(tasks: ReportTask[], now = new Date()): ReportStatusDistribution[] {
   const counts: Record<ReportStatusKey, number> = {
     not_started: 0,
     in_progress: 0,
@@ -272,7 +287,7 @@ export function computeReportStatusDistribution(tasks: ReportTask[]): ReportStat
   };
 
   for (const t of tasks) {
-    counts[deriveReportStatus(t)]++;
+    counts[deriveReportStatus(t, now)]++;
   }
 
   return REPORT_STATUS_KEYS.map((key) => ({

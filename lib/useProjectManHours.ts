@@ -23,7 +23,8 @@ export type LiveTaskManHoursSummary = Omit<TaskManHoursSummary, "assignees"> & {
 export function isLiveManHoursTaskRunning(task: TaskManHoursSummary) {
   const status = normalizeStatus(task.status);
   return task.trackingState === "tracked"
-    && task.isRunning
+    && task.isSessionOpen
+    && task.isAccumulating
     && (status === "in_progress" || status === "draft_review" || status === "in_review");
 }
 
@@ -43,6 +44,18 @@ export function useProjectManHours(projectId: string, refreshKey = 0) {
   const retry = useCallback(() => setRetryKey((current) => current + 1), []);
 
   useEffect(() => {
+    if (!data?.nextRefreshAt) return;
+    const boundary = new Date(data.nextRefreshAt).getTime();
+    if (Number.isNaN(boundary)) return;
+    const delay = Math.max(0, boundary - Date.now()) + 100;
+    const timeout = window.setTimeout(
+      () => setRetryKey((current) => current + 1),
+      Math.min(delay, 2_147_483_647),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [data?.nextRefreshAt]);
+
+  useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
       setLoading(true);
@@ -54,6 +67,7 @@ export function useProjectManHours(projectId: string, refreshKey = 0) {
 
         const response = await fetch(`/api/projects/${projectId}/man-hours`, {
           headers: { Authorization: `Bearer ${accessToken}` },
+          cache: "no-store",
           signal: controller.signal,
         });
         const result = (await response.json()) as ProjectManHoursResponse & { error?: string };
@@ -71,17 +85,17 @@ export function useProjectManHours(projectId: string, refreshKey = 0) {
     return () => controller.abort();
   }, [projectId, refreshKey, retryKey, supabase]);
 
-  const elapsedSinceAsOf = useMemo(() => {
-    if (!data?.asOf) return 0;
-    const baseline = new Date(data.asOf).getTime();
-    return Number.isNaN(baseline) ? 0 : Math.max(0, Math.floor((now - baseline) / 1000));
-  }, [data?.asOf, now]);
-
   const taskSummaries = useMemo<LiveTaskManHoursSummary[]>(() => (data?.tasks ?? []).map((task) => {
     const running = isLiveManHoursTaskRunning(task);
+    const baseline = new Date(data?.asOf ?? "").getTime();
+    const windowEnd = task.currentWindowEnd ? new Date(task.currentWindowEnd).getTime() : Number.POSITIVE_INFINITY;
+    const elapsedSinceAsOf = running && !Number.isNaN(baseline) && !Number.isNaN(windowEnd)
+      ? Math.max(0, Math.floor((Math.min(now, windowEnd) - baseline) / 1000))
+      : 0;
     const assignees = task.assignees.map((assignee) => ({
       ...assignee,
-      liveManHoursSeconds: assignee.manHoursSeconds + (running && assignee.isRunning ? elapsedSinceAsOf : 0),
+      liveManHoursSeconds: assignee.manHoursSeconds
+        + (running && assignee.isAccumulating ? elapsedSinceAsOf : 0),
     }));
     return {
       ...task,
@@ -90,7 +104,7 @@ export function useProjectManHours(projectId: string, refreshKey = 0) {
       liveTotalManHoursSeconds: task.totalManHoursSeconds
         + assignees.reduce((sum, assignee) => sum + (assignee.liveManHoursSeconds - assignee.manHoursSeconds), 0),
     };
-  }), [data?.tasks, elapsedSinceAsOf]);
+  }), [data?.asOf, data?.tasks, now]);
 
   const taskSummaryById = useMemo(
     () => new Map(taskSummaries.map((task) => [task.taskId, task])),

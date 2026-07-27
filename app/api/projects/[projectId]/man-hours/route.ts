@@ -1,4 +1,4 @@
-import { getAuthenticatedUser, json } from "../../../tasks/reviewWorkflow";
+import { getAuthenticatedUser, jsonNoStore } from "../../../tasks/reviewWorkflow";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -24,22 +24,22 @@ export async function GET(req: Request, { params }: RouteContext) {
   try {
     const { projectId } = await params;
     if (!projectId) {
-      return json({ error: "Project id is required." }, 400);
+      return jsonNoStore({ error: "Project id is required." }, 400);
     }
 
     const url = new URL(req.url);
     const rangeStart = parseOptionalTimestamp(url.searchParams.get("rangeStart"), "rangeStart");
     const rangeEnd = parseOptionalTimestamp(url.searchParams.get("rangeEndExclusive"), "rangeEndExclusive");
     if (rangeStart.error || rangeEnd.error) {
-      return json({ error: rangeStart.error ?? rangeEnd.error }, 400);
+      return jsonNoStore({ error: rangeStart.error ?? rangeEnd.error }, 400);
     }
     if (rangeStart.value && rangeEnd.value && rangeEnd.value <= rangeStart.value) {
-      return json({ error: "rangeEndExclusive must be after rangeStart." }, 400);
+      return jsonNoStore({ error: "rangeEndExclusive must be after rangeStart." }, 400);
     }
 
     const { user, adminClient } = await getAuthenticatedUser(req);
     if (!user) {
-      return json({ error: "You must be signed in to view project man-hours." }, 401);
+      return jsonNoStore({ error: "You must be signed in to view project man-hours." }, 401);
     }
 
     const { data, error } = await adminClient.rpc("get_project_man_hours", {
@@ -51,11 +51,11 @@ export async function GET(req: Request, { params }: RouteContext) {
     });
 
     if (error) {
-      return json({ error: error.message }, rpcErrorStatus(error.code));
+      return jsonNoStore({ error: error.message }, rpcErrorStatus(error.code));
     }
 
-    return json(data);
+    return jsonNoStore(data);
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Failed to load project man-hours." }, 500);
+    return jsonNoStore({ error: error instanceof Error ? error.message : "Failed to load project man-hours." }, 500);
   }
 }

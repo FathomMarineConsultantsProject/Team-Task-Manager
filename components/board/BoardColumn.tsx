@@ -22,11 +22,15 @@ interface BoardColumnProps {
   onExportTasks?: (columnId: ColumnId) => Promise<void> | void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
   onMarkReviewed?: (taskId: string) => Promise<void> | void;
+  onExtendWorkday?: (taskId: string) => void;
+  canExtendWorkday?: (task: Task) => boolean;
   canClaim?: boolean;
   canDelete?: boolean;
   canEdit?: boolean;
   resetKey?: string;
   taskSummaryById?: Map<string, LiveTaskManHoursSummary>;
+  projectTimeZone?: string;
+  normalWorkdayEnd?: string;
 }
 
 const DEFAULT_VISIBLE_TASKS = 7;
@@ -48,11 +52,15 @@ export default function BoardColumn({
   onExportTasks,
   onClaimTask,
   onMarkReviewed,
+  onExtendWorkday,
   canClaim = false,
   canDelete = true,
   canEdit = false,
+  canExtendWorkday,
   resetKey,
   taskSummaryById,
+  projectTimeZone,
+  normalWorkdayEnd,
 }: BoardColumnProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [showAllTasks, setShowAllTasks] = useState(false);
@@ -190,10 +198,14 @@ export default function BoardColumn({
             onOpenDetails={() => onOpenTaskDetails?.(task.id, columnId)}
             onClaimTask={onClaimTask}
             onMarkReviewed={onMarkReviewed}
+            onExtendWorkday={onExtendWorkday}
             canClaim={canClaim}
             canDelete={canDelete}
             canEdit={canEdit}
+            canExtendWorkday={canExtendWorkday?.(task) ?? false}
             manHoursSummary={taskSummaryById?.get(task.id)}
+            projectTimeZone={projectTimeZone}
+            normalWorkdayEnd={normalWorkdayEnd}
             onDragStart={(event) => onTaskDragStart(task.id, columnId, event)}
             onDragEnd={onTaskDragEnd}
           />

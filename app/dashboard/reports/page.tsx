@@ -56,6 +56,17 @@ import {
   type ReportTask,
 } from "@/lib/reportStatus";
 import {
+  DEFAULT_PROJECT_TIME_ZONE,
+  DEFAULT_PROJECT_WORKDAY_END,
+  addDaysToDateOnly,
+  formatProjectDate,
+  getEffectiveTaskDueAt,
+  getProjectLocalDate,
+  getProjectRangeUtc,
+  getProjectTimeSettings,
+  parseDateOnly,
+} from "@/lib/projectDateTime";
+import {
   PieChart,
   Pie,
   Cell,
@@ -71,7 +82,17 @@ import {
   Legend,
 } from "recharts";
 
-type ProjectInfo = { id: string; name: string | null; start_date?: string | null; end_date?: string | null; created_at?: string | null; owner_id?: string | null };
+type ProjectInfo = {
+  id: string;
+  name: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  created_at?: string | null;
+  owner_id?: string | null;
+  time_zone?: string | null;
+  normal_workday_start?: string | null;
+  normal_workday_end?: string | null;
+};
 type ProjectMemberInfo = { project_id: string; user_id: string; role?: string | null };
 type ProjectReviewerInfo = {
   project_id: string;
@@ -582,7 +603,8 @@ function getDocumentTimeLeft(task: ReportTask, status: ReportStatusKey) {
   if (status === "overdue") return "Overdue";
   if (!task.end_date) return "--";
 
-  const remaining = new Date(task.end_date).getTime() - Date.now();
+  const dueAt = getEffectiveTaskDueAt({ dueDate: task.end_date, timeZone: task.timeZone, workdayEnd: task.normalWorkdayEnd });
+  const remaining = dueAt ? dueAt.getTime() - Date.now() : NaN;
   if (Number.isNaN(remaining)) return "--";
   if (remaining <= 0) return "Overdue";
   return formatTimeDiff(remaining);
@@ -608,9 +630,8 @@ function formatReportDate(value: string | null | undefined) {
 
 function formatShortReportDate(value: string | null | undefined) {
   if (!value) return "No due date";
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return "No due date";
-  return date.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" });
+  if (!parseDateOnly(value)) return "No due date";
+  return formatProjectDate(value, "UTC", { month: "short", day: "2-digit", year: "numeric" });
 }
 
 function formatDraftReviewDueStatus(value: string | null | undefined, fromDate = new Date()) {
@@ -673,7 +694,7 @@ function toReportTaskItem(
     id: task.id,
     title: task.title ?? "Untitled task",
     owner: getTaskOwner(task, usersById),
-    dueDate: formatReportDate(task.end_date),
+    dueDate: task.end_date ? formatProjectDate(task.end_date, task.timeZone ?? DEFAULT_PROJECT_TIME_ZONE) : "--",
     status: status.label,
     statusKey,
     workflowStatusKey,
@@ -833,47 +854,41 @@ function parseReportDateValue(value: string | null | undefined) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function endOfDay(date: Date) {
-  const result = new Date(date);
-  result.setHours(23, 59, 59, 999);
-  return result;
-}
-
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
-function endOfMonth(date: Date) {
-  return endOfDay(new Date(date.getFullYear(), date.getMonth() + 1, 0));
-}
-
-function getReportScopeWindow(scope: ReportScope, now = new Date()): ReportScopeWindow {
+function getReportScopeWindow(scope: ReportScope, timeZone = DEFAULT_PROJECT_TIME_ZONE, now = new Date()): ReportScopeWindow {
   if (scope === "full_project") {
     return { scope, label: "Full Project Report", start: null, end: null };
   }
 
-  const currentWeekStart = startOfWeek(now);
+  const localToday = getProjectLocalDate(timeZone, now);
+  const parts = parseDateOnly(localToday);
+  if (!parts) return { scope, label: "Full Project Report", start: null, end: null };
+  const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
+  const currentWeekStart = addDaysToDateOnly(localToday, -weekday);
+  let startDate: string;
+  let endDateExclusive: string;
+  let label: string;
+
   if (scope === "last_week_progress" || scope === "last_week_activity") {
-    const start = new Date(currentWeekStart);
-    start.setDate(start.getDate() - 7);
-    const end = endOfDay(new Date(currentWeekStart.getTime() - 1));
-    return {
-      scope,
-      label: scope === "last_week_progress" ? "Last Week Progress" : "Last Week Activity",
-      start,
-      end,
-    };
+    startDate = addDaysToDateOnly(currentWeekStart, -7);
+    endDateExclusive = currentWeekStart;
+    label = scope === "last_week_progress" ? "Last Week Progress" : "Last Week Activity";
+  } else if (scope === "this_month") {
+    startDate = `${parts.year}-${String(parts.month).padStart(2, "0")}-01`;
+    const nextMonth = new Date(Date.UTC(parts.year, parts.month, 1));
+    endDateExclusive = `${nextMonth.getUTCFullYear()}-${String(nextMonth.getUTCMonth() + 1).padStart(2, "0")}-01`;
+    label = "This Month";
+  } else {
+    startDate = currentWeekStart;
+    endDateExclusive = addDaysToDateOnly(currentWeekStart, 7);
+    label = "This Week";
   }
 
-  if (scope === "this_month") {
-    return { scope, label: "This Month", start: startOfMonth(now), end: endOfMonth(now) };
-  }
-
-  return { scope, label: "This Week", start: currentWeekStart, end: endOfWeek(currentWeekStart) };
+  const range = getProjectRangeUtc({ startDate, endDateExclusive, timeZone });
+  return { scope, label, start: range.start, end: range.endExclusive };
 }
 
 function toExclusiveRangeEnd(window: ReportScopeWindow) {
-  return window.end ? new Date(window.end.getTime() + 1).toISOString() : null;
+  return window.end?.toISOString() ?? null;
 }
 
 function deriveReportEffort(
@@ -948,7 +963,7 @@ function isWithinScope(value: string | null | undefined, window: ReportScopeWind
   if (!window.start || !window.end) return true;
   const date = parseReportDateValue(value);
   if (!date) return false;
-  return date >= window.start && date <= window.end;
+  return date >= window.start && date < window.end;
 }
 
 function taskCompletedInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
@@ -977,7 +992,9 @@ function taskUpdatedInScope(
 }
 
 function taskDueInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
-  return isWithinScope(task.end_date, window);
+  if (!window.start || !window.end) return true;
+  const dueAt = getEffectiveTaskDueAt({ dueDate: task.end_date, timeZone: task.timeZone, workdayEnd: task.normalWorkdayEnd });
+  return Boolean(dueAt && dueAt >= window.start && dueAt < window.end);
 }
 
 function draftReviewDueInScope(task: ReportTaskWithDetails, window: ReportScopeWindow) {
@@ -989,12 +1006,22 @@ function isTaskActiveInScope(task: ReportTaskWithDetails, window: ReportScopeWin
   if (deriveReportStatus(task as ReportTask) === "completed" || deriveReportStatus(task as ReportTask) === "done_early") {
     return false;
   }
-  const start = parseReportDateValue(task.start_date ?? task.created_at);
-  const end = parseReportDateValue(task.end_date ?? task.draft_review_due_at ?? task.updated_at);
+  const start = task.start_date && parseDateOnly(task.start_date)
+    ? getProjectRangeUtc({
+        startDate: task.start_date,
+        endDateExclusive: addDaysToDateOnly(task.start_date, 1),
+        timeZone: task.timeZone,
+      }).start
+    : parseReportDateValue(task.created_at);
+  const end = getEffectiveTaskDueAt({
+    dueDate: task.end_date,
+    timeZone: task.timeZone,
+    workdayEnd: task.normalWorkdayEnd,
+  }) ?? parseReportDateValue(task.draft_review_due_at ?? task.updated_at);
   if (!start && !end) return false;
   const effectiveStart = start ?? end;
   const effectiveEnd = end ?? start;
-  return Boolean(effectiveStart && effectiveEnd && effectiveStart <= window.end && effectiveEnd >= window.start);
+  return Boolean(effectiveStart && effectiveEnd && effectiveStart < window.end && effectiveEnd >= window.start);
 }
 
 function buildScopedClientTasks(
@@ -1003,8 +1030,9 @@ function buildScopedClientTasks(
   comments: EnrichedComment[],
   scope: ReportScope,
   selectedTaskIds: string[],
+  timeZone = DEFAULT_PROJECT_TIME_ZONE,
 ) {
-  const window = getReportScopeWindow(scope);
+  const window = getReportScopeWindow(scope, timeZone);
   const selectedSet = new Set(selectedTaskIds);
   let scoped = tasks;
 
@@ -2147,7 +2175,7 @@ export default function ReportsPage() {
       // Fetch projects
       const { data: projData } = await supabase
         .from("projects")
-        .select("id, name, start_date, end_date, created_at, owner_id")
+        .select("id, name, start_date, end_date, created_at, owner_id, time_zone, normal_workday_start, normal_workday_end")
         .eq("is_active", true)
         .order("name");
       const projects = (projData ?? []) as ProjectInfo[];
@@ -2195,7 +2223,16 @@ export default function ReportsPage() {
           .in("project_id", projectIds),
       ]);
 
-      const allTasks = (tasksRes.data ?? []) as (AnalyticsTask & { project_id?: string; title?: string })[];
+      const projectSettingsById = new Map(projects.map((project) => [project.id, project]));
+      const allTasks = ((tasksRes.data ?? []) as (AnalyticsTask & { project_id?: string; title?: string })[]).map((task) => {
+        const project = task.project_id ? projectSettingsById.get(task.project_id) : null;
+        const settings = getProjectTimeSettings({
+          timeZone: project?.time_zone,
+          normalWorkdayStart: project?.normal_workday_start,
+          normalWorkdayEnd: project?.normal_workday_end,
+        });
+        return { ...task, timeZone: settings.timeZone, normalWorkdayEnd: settings.normalWorkdayEnd };
+      });
       setTasks(allTasks);
       setLogs((logsRes.data ?? []) as (AnalyticsLog & { task_id?: string })[]);
       setAssignees((assigneesRes.data ?? []) as AnalyticsAssignee[]);
@@ -2271,24 +2308,28 @@ export default function ReportsPage() {
     const taskIds = new Set(filteredTasks.map((t) => t.id));
     return logs.filter((l: any) => taskIds.has(l.task_id));
   }, [logs, filteredTasks, projectFilter]);
+  const overviewTimeZone = getProjectTimeSettings({
+    timeZone: projectFilter === "all" ? null : allProjects.find((project) => project.id === projectFilter)?.time_zone,
+  }).timeZone;
+  const reportNow = useMemo(() => new Date(timerNow ?? Date.now()), [timerNow]);
 
   // ── Compute KPIs ──────────────────────────────
-  const kpis = useMemo(() => computeKPIs(filteredTasks), [filteredTasks]);
+  const kpis = useMemo(() => computeKPIs(filteredTasks, reportNow), [filteredTasks, reportNow]);
   const statusDist = useMemo(() => computeStatusDistribution(filteredTasks), [filteredTasks]);
   const overviewWorkloadScope = useMemo(
     () => scopeProjectWorkloadInputs(filteredTasks, assignees, users, projectFilter, projectMembers, allProjects),
     [filteredTasks, assignees, users, projectFilter, projectMembers, allProjects],
   );
   const workload = useMemo(
-    () => computeWorkload(overviewWorkloadScope.tasks, overviewWorkloadScope.assignees, overviewWorkloadScope.users),
-    [overviewWorkloadScope],
+    () => computeWorkload(overviewWorkloadScope.tasks, overviewWorkloadScope.assignees, overviewWorkloadScope.users, reportNow),
+    [overviewWorkloadScope, reportNow],
   );
-  const velocity = useMemo(() => computeVelocity(filteredLogs, 8), [filteredLogs]);
-  const overdueTasks = useMemo(() => getOverdueTasks(filteredTasks, users), [filteredTasks, users]);
+  const velocity = useMemo(() => computeVelocity(filteredLogs, 8, overviewTimeZone), [filteredLogs, overviewTimeZone]);
+  const overdueTasks = useMemo(() => getOverdueTasks(filteredTasks, users, reportNow), [filteredTasks, users, reportNow]);
 
   // Report-level derived status computations
-  const reportKpis = useMemo(() => computeReportKPIs(filteredTasks as ReportTask[]), [filteredTasks]);
-  const reportStatusDist = useMemo(() => computeReportStatusDistribution(filteredTasks as ReportTask[]), [filteredTasks]);
+  const reportKpis = useMemo(() => computeReportKPIs(filteredTasks as ReportTask[], reportNow), [filteredTasks, reportNow]);
+  const reportStatusDist = useMemo(() => computeReportStatusDistribution(filteredTasks as ReportTask[], reportNow), [filteredTasks, reportNow]);
 
   // ── Unified Activity Feed ─────────────────────
   const activityFeed = useMemo<ActivityEvent[]>(() => {
@@ -2379,6 +2420,8 @@ export default function ReportsPage() {
       endDate: task.end_date ?? null,
       creator: null,
       description: (task as AnalyticsTask & { description?: string | null }).description ?? null,
+      projectTimeZone: task.timeZone ?? projectInfo?.time_zone ?? DEFAULT_PROJECT_TIME_ZONE,
+      normalWorkdayEnd: task.normalWorkdayEnd ?? projectInfo?.normal_workday_end ?? DEFAULT_PROJECT_WORKDAY_END,
     });
   }, [allProjects, openTaskDetails, usersById]);
 
@@ -2390,8 +2433,8 @@ export default function ReportsPage() {
     if (status === "completed") return "completed";
     if (status === "not_started" || status === "in_progress") {
       if (task.end_date) {
-        const endMs = new Date(task.end_date).getTime();
-        const remaining = endMs - Date.now();
+        const endMs = getEffectiveTaskDueAt({ dueDate: task.end_date, timeZone: task.timeZone, workdayEnd: task.normalWorkdayEnd })?.getTime();
+        const remaining = endMs === undefined ? NaN : endMs - Date.now();
         if (remaining > 0) return `${formatTimeDiff(remaining)} remaining`;
       }
       return "on track";
@@ -2402,9 +2445,13 @@ export default function ReportsPage() {
   // Report generation
   const [aiProjectFilter, setAiProjectFilter] = useState("all");
   const [aiUserFilter, setAiUserFilter] = useState("all");
+  const reportTimeZone = getProjectTimeSettings({
+    timeZone: aiProjectFilter === "all" ? null : allProjects.find((project) => project.id === aiProjectFilter)?.time_zone,
+  }).timeZone;
+  const reportLocalDate = getProjectLocalDate(reportTimeZone, reportNow);
   const manHoursScope = useMemo(
-    () => getReportScopeWindow(reportAudience === "client" ? reportScope : "full_project"),
-    [reportAudience, reportScope],
+    () => getReportScopeWindow(reportAudience === "client" ? reportScope : "full_project", reportTimeZone, reportNow),
+    [reportAudience, reportScope, reportTimeZone, reportLocalDate],
   );
   const manHoursQueryKey = `${aiProjectFilter}|${manHoursScope.start?.toISOString() ?? "all"}|${toExclusiveRangeEnd(manHoursScope) ?? "all"}`;
 
@@ -2664,8 +2711,8 @@ Utilization: ${utilizationScore}%`;
 
       const selectedIdsForReport = reportAudience === "client" && taskSelectionMode === "selected" ? selectedTaskIds : [];
       const clientScope = reportAudience === "client"
-        ? buildScopedClientTasks(aiTasks, reportLogs, comments, reportScope, selectedIdsForReport)
-        : { tasks: aiTasks, window: getReportScopeWindow("full_project" as ReportScope) };
+        ? buildScopedClientTasks(aiTasks, reportLogs, comments, reportScope, selectedIdsForReport, reportTimeZone)
+        : { tasks: aiTasks, window: getReportScopeWindow("full_project" as ReportScope, reportTimeZone) };
       aiTasks = clientScope.tasks;
       const effort = manHoursData && manHoursDataKey === manHoursQueryKey && aiProjectFilter !== "all"
         ? deriveReportEffort(manHoursData, clientScope.window, new Set(aiTasks.map((task) => task.id)))
@@ -2914,8 +2961,12 @@ Utilization: ${utilizationScore}%`;
           generatedAt: new Date().toISOString(),
           reportScope: reportAudience === "client" ? reportScope : undefined,
           scopeLabel: reportAudience === "client" ? clientScope.window.label : undefined,
-          scopeStartDate: reportAudience === "client" ? clientScope.window.start?.toISOString() ?? null : undefined,
-          scopeEndDate: reportAudience === "client" ? clientScope.window.end?.toISOString() ?? null : undefined,
+          scopeStartDate: reportAudience === "client" && clientScope.window.start
+            ? getProjectLocalDate(reportTimeZone, clientScope.window.start)
+            : undefined,
+          scopeEndDate: reportAudience === "client" && clientScope.window.end
+            ? getProjectLocalDate(reportTimeZone, new Date(clientScope.window.end.getTime() - 1))
+            : undefined,
           selectedTaskIds: reportAudience === "client" ? selectedIdsForReport : undefined,
           leads,
           reviewers,
@@ -2973,7 +3024,7 @@ Utilization: ${utilizationScore}%`;
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, supabase, manHoursData, manHoursDataKey, manHoursQueryKey, manHoursLoading, manHoursError]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, reportTimeZone, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, supabase, manHoursData, manHoursDataKey, manHoursQueryKey, manHoursLoading, manHoursError]);
 
   const refreshClientReportDataForPdf = useCallback(async (report: ExecutiveReportData): Promise<ExecutiveReportData> => {
     const taskIds = Array.from(new Set(report.taskRegister.map((task) => task.id).filter(Boolean)));
@@ -3485,7 +3536,7 @@ Utilization: ${utilizationScore}%`;
                             >
                               <p className="text-sm font-semibold text-slate-900 line-clamp-2">{t.title ?? "Untitled"}</p>
                               {t.end_date && (
-                                <p className="mt-1 text-[11px] text-slate-400">Due: {new Date(t.end_date).toLocaleDateString(undefined, { day: "2-digit", month: "short" })}</p>
+                                <p className="mt-1 text-[11px] text-slate-400">Due: {formatProjectDate(t.end_date, t.timeZone ?? DEFAULT_PROJECT_TIME_ZONE, { day: "2-digit", month: "short" })}</p>
                               )}
                               {getReportTimer(t) && (
                                 <span className={`mt-1.5 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${cfg.bg} ${cfg.text}`}>

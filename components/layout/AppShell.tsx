@@ -34,6 +34,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [aiContext, setAiContext] = useState<{
     projectName?: string;
     projectId?: string;
+    timeZone?: string | null;
+    normalWorkdayStart?: string | null;
+    normalWorkdayEnd?: string | null;
     currentUser?: {
       id: string;
       name: string | null;
@@ -59,7 +62,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
     try {
       const [projectRes, membersRes, tasksRes] = await Promise.all([
-        supabase.from("projects").select("id, name").eq("id", projectId).single(),
+        supabase.from("projects").select("id, name, time_zone, normal_workday_start, normal_workday_end").eq("id", projectId).single(),
         supabase
           .from("project_members")
           .select("user_id, user:users(id, name, email)")
@@ -72,7 +75,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           .limit(50),
       ]);
 
-      const projectName = (projectRes.data as { name: string } | null)?.name ?? "Unknown";
+      const projectData = projectRes.data as {
+        name: string;
+        time_zone: string | null;
+        normal_workday_start: string | null;
+        normal_workday_end: string | null;
+      } | null;
+      const projectName = projectData?.name ?? "Unknown";
       const memberRows = (membersRes.data ?? []) as unknown as {
         user_id: string;
         user: { id: string; name: string | null; email: string | null } | { id: string; name: string | null; email: string | null }[] | null;
@@ -89,6 +98,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       setAiContext({
         projectId,
         projectName,
+        timeZone: projectData?.time_zone,
+        normalWorkdayStart: projectData?.normal_workday_start,
+        normalWorkdayEnd: projectData?.normal_workday_end,
         currentUser: profile
           ? {
               id: profile.id,

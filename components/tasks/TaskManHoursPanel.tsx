@@ -13,7 +13,10 @@ type TaskManHoursPanelProps = {
 function trackingLabel(summary: LiveTaskManHoursSummary) {
   if (summary.trackingState === "untracked") return "Not tracked";
   if (normalizeStatus(summary.status) === "done") return "Completed";
+  if (summary.scheduleState === "legacy") return "Schedule not configured";
+  if (!summary.todayIsSelected) return "Off day";
   if (isLiveManHoursTaskRunning(summary)) return "Running";
+  if (summary.isSessionOpen && !summary.isAccumulating) return "Outside working hours";
   return "Paused";
 }
 
@@ -21,7 +24,7 @@ function PanelContent({ summary }: { summary: LiveTaskManHoursSummary }) {
   const status = normalizeStatus(summary.status);
   const state = trackingLabel(summary);
   const tracked = summary.trackingState === "tracked";
-  const activeLabel = state === "Completed" ? "Final active duration" : state === "Paused" ? "Tracked active duration" : "Active duration";
+  const activeLabel = state === "Completed" ? "Final active duration" : state === "Running" ? "Active duration" : "Tracked active duration";
 
   return (
     <div className="p-4">
@@ -32,6 +35,7 @@ function PanelContent({ summary }: { summary: LiveTaskManHoursSummary }) {
           <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS_CONFIG[status].badge}`}>{STATUS_CONFIG[status].label}</span>
           <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600">{state}</span>
         </div>
+        {!summary.isAccumulating && summary.nextWindowStart ? <p className="mt-1 text-[11px] text-slate-500">Resumes in the next selected working window.</p> : null}
       </div>
 
       {!tracked ? (

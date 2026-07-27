@@ -15,8 +15,11 @@ type ProjectManHoursProps = {
 
 function taskState(task: LiveTaskManHoursSummary) {
   if (task.trackingState === "untracked") return "Not tracked";
-  if (isLiveManHoursTaskRunning(task)) return "Running";
   if (normalizeStatus(task.status) === "done") return "Completed";
+  if (task.scheduleState === "legacy") return "Schedule not configured";
+  if (!task.todayIsSelected) return "Off day";
+  if (isLiveManHoursTaskRunning(task)) return "Running";
+  if (task.isSessionOpen && !task.isAccumulating) return "Outside working hours";
   return "Paused";
 }
 

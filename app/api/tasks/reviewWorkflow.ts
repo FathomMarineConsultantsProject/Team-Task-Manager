@@ -8,6 +8,15 @@ export const json = (body: unknown, status = 200) =>
     headers: { "Content-Type": "application/json" },
   });
 
+export const jsonNoStore = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+  });
+
 export function getClients(req: Request) {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;

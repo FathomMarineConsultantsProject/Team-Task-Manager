@@ -10,7 +10,9 @@ import TaskLinks from "@/components/tasks/TaskLinks";
 import TaskReviewApprovals from "@/components/tasks/TaskReviewApprovals";
 import LinkifiedText from "@/components/ui/LinkifiedText";
 import TaskManHoursPanel from "@/components/tasks/TaskManHoursPanel";
+import TaskWorkingScheduleSection from "@/components/tasks/TaskWorkingScheduleSection";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
+import { DEFAULT_PROJECT_TIME_ZONE, DEFAULT_PROJECT_WORKDAY_END, formatProjectDate, isDateOnly } from "@/lib/projectDateTime";
 
 export type TaskDetailsSeed = {
   id: string;
@@ -27,6 +29,8 @@ export type TaskDetailsSeed = {
   endDate?: string | null;
   creator?: { id: string | null; name: string | null; email: string | null } | null;
   description?: string | null;
+  projectTimeZone?: string | null;
+  normalWorkdayEnd?: string | null;
 };
 
 type TaskDetailsState = Required<Omit<TaskDetailsSeed, "assignees" | "assignee" | "createdAt" | "createdByName" | "startDate" | "endDate" | "creator" | "description">> & {
@@ -41,6 +45,8 @@ type TaskDetailsState = Required<Omit<TaskDetailsSeed, "assignees" | "assignee" 
   description: string | null;
   /** The user ID who created this task (loaded from DB) */
   createdById: string | null;
+  projectTimeZone: string;
+  normalWorkdayEnd: string;
 };
 
 type TaskDetailsRow = {
@@ -50,7 +56,7 @@ type TaskDetailsRow = {
   start_date: string | null;
   end_date: string | null;
   project_id: string | null;
-  projects?: { owner_id: string | null } | { owner_id: string | null }[] | null;
+  projects?: { owner_id: string | null; time_zone: string | null; normal_workday_end: string | null } | { owner_id: string | null; time_zone: string | null; normal_workday_end: string | null }[] | null;
 };
 
 type TaskLogRow = {
@@ -147,6 +153,7 @@ type WorkflowOptions = {
   canAddUpdate?: boolean;
   canViewUpdates?: boolean;
   onTaskUpdated?: () => void | Promise<void>;
+  onManHoursChanged?: (change?: { taskId: string; dates: string[]; startDate: string; endDate: string }) => void;
   manHoursByTaskId?: Map<string, LiveTaskManHoursSummary>;
 };
 
@@ -171,6 +178,7 @@ const formatOptionalDate = (value: string | null | undefined) => {
   if (!value) {
     return null;
   }
+  if (isDateOnly(value)) return formatProjectDate(value, "UTC");
 
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -182,6 +190,12 @@ const formatOptionalDate = (value: string | null | undefined) => {
     month: "short",
     day: "2-digit",
   });
+};
+
+const formatLocalTimeLabel = (value: string) => {
+  const [hourValue, minute = "00"] = value.split(":");
+  const hour = Number(hourValue);
+  return Number.isFinite(hour) ? `${hour % 12 || 12}:${minute} ${hour >= 12 ? "PM" : "AM"}` : value;
 };
 
 const formatStatusValue = (value: string | null | undefined) => {
@@ -234,6 +248,7 @@ export function useTaskDetailsWorkflow({
   canAddUpdate = true,
   canViewUpdates = true,
   onTaskUpdated,
+  onManHoursChanged,
   manHoursByTaskId,
 }: WorkflowOptions) {
   const [selectedTaskDetails, setSelectedTaskDetails] = useState<TaskDetailsState | null>(null);
@@ -252,6 +267,11 @@ export function useTaskDetailsWorkflow({
   const taskId = selectedTaskDetails?.id ?? null;
   const projectId = selectedTaskDetails?.projectId ?? null;
   const selectedTaskManHours = taskId ? manHoursByTaskId?.get(taskId) : undefined;
+  const getAccessToken = useCallback(async () => {
+    if (!supabase.auth) return null;
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  }, [supabase]);
   const chatMembers = useMemo(() => {
     const merged = new Map<string, TaskDetailMember>();
     [...projectMembers, ...members].forEach((member) => {
@@ -320,6 +340,8 @@ export function useTaskDetailsWorkflow({
       creator: seed.creator ?? null,
       description: seed.description ?? null,
       createdById: null, // Will be loaded from DB
+      projectTimeZone: seed.projectTimeZone ?? DEFAULT_PROJECT_TIME_ZONE,
+      normalWorkdayEnd: seed.normalWorkdayEnd ?? DEFAULT_PROJECT_WORKDAY_END,
     });
     setIsReviewApprovalsOpen(false);
     setReviewApprovalCounts(null);
@@ -336,7 +358,7 @@ export function useTaskDetailsWorkflow({
 
       const { data: taskData, error: taskError } = await supabase
         .from("tasks")
-        .select("created_by, description, title, start_date, end_date, project_id, projects(owner_id)")
+        .select("created_by, description, title, start_date, end_date, project_id, projects(owner_id, time_zone, normal_workday_end)")
         .eq("id", taskId)
         .single();
 
@@ -379,6 +401,8 @@ export function useTaskDetailsWorkflow({
           endDate: taskDetails?.end_date ?? prev.endDate,
           projectId: taskDetails?.project_id ?? prev.projectId,
           projectOwnerId: projectRelation?.owner_id ?? prev.projectOwnerId,
+          projectTimeZone: projectRelation?.time_zone ?? prev.projectTimeZone,
+          normalWorkdayEnd: projectRelation?.normal_workday_end ?? prev.normalWorkdayEnd,
           createdById: taskDetails?.created_by ?? prev.createdById,
         };
       });
@@ -795,6 +819,7 @@ export function useTaskDetailsWorkflow({
                 <div>
                   <p className="text-xs text-gray-500">Due Date</p>
                   <p className="text-sm">{formatOptionalDate(selectedTaskDetails.endDate)}</p>
+                  <p className="text-xs text-slate-500">Due cutoff: {formatLocalTimeLabel(selectedTaskDetails.normalWorkdayEnd)} ({selectedTaskDetails.projectTimeZone})</p>
                 </div>
               )}
 
@@ -809,6 +834,24 @@ export function useTaskDetailsWorkflow({
                 </div>
               </div>
             </div>
+
+            <TaskWorkingScheduleSection
+              key={selectedTaskDetails.id}
+              taskId={selectedTaskDetails.id}
+              taskTitle={selectedTaskDetails.title}
+              taskStatus={selectedTaskDetails.status}
+              startDate={selectedTaskDetails.startDate}
+              dueDate={selectedTaskDetails.endDate}
+              getAccessToken={getAccessToken}
+              onChanged={(change) => {
+                if (change) {
+                  setSelectedTaskDetails((current) => current?.id === change.taskId
+                    ? { ...current, startDate: change.startDate, endDate: change.endDate }
+                    : current);
+                }
+                onManHoursChanged?.(change);
+              }}
+            />
 
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
               <button
@@ -842,6 +885,8 @@ export function useTaskDetailsWorkflow({
                     projectId={selectedTaskDetails.projectId}
                     currentUserId={profileId}
                     canManageDependencies={canManageDependencies}
+                    projectTimeZone={selectedTaskDetails.projectTimeZone}
+                    normalWorkdayEnd={selectedTaskDetails.normalWorkdayEnd}
                     showHeader={false}
                     onPendingCountChange={setDependencyPendingCount}
                   />

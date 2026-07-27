@@ -6,6 +6,13 @@ import Avatar from "@/components/ui/Avatar";
 import { workingDaysUntil } from "@/lib/workingDays";
 import { formatDuration } from "@/lib/manHours";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
+import {
+  DEFAULT_PROJECT_TIME_ZONE,
+  DEFAULT_PROJECT_WORKDAY_END,
+  formatProjectDate,
+  getProjectLocalDate,
+  getTaskDueState,
+} from "@/lib/projectDateTime";
 
 interface TaskCardProps extends Task {
   columnId: ColumnId;
@@ -17,10 +24,14 @@ interface TaskCardProps extends Task {
   onEditTask?: (taskId: string) => void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
   onMarkReviewed?: (taskId: string) => Promise<void> | void;
+  onExtendWorkday?: (taskId: string) => void;
   canClaim?: boolean;
   canDelete?: boolean;
   canEdit?: boolean;
+  canExtendWorkday?: boolean;
   manHoursSummary?: LiveTaskManHoursSummary;
+  projectTimeZone?: string;
+  normalWorkdayEnd?: string;
 }
 
 const STATUS_TONES: Record<string, { border: string; glow: string; pill: string }> = {
@@ -53,24 +64,41 @@ const formatDueDelta = (ms: number) => {
   return `${minutes}m`;
 };
 
-export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, onMarkReviewed, canClaim = false, canDelete = true, canEdit = false, manHoursSummary, onDragStart, onDragEnd, ...task }: TaskCardProps) {
+const formatLocalTime = (value: string) => {
+  const [hourValue, minute = "00"] = value.split(":");
+  const hour = Number(hourValue);
+  if (!Number.isFinite(hour)) return value;
+  return `${hour % 12 || 12}:${minute} ${hour >= 12 ? "PM" : "AM"}`;
+};
+
+export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, onMarkReviewed, onExtendWorkday, canClaim = false, canDelete = true, canEdit = false, canExtendWorkday = false, manHoursSummary, projectTimeZone = DEFAULT_PROJECT_TIME_ZONE, normalWorkdayEnd = DEFAULT_PROJECT_WORKDAY_END, onDragStart, onDragEnd, ...task }: TaskCardProps) {
   const [isRemoving, setIsRemoving] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [isMarkingReviewed, setIsMarkingReviewed] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const canDrag = task.canDrag ?? false;
-  const now = Date.now();
-  const isFutureTask = task.start_date && new Date(task.start_date) > new Date();
+  const nowDate = new Date();
+  const now = nowDate.getTime();
+  const isFutureTask = Boolean(task.start_date && task.start_date > getProjectLocalDate(projectTimeZone, nowDate));
   const reviewDueAt = columnId === "draftReview" && task.draft_review_due_at
     ? new Date(task.draft_review_due_at).getTime()
     : null;
-  const dueAt = reviewDueAt ?? (task.end_date ? new Date(task.end_date).getTime() : null);
-  const isOverdue = dueAt !== null && dueAt < now && columnId !== "done";
+  const taskDue = getTaskDueState({
+    dueDate: task.end_date,
+    completedAt: columnId === "done" ? task.completed_at ?? nowDate.toISOString() : null,
+    now: nowDate,
+    timeZone: projectTimeZone,
+    workdayEnd: normalWorkdayEnd,
+  });
+  const dueAt = reviewDueAt ?? taskDue.effectiveDueAt?.getTime() ?? null;
+  const isOverdue = reviewDueAt !== null
+    ? reviewDueAt < now && columnId !== "done"
+    : taskDue.state === "overdue" && columnId !== "done";
   const isNearDue = dueAt !== null && !isOverdue && (dueAt - now) <= 3 * 24 * 60 * 60 * 1000 && columnId !== "done";
   const dueState: "overdue" | "near" | "on_track" | null = isOverdue ? "overdue" : isNearDue ? "near" : dueAt ? "on_track" : null;
   const dueDelta = dueAt ? formatDueDelta(Math.abs(dueAt - now)) : null;
   const dueDateLabel = task.end_date
-    ? new Date(task.end_date).toLocaleDateString(undefined, { month: "short", day: "2-digit" })
+    ? formatProjectDate(task.end_date, projectTimeZone, { month: "short", day: "2-digit" })
     : null;
   const reviewDueDateLabel = task.draft_review_due_at
     ? new Date(task.draft_review_due_at).toLocaleDateString(undefined, { month: "short", day: "2-digit" })
@@ -84,6 +112,14 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
       ? `Review overdue by ${Math.abs(reviewWorkingDays)} working ${Math.abs(reviewWorkingDays) === 1 ? "day" : "days"}`
       : `Review due in ${reviewWorkingDays} working ${reviewWorkingDays === 1 ? "day" : "days"}`;
   const tone = resolveTone(columnId, dueState);
+  const dueChipText = columnId === "done"
+    ? "Completed"
+    : reviewDueText
+      ?? (isOverdue
+        ? `overdue by ${dueDelta}`
+        : taskDue.state === "due_today" && reviewDueAt === null
+          ? "Due today"
+          : `due in ${dueDelta}`);
 
   const baseClasses = "select-none rounded-2xl border bg-white/90 p-4 shadow-[0_10px_25px_-20px_rgba(15,23,42,0.4)] transition-all duration-200";
   const interactionClasses = canDrag ? "cursor-grab active:cursor-grabbing" : isFutureTask ? "cursor-not-allowed" : "cursor-default";
@@ -187,7 +223,23 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
     }
   };
 
-  const showContextMenu = canEdit || canDelete || canMarkReviewed;
+  const isActiveWorkStatus = columnId === "inProgress" || columnId === "draftReview" || columnId === "review";
+  const showExtendAction = isActiveWorkStatus && canExtendWorkday && Boolean(onExtendWorkday);
+  const showContextMenu = canEdit || canDelete || canMarkReviewed || showExtendAction;
+  const extendDisabledReason = manHoursSummary?.scheduleState === "legacy"
+    ? "Configure working dates first"
+    : manHoursSummary && !manHoursSummary.todayIsSelected
+      ? "Today is not a selected working date."
+      : null;
+  const manHoursTooltip = manHoursSummary?.scheduleState === "legacy"
+    ? "Legacy continuous tracking; configure a working schedule"
+    : !manHoursSummary?.todayIsSelected
+      ? "Off day — man-hours are not accumulating"
+      : manHoursSummary?.isAccumulating
+        ? `Running until ${formatLocalTime(manHoursSummary.effectiveEndLocalTime)}`
+        : manHoursSummary?.todayHasExtension
+          ? `Extended until ${formatLocalTime(manHoursSummary.effectiveEndLocalTime)}`
+          : "Outside working hours";
 
   return (
     <div
@@ -221,7 +273,7 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
               </button>
               {showMenu && (
                 <div
-                  className="absolute right-0 top-full z-30 mt-1 w-32 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg"
+                  className="absolute right-0 top-full z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg"
                   onClick={(event) => event.stopPropagation()}
                 >
                   {canEdit && onEditTask && (
@@ -250,6 +302,22 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
                       {isMarkingReviewed ? "Saving..." : "Mark as Reviewed"}
                     </button>
                   )}
+                  {showExtendAction ? (
+                    <button
+                      type="button"
+                      disabled={Boolean(extendDisabledReason)}
+                      title={extendDisabledReason ?? undefined}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (extendDisabledReason) return;
+                        setShowMenu(false);
+                        onExtendWorkday?.(task.id);
+                      }}
+                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-blue-700 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                    >
+                      {extendDisabledReason ?? (manHoursSummary?.todayHasExtension ? "Update Today’s Extension" : "Extend Today’s Work Hours")}
+                    </button>
+                  ) : null}
                   {canDelete && (
                     <button
                       type="button"
@@ -272,7 +340,7 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
           {dueAt ? (
             <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone.pill}`}>
               <Clock size={11} />
-              {reviewDueText ?? (isOverdue ? `overdue by ${dueDelta}` : `due in ${dueDelta}`)}
+              {dueChipText}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
@@ -298,7 +366,7 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
           {manHoursSummary?.trackingState === "tracked" ? (
             <span
               className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700"
-              title="Total tracked man-hours"
+              title={manHoursTooltip}
             >
               <Clock size={11} />
               MH {formatDuration(manHoursSummary.liveTotalManHoursSeconds)}

@@ -14,6 +14,8 @@ export type RoadmapTask = {
   created_at: string | null;
   completed_at: string | null;
   assignees?: { id: string; name: string | null }[];
+  timeZone?: string | null;
+  normalWorkdayEnd?: string | null;
 };
 
 export type RoadmapProject = {
