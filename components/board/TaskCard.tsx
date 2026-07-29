@@ -21,7 +21,7 @@ interface TaskCardProps extends Task {
   onDragEnd: () => void;
   onRemoveTask: (taskId: string, column: ColumnId) => void;
   onDeleteTask: (taskId: string, column: ColumnId) => Promise<void> | void;
-  onEditTask?: (taskId: string) => void;
+  onEditTask?: (taskId: string, target?: "task" | "working-dates") => void;
   onClaimTask?: (taskId: string) => Promise<void> | void;
   onMarkReviewed?: (taskId: string) => Promise<void> | void;
   onExtendWorkday?: (taskId: string) => void;
@@ -68,7 +68,7 @@ const formatLocalTime = (value: string) => {
   const [hourValue, minute = "00"] = value.split(":");
   const hour = Number(hourValue);
   if (!Number.isFinite(hour)) return value;
-  return `${hour % 12 || 12}:${minute} ${hour >= 12 ? "PM" : "AM"}`;
+  return `${hour % 12 || 12}:${minute} ${hour >= 12 && hour < 24 ? "PM" : "AM"}`;
 };
 
 export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDeleteTask, onEditTask, onClaimTask, onMarkReviewed, onExtendWorkday, canClaim = false, canDelete = true, canEdit = false, canExtendWorkday = false, manHoursSummary, projectTimeZone = DEFAULT_PROJECT_TIME_ZONE, normalWorkdayEnd = DEFAULT_PROJECT_WORKDAY_END, onDragStart, onDragEnd, ...task }: TaskCardProps) {
@@ -226,11 +226,6 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
   const isActiveWorkStatus = columnId === "inProgress" || columnId === "draftReview" || columnId === "review";
   const showExtendAction = isActiveWorkStatus && canExtendWorkday && Boolean(onExtendWorkday);
   const showContextMenu = canEdit || canDelete || canMarkReviewed || showExtendAction;
-  const extendDisabledReason = manHoursSummary?.scheduleState === "legacy"
-    ? "Configure working dates first"
-    : manHoursSummary && !manHoursSummary.todayIsSelected
-      ? "Today is not a selected working date."
-      : null;
   const manHoursTooltip = manHoursSummary?.scheduleState === "legacy"
     ? "Legacy continuous tracking; configure a working schedule"
     : !manHoursSummary?.todayIsSelected
@@ -276,19 +271,6 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
                   className="absolute right-0 top-full z-30 mt-1 w-52 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg"
                   onClick={(event) => event.stopPropagation()}
                 >
-                  {canEdit && onEditTask && (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setShowMenu(false);
-                        onEditTask(task.id);
-                      }}
-                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-slate-700 transition hover:bg-slate-50"
-                    >
-                      Edit
-                    </button>
-                  )}
                   {canMarkReviewed && (
                     <button
                       type="button"
@@ -302,20 +284,43 @@ export default function TaskCard({ columnId, onOpenDetails, onRemoveTask, onDele
                       {isMarkingReviewed ? "Saving..." : "Mark as Reviewed"}
                     </button>
                   )}
+                  {canEdit && onEditTask && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setShowMenu(false);
+                        onEditTask(task.id, "task");
+                      }}
+                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Edit Task
+                    </button>
+                  )}
+                  {canEdit && onEditTask && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setShowMenu(false);
+                        onEditTask(task.id, "working-dates");
+                      }}
+                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Edit Working Dates
+                    </button>
+                  )}
                   {showExtendAction ? (
                     <button
                       type="button"
-                      disabled={Boolean(extendDisabledReason)}
-                      title={extendDisabledReason ?? undefined}
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (extendDisabledReason) return;
                         setShowMenu(false);
                         onExtendWorkday?.(task.id);
                       }}
-                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-blue-700 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:text-slate-400"
+                      className="flex w-full items-center px-3 py-2 text-left text-xs font-medium text-blue-700 transition hover:bg-blue-50"
                     >
-                      {extendDisabledReason ?? (manHoursSummary?.todayHasExtension ? "Update Today’s Extension" : "Extend Today’s Work Hours")}
+                      {manHoursSummary?.todayHasExtension ? "Update Extended Hours" : "Extend Work Hours"}
                     </button>
                   ) : null}
                   {canDelete && (

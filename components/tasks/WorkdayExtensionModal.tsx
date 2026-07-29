@@ -15,13 +15,15 @@ type Props = {
   onChanged: () => void | Promise<void>;
 };
 
-const QUICK_TIMES = ["20:00", "21:00", "22:00", "23:00"];
-const LATEST_EXTENSION_MINUTES = 23 * 60;
+const QUICK_TIMES = ["20:00", "21:00", "22:00", "23:00", "24:00"];
+const LATEST_EXTENSION_MINUTES = 24 * 60;
 const minutes = (value: string) => {
+  if (value === "24:00" || value === "24:00:00") return LATEST_EXTENSION_MINUTES;
   const parsed = parseTimeOnly(value);
   return parsed ? parsed.hour * 60 + parsed.minute : NaN;
 };
 const displayTime = (value: string) => {
+  if (value === "24:00" || value === "24:00:00") return "12:00 AM";
   const parsed = parseTimeOnly(value);
   if (!parsed) return value;
   const hour = parsed.hour % 12 || 12;
@@ -76,9 +78,9 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
     if (
       !Number.isFinite(endMinutes)
       || endMinutes <= normalMinutes
-      || endMinutes > Math.min(normalMinutes + 240, LATEST_EXTENSION_MINUTES)
+      || endMinutes > Math.min(normalMinutes + 300, LATEST_EXTENSION_MINUTES)
     ) {
-      setError("Workday extensions cannot exceed four hours after the normal end time.");
+      setError("Workday extensions cannot exceed five hours after the normal end time or continue beyond midnight.");
       return;
     }
     if (endMinutes - normalMinutes > 120 && !reason.trim()) {
@@ -121,7 +123,7 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
   };
 
   const normalEndMinutes = minutes(schedule.normalWorkdayEnd);
-  const latestEndMinutes = Math.min(normalEndMinutes + 240, LATEST_EXTENSION_MINUTES);
+  const latestEndMinutes = Math.min(normalEndMinutes + 300, LATEST_EXTENSION_MINUTES);
   const availableQuickTimes = QUICK_TIMES.filter((time) => {
     const value = minutes(time);
     return value > normalEndMinutes && value <= latestEndMinutes;
@@ -149,14 +151,17 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
         </div>
         <div>
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Extend until</p>
-          <p className="mb-2 text-xs text-slate-500">You can extend this task by up to four hours, until 11:00 PM.</p>
+          <p className="mb-2 text-xs text-slate-500">Extend this task for today, up to midnight.</p>
           <div className="flex flex-wrap gap-2">
             {availableQuickTimes.map((time) => (
               <button key={time} type="button" onClick={() => setExtendedUntil(time)} className={`rounded-lg border px-3 py-2 text-sm font-medium ${extendedUntil === time ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}>
                 {displayTime(time)}
               </button>
             ))}
-            <input aria-label="Custom extension end time" type="time" min={timeFromMinutes(normalEndMinutes + 1)} max={timeFromMinutes(latestEndMinutes)} value={extendedUntil} onChange={(event) => setExtendedUntil(event.target.value)} className="rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+            <label className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600">
+              Custom
+              <input aria-label="Custom extension end time" type="time" min={timeFromMinutes(normalEndMinutes + 1)} max={timeFromMinutes(Math.min(latestEndMinutes, 23 * 60 + 59))} value={extendedUntil === "24:00" ? "" : extendedUntil} onChange={(event) => setExtendedUntil(event.target.value)} className="w-[92px] bg-transparent text-sm text-slate-800 outline-none" />
+            </label>
           </div>
         </div>
         <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">

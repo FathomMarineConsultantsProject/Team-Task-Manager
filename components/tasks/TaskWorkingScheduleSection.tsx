@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import TaskWorkingDatesCalendar from "./TaskWorkingDatesCalendar";
 import WorkdayExtensionModal from "./WorkdayExtensionModal";
@@ -14,7 +14,12 @@ type Props = {
   startDate?: string | null;
   dueDate?: string | null;
   getAccessToken: () => Promise<string | null>;
-  onChanged?: (change?: { taskId: string; dates: string[]; startDate: string; endDate: string }) => void;
+  schedule: TaskWorkingSchedule | null;
+  loading: boolean;
+  loadError: string | null;
+  onRetry: () => void;
+  onChanged: (schedule: TaskWorkingSchedule) => void;
+  onExtensionChanged: () => void | Promise<void>;
 };
 
 const activeStatuses = new Set(["in_progress", "draft_review", "in_review", "inprogress", "draftreview", "review"]);
@@ -40,37 +45,31 @@ const initialDatesFor = (
   return listDateOnlyRange(start, boundedEnd);
 };
 
-export default function TaskWorkingScheduleSection({ taskId, taskTitle, taskStatus, startDate, dueDate, getAccessToken, onChanged }: Props) {
+export default function TaskWorkingScheduleSection({
+  taskId,
+  taskTitle,
+  taskStatus,
+  startDate,
+  dueDate,
+  getAccessToken,
+  schedule,
+  loading,
+  loadError,
+  onRetry,
+  onChanged,
+  onExtensionChanged,
+}: Props) {
   const [open, setOpen] = useState(false);
-  const [schedule, setSchedule] = useState<TaskWorkingSchedule | null>(null);
   const [dates, setDates] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [reasonRequired, setReasonRequired] = useState(false);
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [extensionOpen, setExtensionOpen] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const token = await getAccessToken();
-      if (!token) throw new Error("Please sign in again.");
-      const response = await fetch(`/api/tasks/${taskId}/working-dates`, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error ?? "Unable to load the working schedule.");
-      const loadedSchedule = data as TaskWorkingSchedule;
-      setSchedule(loadedSchedule);
-      setDates(initialDatesFor(loadedSchedule, startDate, dueDate));
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load the working schedule.");
-    } finally {
-      setLoading(false);
-    }
-  }, [dueDate, getAccessToken, startDate, taskId]);
-
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (schedule) setDates(initialDatesFor(schedule, startDate, dueDate));
+  }, [dueDate, schedule, startDate]);
 
   const save = async () => {
     if (!dates.length) {
@@ -98,15 +97,18 @@ export default function TaskWorkingScheduleSection({ taskId, taskTitle, taskStat
       if (!response.ok) throw new Error(data.error ?? "Unable to save the working schedule.");
       const savedSchedule = data as TaskWorkingSchedule & { startDate?: string; endDate?: string };
       const savedDates = savedSchedule.dates ?? dates;
-      setSchedule(savedSchedule);
       setDates(savedDates);
       setReasonRequired(false);
       setReason("");
-      onChanged?.({
-        taskId,
-        dates: savedDates,
-        startDate: savedSchedule.startDate ?? savedDates[0],
-        endDate: savedSchedule.endDate ?? savedDates[savedDates.length - 1],
+      const selected = new Set(savedDates);
+      onChanged({
+        ...savedSchedule,
+        extensions: (savedSchedule.extensions ?? schedule?.extensions ?? [])
+          .filter((extension) => selected.has(extension.workDate)),
+        dateDetails: Object.fromEntries(
+          Object.entries(savedSchedule.dateDetails ?? schedule?.dateDetails ?? {})
+            .filter(([workDate]) => selected.has(workDate)),
+        ),
       });
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save the working schedule.");
@@ -171,8 +173,14 @@ export default function TaskWorkingScheduleSection({ taskId, taskTitle, taskStat
               {activeStatuses.has(statusKey) && schedule.canManage && !schedule.todayIsSelected ? <p className="text-xs text-slate-500">Today is not a selected working date.</p> : null}
             </>
           ) : null}
+          {loadError ? (
+            <div>
+              <p role="alert" className="text-sm font-medium text-red-600">Working dates could not be loaded.</p>
+              <button type="button" onClick={onRetry} className="mt-2 text-xs font-semibold text-blue-700">Retry</button>
+            </div>
+          ) : null}
           {error ? <p role="alert" className="text-sm font-medium text-red-600">{error}</p> : null}
-          {schedule ? <WorkdayExtensionModal isOpen={extensionOpen} taskTitle={taskTitle} schedule={schedule} getAccessToken={getAccessToken} onClose={() => setExtensionOpen(false)} onChanged={async () => { await load(); onChanged?.(); }} /> : null}
+          {schedule ? <WorkdayExtensionModal isOpen={extensionOpen} taskTitle={taskTitle} schedule={schedule} getAccessToken={getAccessToken} onClose={() => setExtensionOpen(false)} onChanged={onExtensionChanged} /> : null}
         </div>
       ) : null}
     </div>

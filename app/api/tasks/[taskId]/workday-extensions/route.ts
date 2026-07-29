@@ -49,12 +49,10 @@ export async function PUT(req: Request, { params }: RouteContext) {
     const body = (await req.json()) as ExtensionRequest;
     if (!UUID_PATTERN.test(taskId)) return jsonNoStore({ error: "Valid task id is required." }, 400);
     if (!isDateOnly(body.workDate)) return jsonNoStore({ error: "workDate must use YYYY-MM-DD." }, 400);
-    const extensionTime = parseTimeOnly(body.extendedUntilLocalTime);
-    if (!extensionTime) {
+    const extendsToMidnight = body.extendedUntilLocalTime === "24:00" || body.extendedUntilLocalTime === "24:00:00";
+    const extensionTime = extendsToMidnight ? null : parseTimeOnly(body.extendedUntilLocalTime);
+    if (!extendsToMidnight && !extensionTime) {
       return jsonNoStore({ error: "extendedUntilLocalTime must use HH:MM or HH:MM:SS." }, 400);
-    }
-    if (extensionTime.hour > 23 || (extensionTime.hour === 23 && (extensionTime.minute > 0 || extensionTime.second > 0))) {
-      return jsonNoStore({ error: "Workday extensions cannot exceed four hours after the normal end time." }, 400);
     }
 
     const { user, adminClient } = await getAuthenticatedUser(req);
@@ -63,7 +61,7 @@ export async function PUT(req: Request, { params }: RouteContext) {
     const { data, error } = await adminClient.rpc("set_task_workday_extension", {
       p_task_id: taskId,
       p_work_date: body.workDate,
-      p_extended_until_local_time: body.extendedUntilLocalTime,
+      p_extended_until_local_time: extendsToMidnight ? "24:00" : body.extendedUntilLocalTime,
       p_reason: typeof body.reason === "string" ? body.reason : null,
       p_actor_id: user.id,
     });

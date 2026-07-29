@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus, Loader2 } from "lucide-react";
 import { useExportTasks } from "@/lib/useExportTasks";
@@ -304,6 +304,9 @@ export default function ProjectBoardPage({
   const [workingDatesDirty, setWorkingDatesDirty] = useState(false);
   const [createTaskError, setCreateTaskError] = useState<string | null>(null);
   const [extensionTask, setExtensionTask] = useState<{ task: Task; summary: LiveTaskManHoursSummary } | null>(null);
+  const [offDayExtensionTask, setOffDayExtensionTask] = useState<{ task: Task; summary: LiveTaskManHoursSummary } | null>(null);
+  const [addingToday, setAddingToday] = useState(false);
+  const [addTodayError, setAddTodayError] = useState<string | null>(null);
   const [newMemberSearch, setNewMemberSearch] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
@@ -319,8 +322,12 @@ export default function ProjectBoardPage({
   const [editWorkingDates, setEditWorkingDates] = useState<string[]>([]);
   const [editOriginalWorkingDates, setEditOriginalWorkingDates] = useState<string[]>([]);
   const [editScheduleState, setEditScheduleState] = useState<"configured" | "legacy" | null>(null);
-  const [editScheduleLoading, setEditScheduleLoading] = useState(false);
   const [editScheduleError, setEditScheduleError] = useState<string | null>(null);
+  const [editTarget, setEditTarget] = useState<"task" | "working-dates">("task");
+  const editWorkingDatesSectionRef = useRef<HTMLDivElement | null>(null);
+  const editTaskRequestRef = useRef<(taskId: string, target?: "task" | "working-dates") => void>(() => undefined);
+  const scheduleChangedRequestRef = useRef<(taskId: string, schedule: TaskWorkingSchedule) => void>(() => undefined);
+  const extensionChangedRequestRef = useRef<(taskId: string) => void>(() => undefined);
   const [unreadTaskNotifs, setUnreadTaskNotifs] = useState<Record<string, number>>({});
   const [timerNow, setTimerNow] = useState<number | null>(null);
 
@@ -401,7 +408,7 @@ export default function ProjectBoardPage({
     profile?.id &&
       members.some((member) => member.user_id === profile.id && normalizeRole(member.role) === "owner"),
   );
-  const canExtendTaskWorkday = useCallback((task: Task) => Boolean(
+  const canEditTaskSchedule = useCallback((task: Task) => Boolean(
     profile?.id
     && (
       isOwner
@@ -412,10 +419,20 @@ export default function ProjectBoardPage({
       || task.assignees?.some((assignee) => assignee.id === profile.id)
     )
   ), [isAdmin, isOwner, isProjectLead, isSuperAdmin, profile?.id]);
+  const canExtendTaskWorkday = canEditTaskSchedule;
   const getAccessToken = useCallback(async () => {
     const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? null;
   }, [supabase]);
+  const requestEditTask = useCallback((taskId: string, target: "task" | "working-dates" = "task") => {
+    editTaskRequestRef.current(taskId, target);
+  }, []);
+  const requestScheduleChanged = useCallback((taskId: string, schedule: TaskWorkingSchedule) => {
+    scheduleChangedRequestRef.current(taskId, schedule);
+  }, []);
+  const requestExtensionChanged = useCallback((taskId: string) => {
+    extensionChangedRequestRef.current(taskId);
+  }, []);
   const canViewTaskUpdates = isProjectMember || canManageProject;
   const canParticipateInTaskUpdates = isProjectMember || isProjectOwnerMember || isSuperAdmin;
 
@@ -571,7 +588,6 @@ export default function ProjectBoardPage({
     },
     [profile?.id, canManageProject, isProjectLead, projectToday],
   );
-
   const insertTaskLog = useCallback(
     async ({
       taskId,
@@ -754,7 +770,7 @@ export default function ProjectBoardPage({
     };
   }, [inReviewTaskIds, profile?.id, reviewProgressRefreshVersion, supabase]);
 
-  const { openTaskDetails, renderTaskDetails } = useTaskDetailsWorkflow({
+  const { openTaskDetails, renderTaskDetails, taskSchedules } = useTaskDetailsWorkflow({
     supabase,
     profileId: profile?.id ?? null,
     members: members.map((member) => ({
@@ -775,27 +791,101 @@ export default function ProjectBoardPage({
     canAddUpdate: canParticipateInTaskUpdates,
     canViewUpdates: canViewTaskUpdates,
     onTaskUpdated: loadTaskUpdateCounts,
-    onManHoursChanged: (change) => {
-      if (change) {
-        setColumns((current) => {
-          const next = { ...current };
-          BOARD_COLUMNS.forEach((column) => {
-            next[column.id] = next[column.id].map((task) => task.id === change.taskId
-              ? {
-                  ...task,
-                  start_date: change.startDate,
-                  end_date: change.endDate,
-                  canDrag: canMoveTask(task.assigneeId ?? null, task.assignees, change.startDate),
-                }
-              : task);
-          });
-          return next;
-        });
-      }
-      setManHoursRefreshKey((value) => value + 1);
-    },
+    onScheduleChanged: requestScheduleChanged,
+    onExtensionChanged: requestExtensionChanged,
+    onEditWorkingDates: (taskId) => requestEditTask(taskId, "working-dates"),
+    showWorkingDaysPanel: true,
     manHoursByTaskId: manHours.taskSummaryById,
   });
+  const handleScheduleChanged = useCallback((taskId: string, updatedSchedule: TaskWorkingSchedule) => {
+    const dates = [...new Set(updatedSchedule.dates)].sort();
+    const selected = new Set(dates);
+    taskSchedules.update(taskId, {
+      ...updatedSchedule,
+      dates,
+      selectedDateCount: dates.length,
+      extensions: (updatedSchedule.extensions ?? []).filter((extension) => selected.has(extension.workDate)),
+      dateDetails: Object.fromEntries(
+        Object.entries(updatedSchedule.dateDetails ?? {}).filter(([workDate]) => selected.has(workDate)),
+      ),
+    });
+    void taskSchedules.invalidate(taskId);
+    setColumns((current) => {
+      const next = { ...current };
+      BOARD_COLUMNS.forEach((column) => {
+        next[column.id] = next[column.id].map((task) => task.id === taskId
+          ? {
+              ...task,
+              start_date: dates[0] ?? null,
+              end_date: dates.at(-1) ?? null,
+              canDrag: canMoveTask(task.assigneeId ?? null, task.assignees, dates[0] ?? null),
+            }
+          : task);
+      });
+      return next;
+    });
+    setManHoursRefreshKey((value) => value + 1);
+  }, [canMoveTask, taskSchedules.invalidate, taskSchedules.update]);
+  const handleExtensionChanged = useCallback(async (taskId: string) => {
+    if (taskSchedules.getSchedule(taskId)) await taskSchedules.invalidate(taskId);
+    setManHoursRefreshKey((value) => value + 1);
+  }, [taskSchedules.getSchedule, taskSchedules.invalidate]);
+  const requestWorkdayExtension = useCallback(async (task: Task, summary: LiveTaskManHoursSummary) => {
+    const schedule = await taskSchedules.load(task.id);
+    if (!schedule) return;
+    if (schedule.todayIsSelected) {
+      setExtensionTask({ task, summary });
+      return;
+    }
+    setAddTodayError(null);
+    setOffDayExtensionTask({ task, summary });
+  }, [taskSchedules.load]);
+  const addTodayAndContinue = useCallback(async () => {
+    if (!offDayExtensionTask || addingToday) return;
+    setAddingToday(true);
+    setAddTodayError(null);
+    try {
+      const schedule = taskSchedules.getSchedule(offDayExtensionTask.task.id)
+        ?? await taskSchedules.load(offDayExtensionTask.task.id);
+      if (!schedule) throw new Error("Working dates could not be loaded.");
+      const token = await getAccessToken();
+      if (!token) throw new Error("Please sign in again.");
+      const dates = [...new Set([...schedule.dates, schedule.todayLocalDate])].sort();
+      const response = await fetch(`/api/tasks/${offDayExtensionTask.task.id}/working-dates`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ dates }),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Unable to add today as a working date.");
+      await taskSchedules.invalidate(offDayExtensionTask.task.id);
+      setColumns((current) => {
+        const next = { ...current };
+        BOARD_COLUMNS.forEach((column) => {
+          next[column.id] = next[column.id].map((task) => task.id === offDayExtensionTask.task.id
+            ? {
+                ...task,
+                start_date: dates[0] ?? null,
+                end_date: dates.at(-1) ?? null,
+                canDrag: canMoveTask(task.assigneeId ?? null, task.assignees, dates[0] ?? null),
+              }
+            : task);
+        });
+        return next;
+      });
+      setExtensionTask(offDayExtensionTask);
+      setOffDayExtensionTask(null);
+    } catch (error) {
+      setAddTodayError(error instanceof Error ? error.message : "Unable to add today as a working date.");
+    } finally {
+      setAddingToday(false);
+    }
+  }, [addingToday, canMoveTask, getAccessToken, offDayExtensionTask, taskSchedules.getSchedule, taskSchedules.invalidate, taskSchedules.load]);
+  scheduleChangedRequestRef.current = handleScheduleChanged;
+  extensionChangedRequestRef.current = (taskId) => { void handleExtensionChanged(taskId); };
 
   const handleOpenTaskDetails = useCallback(
     async (taskId: string, column: ColumnId) => {
@@ -1941,23 +2031,16 @@ export default function ProjectBoardPage({
     setEditOriginalWorkingDates([]);
     setEditScheduleState(null);
     setEditScheduleError(null);
+    setEditTarget("task");
   }, []);
 
   const loadEditWorkingDates = useCallback(async (task: Task) => {
-    setEditScheduleLoading(true);
     setEditScheduleError(null);
     setEditScheduleState(null);
     setEditWorkingDates([]);
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token;
-      if (!token) throw new Error("Please sign in again to load working dates.");
-      const response = await fetch(`/api/tasks/${task.id}/working-dates`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store",
-      });
-      const schedule = await response.json().catch(() => ({})) as TaskWorkingSchedule & { error?: string };
-      if (!response.ok) throw new Error(schedule.error ?? "Unable to load working dates.");
+      const schedule = taskSchedules.getSchedule(task.id) ?? await taskSchedules.load(task.id);
+      if (!schedule) return;
       const dates = schedule.scheduleState === "configured"
         ? schedule.dates
         : legacyWorkingDates(task, schedule.todayLocalDate || projectToday);
@@ -1966,27 +2049,20 @@ export default function ProjectBoardPage({
       setEditScheduleState(schedule.scheduleState);
     } catch (error) {
       setEditScheduleError(error instanceof Error ? error.message : "Unable to load working dates.");
-    } finally {
-      setEditScheduleLoading(false);
     }
-  }, [projectToday, supabase]);
+  }, [projectToday, taskSchedules.getSchedule, taskSchedules.load]);
 
   const handleEditTask = useCallback(
-    async (taskId: string) => {
+    async (taskId: string, target: "task" | "working-dates" = "task") => {
       const task = findTaskFromColumns(taskId);
       if (!task) return;
 
-      // Permission check
-      const canEdit =
-        canManageProject ||
-        task.assigneeId === profile?.id ||
-        task.assignees?.some(u => u.id === profile?.id);
-
-      if (!canEdit) {
+      if (!canEditTaskSchedule(task)) {
         alert("You don't have permission to edit this task.");
         return;
       }
 
+      setEditTarget(target);
       setEditingTask({ ...task, description: task.description ?? null });
       void loadEditWorkingDates(task);
       void supabase
@@ -2001,8 +2077,21 @@ export default function ProjectBoardPage({
               : current);
           });
     },
-    [findTaskFromColumns, canManageProject, profile?.id, loadEditWorkingDates, supabase, projectId],
+    [canEditTaskSchedule, findTaskFromColumns, loadEditWorkingDates, projectId, supabase],
   );
+  editTaskRequestRef.current = handleEditTask;
+  const editScheduleLoading = editingTask ? taskSchedules.getLoading(editingTask.id) : false;
+  const resolvedEditScheduleError = editScheduleError
+    ?? (editingTask ? taskSchedules.getError(editingTask.id) : null);
+
+  useEffect(() => {
+    if (!editingTask || editTarget !== "working-dates" || editScheduleLoading || !editScheduleState) return;
+    const frame = window.requestAnimationFrame(() => {
+      editWorkingDatesSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      editWorkingDatesSectionRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editScheduleLoading, editScheduleState, editTarget, editingTask]);
 
   const handleUpdateTask = useCallback(async () => {
     if (!editingTask) return;
@@ -2030,27 +2119,27 @@ export default function ProjectBoardPage({
           dates: editWorkingDates,
         }),
       });
-      const result = await response.json().catch(() => ({})) as { error?: string };
+      const result = await response.json().catch(() => ({})) as { error?: string; schedule?: TaskWorkingSchedule };
       if (!response.ok) throw new Error(result.error ?? "Failed to update task.");
-
+      const currentSchedule = taskSchedules.getSchedule(editingTask.id);
+      if (result.schedule) {
+        handleScheduleChanged(editingTask.id, {
+          ...result.schedule,
+          extensions: result.schedule.extensions ?? currentSchedule?.extensions ?? [],
+          dateDetails: result.schedule.dateDetails ?? currentSchedule?.dateDetails ?? {},
+        });
+      } else {
+        await handleExtensionChanged(editingTask.id);
+      }
       setColumns((prev) => {
         const updated = { ...prev };
         BOARD_COLUMNS.forEach((col) => {
-          updated[col.id] = updated[col.id].map((task) => {
-            if (task.id !== editingTask.id) return task;
-            return {
-              ...task,
-              title: editingTask.title.trim(),
-              description: editingTask.description,
-              start_date: editTaskBounds.start,
-              end_date: editTaskBounds.end,
-              canDrag: canMoveTask(task.assigneeId ?? null, task.assignees, editTaskBounds.start),
-            };
-          });
+          updated[col.id] = updated[col.id].map((task) => task.id === editingTask.id
+            ? { ...task, title: editingTask.title.trim(), description: editingTask.description }
+            : task);
         });
         return updated;
       });
-      setManHoursRefreshKey((value) => value + 1);
       closeEditTask();
     } catch (err) {
       console.error("Failed to update task", err);
@@ -2058,7 +2147,7 @@ export default function ProjectBoardPage({
     } finally {
       setIsSavingEdit2(false);
     }
-  }, [canMoveTask, closeEditTask, editTaskBounds.end, editTaskBounds.start, editWorkingDates, editingTask, supabase]);
+  }, [closeEditTask, editWorkingDates, editingTask, handleExtensionChanged, handleScheduleChanged, supabase, taskSchedules.getSchedule]);
 
   const claimTask = useCallback(
     async (taskId: string) => {
@@ -2833,12 +2922,12 @@ export default function ProjectBoardPage({
                 onExtendWorkday={(taskId) => {
                   const task = sorted.find((item) => item.id === taskId);
                   const summary = manHours.taskSummaryById.get(taskId);
-                  if (task && summary) setExtensionTask({ task, summary });
+                  if (task && summary) void requestWorkdayExtension(task, summary);
                 }}
                 canExtendWorkday={canExtendTaskWorkday}
                 canClaim={!canManageProject}
                 canDelete={true}
-                canEdit={true}
+                canEdit={canEditTaskSchedule}
                 resetKey={projectId}
                 taskSummaryById={manHours.taskSummaryById}
                 projectTimeZone={projectTimeZone}
@@ -2863,11 +2952,41 @@ export default function ProjectBoardPage({
 
       {renderTaskDetails()}
 
+      <Modal
+        title="Add Today’s Working Date"
+        isOpen={Boolean(offDayExtensionTask)}
+        onClose={() => {
+          if (addingToday) return;
+          setOffDayExtensionTask(null);
+          setAddTodayError(null);
+        }}
+      >
+        <p className="text-sm leading-relaxed text-slate-600">
+          Today is currently an off day. Add today as a working date and extend its hours?
+        </p>
+        {addTodayError ? <p role="alert" className="mt-3 text-sm font-medium text-red-600">{addTodayError}</p> : null}
+        <div className="mt-6 flex justify-end gap-3">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setOffDayExtensionTask(null);
+              setAddTodayError(null);
+            }}
+            disabled={addingToday}
+          >
+            Cancel
+          </Button>
+          <Button onClick={() => void addTodayAndContinue()} disabled={addingToday}>
+            {addingToday ? "Adding..." : "Add Today and Continue"}
+          </Button>
+        </div>
+      </Modal>
+
       {extensionTask ? (
         <WorkdayExtensionModal
           isOpen
           taskTitle={extensionTask.task.title}
-          schedule={{
+          schedule={taskSchedules.getSchedule(extensionTask.task.id) ?? {
             taskId: extensionTask.task.id,
             projectId,
             scheduleState: extensionTask.summary.scheduleState,
@@ -2881,12 +3000,14 @@ export default function ProjectBoardPage({
             todayIsSelected: extensionTask.summary.todayIsSelected,
             nextSelectedDate: null,
             currentExtension: null,
+            extensions: [],
+            dateDetails: {},
             canManage: canExtendTaskWorkday(extensionTask.task),
             canCorrectHistory: false,
           } satisfies TaskWorkingSchedule}
           getAccessToken={getAccessToken}
           onClose={() => setExtensionTask(null)}
-          onChanged={() => setManHoursRefreshKey((value) => value + 1)}
+          onChanged={() => handleExtensionChanged(extensionTask.task.id)}
         />
       ) : null}
 
@@ -3522,7 +3643,7 @@ export default function ProjectBoardPage({
                 disabled={isSavingEdit2}
               />
             </div>
-            <div className="min-w-0">
+            <div ref={editWorkingDatesSectionRef} tabIndex={-1} className="min-w-0 scroll-mt-4 rounded-lg focus-visible:ring-2 focus-visible:ring-blue-500">
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Working Dates</p>
               {editScheduleLoading ? (
                 <p className="mt-2 text-sm text-slate-500">Loading working dates…</p>
@@ -3556,9 +3677,9 @@ export default function ProjectBoardPage({
                   </div>
                 </>
               ) : null}
-              {editScheduleError ? (
+              {resolvedEditScheduleError ? (
                 <div className="mt-2 flex items-center justify-between gap-3 rounded-lg bg-red-50 p-3">
-                  <p role="alert" className="text-sm font-medium text-red-700">{editScheduleError}</p>
+                  <p role="alert" className="text-sm font-medium text-red-700">{resolvedEditScheduleError}</p>
                   {!editScheduleState ? (
                     <button type="button" onClick={() => void loadEditWorkingDates(editingTask)} className="text-xs font-semibold text-red-700 underline">Retry</button>
                   ) : null}

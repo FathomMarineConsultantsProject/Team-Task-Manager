@@ -66,6 +66,23 @@ export type TaskWorkdayExtension = {
   cancelledBy?: string | null;
 };
 
+export type TaskWorkingDateExtension = {
+  workDate: string;
+  extendedUntilLocalTime: string;
+  reason: string | null;
+};
+
+export type TaskWorkingDateAssignee = {
+  userId: string | null;
+  name: string;
+  source: "recorded" | "current";
+};
+
+export type TaskWorkingDateDetail = {
+  assignees: TaskWorkingDateAssignee[];
+  extension: TaskWorkingDateExtension | null;
+};
+
 export type TaskWorkingSchedule = TaskSchedulePermission & {
   taskId: string;
   projectId: string;
@@ -80,6 +97,8 @@ export type TaskWorkingSchedule = TaskSchedulePermission & {
   todayIsSelected: boolean;
   nextSelectedDate: string | null;
   currentExtension: TaskWorkdayExtension | null;
+  extensions: TaskWorkingDateExtension[];
+  dateDetails: Record<string, TaskWorkingDateDetail>;
 };
 
 export type TaskWorkingDatesResponse = TaskWorkingSchedule;

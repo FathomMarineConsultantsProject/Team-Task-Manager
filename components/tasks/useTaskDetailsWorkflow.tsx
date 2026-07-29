@@ -9,8 +9,12 @@ import TaskDependencies from "@/components/tasks/TaskDependencies";
 import TaskLinks from "@/components/tasks/TaskLinks";
 import TaskReviewApprovals from "@/components/tasks/TaskReviewApprovals";
 import LinkifiedText from "@/components/ui/LinkifiedText";
+import ModalPortal from "@/components/ModalPortal";
 import TaskManHoursPanel from "@/components/tasks/TaskManHoursPanel";
+import TaskWorkingDaysPanel from "@/components/tasks/TaskWorkingDaysPanel";
 import TaskWorkingScheduleSection from "@/components/tasks/TaskWorkingScheduleSection";
+import type { TaskWorkingSchedule } from "@/lib/manHours";
+import useTaskWorkingSchedule from "@/lib/useTaskWorkingSchedule";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 import { DEFAULT_PROJECT_TIME_ZONE, DEFAULT_PROJECT_WORKDAY_END, formatProjectDate, isDateOnly } from "@/lib/projectDateTime";
 
@@ -153,7 +157,10 @@ type WorkflowOptions = {
   canAddUpdate?: boolean;
   canViewUpdates?: boolean;
   onTaskUpdated?: () => void | Promise<void>;
-  onManHoursChanged?: (change?: { taskId: string; dates: string[]; startDate: string; endDate: string }) => void;
+  onScheduleChanged?: (taskId: string, schedule: TaskWorkingSchedule) => void;
+  onExtensionChanged?: (taskId: string) => void | Promise<void>;
+  onEditWorkingDates?: (taskId: string) => void;
+  showWorkingDaysPanel?: boolean;
   manHoursByTaskId?: Map<string, LiveTaskManHoursSummary>;
 };
 
@@ -248,7 +255,10 @@ export function useTaskDetailsWorkflow({
   canAddUpdate = true,
   canViewUpdates = true,
   onTaskUpdated,
-  onManHoursChanged,
+  onScheduleChanged,
+  onExtensionChanged,
+  onEditWorkingDates,
+  showWorkingDaysPanel = false,
   manHoursByTaskId,
 }: WorkflowOptions) {
   const [selectedTaskDetails, setSelectedTaskDetails] = useState<TaskDetailsState | null>(null);
@@ -272,6 +282,22 @@ export function useTaskDetailsWorkflow({
     const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? null;
   }, [supabase]);
+  const taskSchedules = useTaskWorkingSchedule(getAccessToken);
+  const selectedSchedule = taskId ? taskSchedules.getSchedule(taskId) : null;
+  const scheduleLoading = taskId ? taskSchedules.getLoading(taskId) : false;
+  const scheduleError = taskId ? taskSchedules.getError(taskId) : null;
+
+  useEffect(() => {
+    if (taskId) void taskSchedules.load(taskId);
+  }, [taskId, taskSchedules.load]);
+
+  useEffect(() => {
+    if (!selectedSchedule) return;
+    const dates = [...selectedSchedule.dates].sort();
+    setSelectedTaskDetails((current) => current?.id === selectedSchedule.taskId
+      ? { ...current, startDate: dates[0] ?? null, endDate: dates.at(-1) ?? null }
+      : current);
+  }, [selectedSchedule]);
   const chatMembers = useMemo(() => {
     const merged = new Map<string, TaskDetailMember>();
     [...projectMembers, ...members].forEach((member) => {
@@ -784,6 +810,18 @@ export function useTaskDetailsWorkflow({
 
               {selectedTaskManHours ? <TaskManHoursPanel summary={selectedTaskManHours} variant="inline" /> : null}
 
+              {showWorkingDaysPanel ? (
+                <TaskWorkingDaysPanel
+                  schedule={selectedSchedule}
+                  loading={scheduleLoading}
+                  error={scheduleError}
+                  canManage={Boolean(selectedSchedule?.canManage && onEditWorkingDates)}
+                  onRetry={() => { if (taskId) void taskSchedules.retry(taskId); }}
+                  onEdit={() => { if (taskId) onEditWorkingDates?.(taskId); }}
+                  className="min-[1700px]:hidden bg-slate-50/60 shadow-none"
+                />
+              ) : null}
+
               {selectedTaskDetails.description && (
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2">
                   <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">Description</p>
@@ -843,13 +881,21 @@ export function useTaskDetailsWorkflow({
               startDate={selectedTaskDetails.startDate}
               dueDate={selectedTaskDetails.endDate}
               getAccessToken={getAccessToken}
-              onChanged={(change) => {
-                if (change) {
-                  setSelectedTaskDetails((current) => current?.id === change.taskId
-                    ? { ...current, startDate: change.startDate, endDate: change.endDate }
-                    : current);
-                }
-                onManHoursChanged?.(change);
+              schedule={selectedSchedule}
+              loading={scheduleLoading}
+              loadError={scheduleError}
+              onRetry={() => { void taskSchedules.retry(selectedTaskDetails.id); }}
+              onChanged={(schedule) => {
+                const dates = [...schedule.dates].sort();
+                setSelectedTaskDetails((current) => current?.id === schedule.taskId
+                  ? { ...current, startDate: dates[0] ?? null, endDate: dates.at(-1) ?? null }
+                  : current);
+                if (onScheduleChanged) onScheduleChanged(schedule.taskId, schedule);
+                else taskSchedules.update(schedule.taskId, schedule);
+              }}
+              onExtensionChanged={async () => {
+                if (onExtensionChanged) await onExtensionChanged(selectedTaskDetails.id);
+                else await taskSchedules.invalidate(selectedTaskDetails.id);
               }}
             />
 
@@ -1010,7 +1056,26 @@ export function useTaskDetailsWorkflow({
         )}
       </Modal>
 
-      {selectedTaskDetails && selectedTaskManHours ? <TaskManHoursPanel summary={selectedTaskManHours} /> : null}
+      {selectedTaskDetails && (selectedTaskManHours || showWorkingDaysPanel) ? (
+        <ModalPortal>
+          <aside
+            className="fixed right-[calc(50%+272px)] top-[5vh] z-[10000] hidden max-h-[90vh] w-[280px] flex-col gap-2.5 overflow-y-auto overscroll-contain min-[1700px]:flex"
+            aria-label="Task schedule and man-hours"
+          >
+            {selectedTaskManHours ? <TaskManHoursPanel summary={selectedTaskManHours} variant="embedded" /> : null}
+            {showWorkingDaysPanel ? (
+              <TaskWorkingDaysPanel
+                schedule={selectedSchedule}
+                loading={scheduleLoading}
+                error={scheduleError}
+                canManage={Boolean(selectedSchedule?.canManage && onEditWorkingDates)}
+                onRetry={() => { void taskSchedules.retry(selectedTaskDetails.id); }}
+                onEdit={() => onEditWorkingDates?.(selectedTaskDetails.id)}
+              />
+            ) : null}
+          </aside>
+        </ModalPortal>
+      ) : null}
 
       <ChatPanel
         isOpen={Boolean(selectedTaskDetails)}
@@ -1039,5 +1104,6 @@ export function useTaskDetailsWorkflow({
     closeTaskDetails,
     selectedTaskDetails,
     renderTaskDetails,
+    taskSchedules,
   };
 }
