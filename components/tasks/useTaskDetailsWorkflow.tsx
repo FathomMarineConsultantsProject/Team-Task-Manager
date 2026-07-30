@@ -372,6 +372,15 @@ export function useTaskDetailsWorkflow({
     setIsReviewApprovalsOpen(false);
     setReviewApprovalCounts(null);
   }, [projectOwnerId]);
+  const updateTaskDetailsAssignees = useCallback((
+    updatedTaskId: string,
+    assignee: string,
+    assignees: TaskDetailsState["assignees"],
+  ) => {
+    setSelectedTaskDetails((current) => current?.id === updatedTaskId
+      ? { ...current, assignee, assignees }
+      : current);
+  }, []);
 
   const loadTaskLogs = useCallback(async () => {
     try {
@@ -1103,6 +1112,7 @@ export function useTaskDetailsWorkflow({
     openTaskDetails,
     closeTaskDetails,
     selectedTaskDetails,
+    updateTaskDetailsAssignees,
     renderTaskDetails,
     taskSchedules,
   };

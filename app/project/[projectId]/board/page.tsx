@@ -318,6 +318,8 @@ export default function ProjectBoardPage({
   const manHours = useProjectManHours(projectId, manHoursRefreshKey);
   const [selectedAdditionalAssignees, setSelectedAdditionalAssignees] = useState<DbUser[]>([]);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [editPrimaryAssigneeId, setEditPrimaryAssigneeId] = useState<string | null>(null);
+  const [editAssigneeIds, setEditAssigneeIds] = useState<string[]>([]);
   const [isSavingEdit2, setIsSavingEdit2] = useState(false);
   const [editWorkingDates, setEditWorkingDates] = useState<string[]>([]);
   const [editOriginalWorkingDates, setEditOriginalWorkingDates] = useState<string[]>([]);
@@ -370,6 +372,11 @@ export default function ProjectBoardPage({
     const dates = [...new Set(editWorkingDates)].sort();
     return { start: dates[0] ?? null, end: dates.at(-1) ?? null };
   }, [editWorkingDates]);
+  const editAssignedUsers = useMemo(() => editAssigneeIds.flatMap((userId) => {
+    const user = members.find((member) => member.user_id === userId)?.user
+      ?? editingTask?.assignees?.find((assignee) => assignee.id === userId);
+    return user ? [user] : [];
+  }), [editAssigneeIds, editingTask?.assignees, members]);
   const workingDatesValidation = useMemo(() => {
     if (newTaskWorkingDates.length === 0) return "Select at least one working date.";
     if (newTaskWorkingDates.length > 366) return "Select no more than 366 working dates.";
@@ -402,6 +409,7 @@ export default function ProjectBoardPage({
   const isAdmin = systemRole === "admin";
   const canManageProject = isOwner || isAdmin || isSuperAdmin;
   const canManageProjectMembers = isOwner || isProjectLead || isAdmin || isSuperAdmin;
+  const canEditTaskAssignments = canManageProjectMembers;
   const canRemoveProjectMembers = isAdmin || isSuperAdmin;
   const isProjectMember = Boolean(profile?.id && members.some((member) => member.user_id === profile.id));
   const isProjectOwnerMember = Boolean(
@@ -770,7 +778,7 @@ export default function ProjectBoardPage({
     };
   }, [inReviewTaskIds, profile?.id, reviewProgressRefreshVersion, supabase]);
 
-  const { openTaskDetails, renderTaskDetails, taskSchedules } = useTaskDetailsWorkflow({
+  const { openTaskDetails, renderTaskDetails, taskSchedules, updateTaskDetailsAssignees } = useTaskDetailsWorkflow({
     supabase,
     profileId: profile?.id ?? null,
     members: members.map((member) => ({
@@ -2027,6 +2035,8 @@ export default function ProjectBoardPage({
 
   const closeEditTask = useCallback(() => {
     setEditingTask(null);
+    setEditPrimaryAssigneeId(null);
+    setEditAssigneeIds([]);
     setEditWorkingDates([]);
     setEditOriginalWorkingDates([]);
     setEditScheduleState(null);
@@ -2064,6 +2074,12 @@ export default function ProjectBoardPage({
 
       setEditTarget(target);
       setEditingTask({ ...task, description: task.description ?? null });
+      const assignedIds = [...new Set([
+        ...(task.assigneeId ? [task.assigneeId] : []),
+        ...(task.assignees ?? []).map((assignee) => assignee.id),
+      ])];
+      setEditPrimaryAssigneeId(task.assigneeId ?? null);
+      setEditAssigneeIds(assignedIds);
       void loadEditWorkingDates(task);
       void supabase
           .from("tasks")
@@ -2140,6 +2156,77 @@ export default function ProjectBoardPage({
         });
         return updated;
       });
+      if (canEditTaskAssignments) {
+        const additionalAssigneeIds = editAssigneeIds.filter((userId) => userId !== editPrimaryAssigneeId);
+        const assignmentResponse = await fetch(`/api/tasks/${editingTask.id}/assignees`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            primaryAssigneeId: editPrimaryAssigneeId,
+            additionalAssigneeIds,
+          }),
+        });
+        const assignmentResult = await assignmentResponse.json().catch(() => ({})) as {
+          error?: string;
+          primaryAssigneeId?: string | null;
+          assignees?: Array<{ id: string; name: string | null; email: string | null; avatar_url?: string | null }>;
+        };
+        if (!assignmentResponse.ok) {
+          const { data: taskRow } = await supabase
+            .from("tasks")
+            .select("assigned_to")
+            .eq("id", editingTask.id)
+            .eq("project_id", projectId)
+            .single();
+          const { data: additionalRows } = await supabase
+            .from("task_assignees")
+            .select("user_id")
+            .eq("task_id", editingTask.id);
+          const authoritativePrimaryId = (taskRow as { assigned_to?: string | null } | null)?.assigned_to ?? null;
+          setEditPrimaryAssigneeId(authoritativePrimaryId);
+          setEditAssigneeIds([...new Set([
+            ...(authoritativePrimaryId ? [authoritativePrimaryId] : []),
+            ...((additionalRows as Array<{ user_id: string }> | null) ?? []).map((row) => row.user_id),
+          ])]);
+          throw new Error(`Task fields were saved, but assignments were not: ${assignmentResult.error ?? "Failed to update task assignments."}`);
+        }
+
+        const primaryAssigneeId = assignmentResult.primaryAssigneeId ?? null;
+        const assignees = assignmentResult.assignees ?? editAssigneeIds.flatMap((userId) => {
+          const user = members.find((member) => member.user_id === userId)?.user;
+          return user ? [{
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            avatar_url: user.avatar_url,
+          }] : [];
+        });
+        const primaryAssignee = assignees.find((assignee) => assignee.id === primaryAssigneeId) ?? null;
+        setColumns((current) => {
+          const next = { ...current };
+          BOARD_COLUMNS.forEach((column) => {
+            next[column.id] = next[column.id].map((task) => task.id === editingTask.id
+              ? {
+                  ...task,
+                  assigneeId: primaryAssigneeId,
+                  assigneeName: primaryAssignee?.name ?? null,
+                  assigneeEmail: primaryAssignee?.email ?? null,
+                  assigneeRole: members.find((member) => member.user_id === primaryAssigneeId)?.user?.job_role ?? null,
+                  avatarUrl: primaryAssignee?.avatar_url ?? null,
+                  initials: buildInitials(primaryAssignee?.name, primaryAssignee?.email),
+                  assignees,
+                  canDrag: canMoveTask(primaryAssigneeId, assignees, task.start_date),
+                }
+              : task);
+          });
+          return next;
+        });
+        updateTaskDetailsAssignees(
+          editingTask.id,
+          primaryAssignee?.name ?? primaryAssignee?.email ?? "Unassigned",
+          assignees,
+        );
+      }
       closeEditTask();
     } catch (err) {
       console.error("Failed to update task", err);
@@ -2147,7 +2234,7 @@ export default function ProjectBoardPage({
     } finally {
       setIsSavingEdit2(false);
     }
-  }, [closeEditTask, editWorkingDates, editingTask, handleExtensionChanged, handleScheduleChanged, supabase, taskSchedules.getSchedule]);
+  }, [canEditTaskAssignments, canMoveTask, closeEditTask, editAssigneeIds, editPrimaryAssigneeId, editWorkingDates, editingTask, handleExtensionChanged, handleScheduleChanged, members, projectId, supabase, taskSchedules.getSchedule, updateTaskDetailsAssignees]);
 
   const claimTask = useCallback(
     async (taskId: string) => {
@@ -3643,6 +3730,80 @@ export default function ProjectBoardPage({
                 disabled={isSavingEdit2}
               />
             </div>
+            {canEditTaskAssignments ? (
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Assigned Members</p>
+                <label htmlFor="edit-primary-assignee" className="mt-2 block text-xs font-medium text-slate-500">
+                  Primary assignee
+                </label>
+                <select
+                  id="edit-primary-assignee"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none disabled:bg-slate-50"
+                  value={editPrimaryAssigneeId ?? ""}
+                  onChange={(event) => setEditPrimaryAssigneeId(event.target.value || null)}
+                  disabled={isSavingEdit2 || editAssignedUsers.length === 0}
+                >
+                  {editAssignedUsers.length === 0 ? <option value="">Unassigned</option> : null}
+                  {editAssignedUsers.map((user) => (
+                    <option key={user.id} value={user.id}>{user.name ?? user.email ?? user.id}</option>
+                  ))}
+                </select>
+
+                {editAssignedUsers.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {editAssignedUsers.map((user) => (
+                      <span
+                        key={user.id}
+                        className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
+                      >
+                        {user.name ?? user.email ?? user.id}
+                        {user.id === editPrimaryAssigneeId ? (
+                          <span className="rounded-full bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">Primary</span>
+                        ) : null}
+                        <button
+                          type="button"
+                          aria-label={`Remove ${user.name ?? user.email ?? "member"}`}
+                          onClick={() => setEditAssigneeIds((current) => {
+                            const next = current.filter((userId) => userId !== user.id);
+                            if (editPrimaryAssigneeId === user.id) setEditPrimaryAssigneeId(next[0] ?? null);
+                            return next;
+                          })}
+                          className="ml-0.5 text-slate-400 hover:text-slate-600"
+                          disabled={isSavingEdit2}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-500">No members assigned.</p>
+                )}
+
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {members
+                    .filter((member) => member.user && !editAssigneeIds.includes(member.user_id))
+                    .map((member) => {
+                      const user = member.user;
+                      if (!user) return null;
+                      return (
+                        <button
+                          key={user.id}
+                          type="button"
+                          onClick={() => {
+                            setEditAssigneeIds((current) => [...current, user.id]);
+                            if (!editPrimaryAssigneeId) setEditPrimaryAssigneeId(user.id);
+                          }}
+                          className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+                          disabled={isSavingEdit2}
+                        >
+                          + {user.name ?? user.email ?? "Unknown"}
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            ) : null}
             <div ref={editWorkingDatesSectionRef} tabIndex={-1} className="min-w-0 scroll-mt-4 rounded-lg focus-visible:ring-2 focus-visible:ring-blue-500">
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Working Dates</p>
               {editScheduleLoading ? (
