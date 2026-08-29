@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import Modal from "@/components/ui/modal";
 import Button from "@/components/ui/button";
+import ScheduleChangeReasonField from "@/components/tasks/ScheduleChangeReasonField";
 import type { TaskWorkingSchedule, TaskWorkdayExtension } from "@/lib/manHours";
 import { parseTimeOnly } from "@/lib/projectDateTime";
+import { HISTORICAL_REASON_MESSAGE, isHistoricalReasonRequired } from "@/lib/scheduleChangeReason";
 
 type Props = {
   isOpen: boolean;
@@ -41,6 +43,8 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reasonRequired, setReasonRequired] = useState(false);
+  const [reasonError, setReasonError] = useState<string | null>(null);
 
   const request = useCallback(async (method: "GET" | "PUT" | "DELETE", body?: object) => {
     const token = await getAccessToken();
@@ -53,7 +57,11 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
       cache: "no-store",
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error ?? "Unable to update the workday extension.");
+    if (!response.ok) {
+      const requestError = new Error(data.message ?? data.error ?? "Unable to update the workday extension.");
+      Object.assign(requestError, data);
+      throw requestError;
+    }
     return data;
   }, [getAccessToken, schedule.taskId, schedule.todayLocalDate]);
 
@@ -61,6 +69,8 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
     if (!isOpen) return;
     setLoading(true);
     setError(null);
+    setReasonRequired(false);
+    setReasonError(null);
     void request("GET")
       .then((data) => {
         const current = (data.extension ?? null) as TaskWorkdayExtension | null;
@@ -84,11 +94,16 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
       return;
     }
     if (endMinutes - normalMinutes > 120 && !reason.trim()) {
-      setError("A reason is required for extensions longer than two hours.");
+      setReasonError("A reason is required for extensions longer than two hours.");
+      return;
+    }
+    if (reasonRequired && !reason.trim()) {
+      setReasonError(HISTORICAL_REASON_MESSAGE);
       return;
     }
     setSaving(true);
     setError(null);
+    setReasonError(null);
     try {
       await request("PUT", {
         workDate: schedule.todayLocalDate,
@@ -98,6 +113,11 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
       await onChanged();
       onClose();
     } catch (saveError) {
+      if (isHistoricalReasonRequired(saveError)) {
+        setReasonRequired(true);
+        setReasonError(HISTORICAL_REASON_MESSAGE);
+        return;
+      }
       setError(saveError instanceof Error ? saveError.message : "Unable to save the extension.");
     } finally {
       setSaving(false);
@@ -164,10 +184,13 @@ export default function WorkdayExtensionModal({ isOpen, taskTitle, schedule, get
             </label>
           </div>
         </div>
-        <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Reason {minutes(extendedUntil) - minutes(schedule.normalWorkdayEnd) > 120 ? "(required)" : "(optional)"}
-          <textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} className="mt-2 w-full rounded-lg border border-slate-200 p-3 text-sm font-normal normal-case tracking-normal text-slate-800" placeholder="Why is extra time needed?" />
-        </label>
+        <ScheduleChangeReasonField
+          value={reason}
+          onChange={(value) => { setReason(value); if (value.trim()) setReasonError(null); }}
+          required={reasonRequired || minutes(extendedUntil) - minutes(schedule.normalWorkdayEnd) > 120}
+          disabled={saving || loading}
+          error={reasonError}
+        />
         {!schedule.todayIsSelected ? <p className="text-sm font-medium text-amber-700">Today is not a selected working date. Configure the schedule before extending hours.</p> : null}
         {!schedule.canManage ? <p className="text-sm font-medium text-amber-700">You do not have permission to extend this task.</p> : null}
         {error ? <p role="alert" className="text-sm font-medium text-red-600">{error}</p> : null}

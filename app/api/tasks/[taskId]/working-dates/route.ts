@@ -1,4 +1,5 @@
 import { addDaysToDateOnly, compareDateOnly, isDateOnly, projectLocalDateTimeToUtc } from "@/lib/projectDateTime";
+import { historicalReasonRequiredResponse } from "@/lib/scheduleChangeReason";
 import { getAuthenticatedUser, jsonNoStore } from "../../reviewWorkflow";
 
 type RouteContext = {
@@ -7,10 +8,19 @@ type RouteContext = {
 
 type UpdateWorkingDatesRequest = {
   dates?: string[];
+  workingDates?: string[];
   reason?: string;
   title?: string;
   description?: string | null;
 };
+
+const isHistoricalReasonError = (error: { code?: string; message?: string; details?: string } | null) => Boolean(
+  error?.code === "P0003"
+  && (
+    error.details === "HISTORICAL_REASON_REQUIRED"
+    || error.message === "A reason is required for a historical schedule correction."
+  )
+);
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -85,11 +95,103 @@ export async function GET(req: Request, { params }: RouteContext) {
         reason: row.reason,
       }));
 
+    type WorkingDateAuditRow = {
+      id: string;
+      work_date: string;
+      action: "added" | "removed";
+      actor_id: string | null;
+      reason: string | null;
+      created_at: string;
+    };
+    type ExtensionAuditRow = {
+      id: string;
+      work_date: string;
+      action: "created" | "updated" | "cancelled";
+      old_extended_until_local_time: string | null;
+      new_extended_until_local_time: string | null;
+      actor_id: string | null;
+      reason: string | null;
+      created_at: string;
+    };
+
+    const [workingDateAuditResult, extensionAuditResult] = await Promise.all([
+      adminClient
+        .from("task_working_date_audit")
+        .select("id, work_date, action, actor_id, reason, created_at")
+        .eq("task_id", taskId)
+        .order("created_at", { ascending: false })
+        .limit(500),
+      adminClient
+        .from("task_workday_extension_audit")
+        .select("id, work_date, action, old_extended_until_local_time, new_extended_until_local_time, actor_id, reason, created_at")
+        .eq("task_id", taskId)
+        .order("created_at", { ascending: false })
+        .limit(500),
+    ]);
+    if (workingDateAuditResult.error) logOptionalQueryError(req, taskId, "task_working_date_audit", workingDateAuditResult.error);
+    if (extensionAuditResult.error) logOptionalQueryError(req, taskId, "task_workday_extension_audit", extensionAuditResult.error);
+
+    const workingDateAudits = (workingDateAuditResult.error ? [] : workingDateAuditResult.data ?? []) as WorkingDateAuditRow[];
+    const extensionAudits = (extensionAuditResult.error ? [] : extensionAuditResult.data ?? []) as ExtensionAuditRow[];
+    const actorIds = [...new Set([...workingDateAudits, ...extensionAudits].flatMap((row) => row.actor_id ? [row.actor_id] : []))];
+    const actorNames = new Map<string, string>();
+    if (actorIds.length) {
+      const actorResult = await adminClient.from("users").select("id, name, email").in("id", actorIds);
+      if (actorResult.error) {
+        logOptionalQueryError(req, taskId, "schedule audit actors", actorResult.error);
+      } else {
+        (actorResult.data ?? []).forEach((actor) => actorNames.set(actor.id, actor.name?.trim() || actor.email?.trim() || "Unknown user"));
+      }
+    }
+
+    const historyByDate = new Map<string, Array<{
+      id: string;
+      changeType: "WORKING_DATE_ADDED" | "WORKING_DATE_REMOVED" | "WORK_HOURS_EXTENDED" | "WORK_HOURS_CHANGED" | "WORK_HOURS_CANCELLED";
+      workDate: string;
+      oldValue: string | null;
+      newValue: string | null;
+      actorId: string | null;
+      actorName: string;
+      reason: string | null;
+      changedAt: string;
+    }>>();
+    const addHistory = (workDate: string, entry: (typeof historyByDate extends Map<string, Array<infer T>> ? T : never)) => {
+      historyByDate.set(workDate, [...(historyByDate.get(workDate) ?? []), entry]);
+    };
+    workingDateAudits.forEach((row) => addHistory(row.work_date, {
+      id: row.id,
+      changeType: row.action === "added" ? "WORKING_DATE_ADDED" : "WORKING_DATE_REMOVED",
+      workDate: row.work_date,
+      oldValue: row.action === "added" ? "Off day" : "Working day",
+      newValue: row.action === "added" ? "Working day" : "Off day",
+      actorId: row.actor_id,
+      actorName: row.actor_id ? actorNames.get(row.actor_id) ?? "Unknown user" : "Unknown user",
+      reason: row.reason,
+      changedAt: row.created_at,
+    }));
+    extensionAudits.forEach((row) => addHistory(row.work_date, {
+      id: row.id,
+      changeType: row.action === "created" ? "WORK_HOURS_EXTENDED" : row.action === "updated" ? "WORK_HOURS_CHANGED" : "WORK_HOURS_CANCELLED",
+      workDate: row.work_date,
+      oldValue: row.old_extended_until_local_time,
+      newValue: row.new_extended_until_local_time,
+      actorId: row.actor_id,
+      actorName: row.actor_id ? actorNames.get(row.actor_id) ?? "Unknown user" : "Unknown user",
+      reason: row.reason,
+      changedAt: row.created_at,
+    }));
+    historyByDate.forEach((history) => history.sort((a, b) => Date.parse(b.changedAt) - Date.parse(a.changedAt)));
+
     const extensionByDate = new Map(extensions.map((extension) => [extension.workDate, extension]));
     const dateDetails: Record<string, {
       assignees: { userId: string | null; name: string; source: "recorded" | "current" }[];
       extension: (typeof extensions)[number] | null;
+      history: (typeof historyByDate extends Map<string, infer T> ? T : never);
     }> = {};
+
+    historyByDate.forEach((history, workDate) => {
+      dateDetails[workDate] = { assignees: [], extension: extensionByDate.get(workDate) ?? null, history };
+    });
 
     try {
       if (
@@ -196,12 +298,16 @@ export async function GET(req: Request, { params }: RouteContext) {
             dateDetails[workDate] = {
               assignees: useCurrent ? [...currentAssignees.values()] : [...recorded.values()],
               extension,
+              history: historyByDate.get(workDate) ?? [],
             };
           });
         }
       }
     } catch (error) {
       Object.keys(dateDetails).forEach((workDate) => delete dateDetails[workDate]);
+      historyByDate.forEach((history, workDate) => {
+        dateDetails[workDate] = { assignees: [], extension: extensionByDate.get(workDate) ?? null, history };
+      });
       logOptionalQueryError(req, taskId, "working-date tooltip details", error);
     }
 
@@ -224,11 +330,12 @@ export async function PUT(req: Request, { params }: RouteContext) {
     if (!UUID_PATTERN.test(taskId)) return jsonNoStore({ error: "Valid task id is required." }, 400);
 
     const body = (await req.json()) as UpdateWorkingDatesRequest;
+    const workingDates = body.workingDates ?? body.dates;
     if (
-      !Array.isArray(body.dates)
-      || body.dates.length === 0
-      || body.dates.length > 366
-      || body.dates.some((date) => !isDateOnly(date))
+      !Array.isArray(workingDates)
+      || workingDates.length === 0
+      || workingDates.length > 366
+      || workingDates.some((date) => !isDateOnly(date))
     ) {
       return jsonNoStore({ error: "dates must contain 1 to 366 valid YYYY-MM-DD values." }, 400);
     }
@@ -238,10 +345,11 @@ export async function PUT(req: Request, { params }: RouteContext) {
 
     const { data, error } = await adminClient.rpc("replace_task_working_dates_and_boundaries", {
       p_task_id: taskId,
-      p_dates: [...new Set(body.dates)],
+      p_dates: [...new Set(workingDates)],
       p_actor_id: user.id,
       p_reason: typeof body.reason === "string" ? body.reason : null,
     });
+    if (isHistoricalReasonError(error)) return jsonNoStore(historicalReasonRequiredResponse(), 409);
     if (error) return jsonNoStore({ error: error.message }, rpcErrorStatus(error.code));
     return jsonNoStore(data);
   } catch (error) {
@@ -253,14 +361,15 @@ export async function PATCH(req: Request, { params }: RouteContext) {
   try {
     const { taskId } = await params;
     const body = (await req.json()) as UpdateWorkingDatesRequest;
+    const workingDates = body.workingDates ?? body.dates;
     const title = typeof body.title === "string" ? body.title.trim() : "";
     if (!UUID_PATTERN.test(taskId)) return jsonNoStore({ error: "Valid task id is required." }, 400);
     if (!title) return jsonNoStore({ error: "Task title is required." }, 400);
     if (
-      !Array.isArray(body.dates)
-      || body.dates.length === 0
-      || body.dates.length > 366
-      || body.dates.some((date) => !isDateOnly(date))
+      !Array.isArray(workingDates)
+      || workingDates.length === 0
+      || workingDates.length > 366
+      || workingDates.some((date) => !isDateOnly(date))
     ) {
       return jsonNoStore({ error: "dates must contain 1 to 366 valid YYYY-MM-DD values." }, 400);
     }
@@ -272,10 +381,11 @@ export async function PATCH(req: Request, { params }: RouteContext) {
       p_task_id: taskId,
       p_title: title,
       p_description: typeof body.description === "string" ? body.description : null,
-      p_dates: [...new Set(body.dates)],
+      p_dates: [...new Set(workingDates)],
       p_actor_id: user.id,
       p_reason: typeof body.reason === "string" ? body.reason : null,
     });
+    if (isHistoricalReasonError(error)) return jsonNoStore(historicalReasonRequiredResponse(), 409);
     if (error) return jsonNoStore({ error: error.message }, rpcErrorStatus(error.code));
     return jsonNoStore(data);
   } catch (error) {

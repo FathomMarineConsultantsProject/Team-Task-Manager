@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import TaskWorkingDatesCalendar from "./TaskWorkingDatesCalendar";
 import WorkdayExtensionModal from "./WorkdayExtensionModal";
+import ScheduleChangeReasonField from "./ScheduleChangeReasonField";
 import type { TaskWorkingSchedule } from "@/lib/manHours";
 import { addDaysToDateOnly, compareDateOnly, listDateOnlyRange } from "@/lib/projectDateTime";
+import { HISTORICAL_REASON_MESSAGE, isHistoricalReasonRequired } from "@/lib/scheduleChangeReason";
 
 type Props = {
   taskId: string;
@@ -84,14 +86,12 @@ export default function TaskWorkingScheduleSection({
       const response = await fetch(`/api/tasks/${taskId}/working-dates`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ dates, ...(reasonRequired ? { reason: reason.trim() } : {}) }),
+        body: JSON.stringify({ workingDates: dates, reason: reason.trim() || null }),
       });
       const data = await response.json().catch(() => ({}));
-      if (response.status === 409) {
-        setReasonRequired(Boolean(schedule?.canCorrectHistory));
-        setError(schedule?.canCorrectHistory
-          ? data.error ?? "Changing past working dates requires an audited correction reason."
-          : "Only the project owner or an administrator may correct dates with recorded history.");
+      if (isHistoricalReasonRequired(data)) {
+        setReasonRequired(true);
+        setError(HISTORICAL_REASON_MESSAGE);
         return;
       }
       if (!response.ok) throw new Error(data.error ?? "Unable to save the working schedule.");
@@ -155,12 +155,13 @@ export default function TaskWorkingScheduleSection({
                 resetDates={initialDatesFor(schedule, startDate, dueDate)}
                 resetLabel="Restore original dates"
               />
-              {reasonRequired ? (
-                <label className="block text-xs font-semibold text-amber-800">
-                  Historical correction reason
-                  <textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} className="mt-1 w-full rounded-lg border border-amber-300 p-2 text-sm font-normal text-slate-800" />
-                </label>
-              ) : null}
+              <ScheduleChangeReasonField
+                value={reason}
+                onChange={(value) => { setReason(value); if (value.trim()) setError(null); }}
+                required={reasonRequired}
+                disabled={saving}
+                error={reasonRequired && !reason.trim() ? error : null}
+              />
               <div className="flex flex-wrap justify-end gap-2">
                 {activeStatuses.has(statusKey) && schedule.canManage ? (
                   <button type="button" onClick={() => setExtensionOpen(true)} disabled={!canExtend} title={schedule.scheduleState === "legacy" ? "Configure the schedule first" : !schedule.todayIsSelected ? "Today is an off date" : undefined} className="mr-auto rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
@@ -179,7 +180,7 @@ export default function TaskWorkingScheduleSection({
               <button type="button" onClick={onRetry} className="mt-2 text-xs font-semibold text-blue-700">Retry</button>
             </div>
           ) : null}
-          {error ? <p role="alert" className="text-sm font-medium text-red-600">{error}</p> : null}
+          {error && !(reasonRequired && !reason.trim()) ? <p role="alert" className="text-sm font-medium text-red-600">{error}</p> : null}
           {schedule ? <WorkdayExtensionModal isOpen={extensionOpen} taskTitle={taskTitle} schedule={schedule} getAccessToken={getAccessToken} onClose={() => setExtensionOpen(false)} onChanged={onExtensionChanged} /> : null}
         </div>
       ) : null}

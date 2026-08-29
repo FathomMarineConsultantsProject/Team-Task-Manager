@@ -65,6 +65,20 @@ function displayTime(value: string) {
   return `${parsed.hour % 12 || 12}:${String(parsed.minute).padStart(2, "0")} ${parsed.hour >= 12 ? "PM" : "AM"}`;
 }
 
+function changedAtLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+const changeTypeLabel = {
+  WORKING_DATE_ADDED: "Working date added",
+  WORKING_DATE_REMOVED: "Working date removed",
+  WORK_HOURS_EXTENDED: "Work hours extended",
+  WORK_HOURS_CHANGED: "Work hours changed",
+  WORK_HOURS_CANCELLED: "Work-hours extension cancelled",
+} as const;
+
 export default function TaskWorkingDatesCalendar({
   selectedDates,
   onChange,
@@ -221,6 +235,7 @@ export default function TaskWorkingDatesCalendar({
   const tooltipExtension = tooltip
     ? tooltipDetail?.extension ?? (tooltipSelected ? extensions.get(tooltip.date) ?? null : null)
     : null;
+  const tooltipHistory = (tooltipDetail?.history ?? []).filter((entry) => Boolean(entry.reason));
 
   return (
     <div className={`rounded-xl border border-slate-200 bg-white ${compact ? "p-1.5" : "p-3"}`}>
@@ -311,7 +326,21 @@ export default function TaskWorkingDatesCalendar({
           >
             <p className="font-semibold text-slate-950">{dateLabel(tooltip.date)}</p>
             {!tooltipSelected ? (
-              <p className="mt-2 text-slate-600">Off day</p>
+              <div className="mt-2 space-y-2.5">
+                <p className="text-slate-600">Off day</p>
+                {tooltipHistory.length ? (
+                  <div className="space-y-2 border-t border-slate-100 pt-2">
+                    {tooltipHistory.map((entry) => (
+                      <div key={entry.id} className="space-y-1">
+                        <p className="font-semibold text-slate-700">{changeTypeLabel[entry.changeType]}</p>
+                        <p><span className="font-semibold text-slate-500">Schedule changed by:</span> {entry.actorName}</p>
+                        {entry.reason ? <p><span className="font-semibold text-slate-500">Reason:</span> <span className="break-words">{entry.reason}</span></p> : null}
+                        <p><span className="font-semibold text-slate-500">Changed:</span> {changedAtLabel(entry.changedAt)}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : (
               <div className="mt-2 space-y-2.5">
                 <div>
@@ -342,6 +371,29 @@ export default function TaskWorkingDatesCalendar({
                   <div>
                     <p className="font-semibold text-slate-500">Reason</p>
                     <p className="mt-1 break-words">{tooltipExtension.reason}</p>
+                  </div>
+                ) : null}
+                {tooltipHistory.length ? (
+                  <div className="space-y-2 border-t border-slate-100 pt-2">
+                    {tooltipHistory.map((entry) => {
+                      const isHours = entry.changeType.startsWith("WORK_HOURS");
+                      return (
+                        <div key={entry.id} className="space-y-1">
+                          <p className="font-semibold text-slate-700">{changeTypeLabel[entry.changeType]}</p>
+                          {isHours && (entry.oldValue || entry.newValue) ? (
+                            <p>
+                              <span className="font-semibold text-slate-500">Hours:</span>{" "}
+                              {entry.oldValue ? displayTime(entry.oldValue) : displayTime(normalWorkdayEnd ?? "")}
+                              {" → "}
+                              {entry.newValue ? displayTime(entry.newValue) : "Normal hours"}
+                            </p>
+                          ) : null}
+                          <p><span className="font-semibold text-slate-500">Schedule changed by:</span> {entry.actorName}</p>
+                          {entry.reason ? <p><span className="font-semibold text-slate-500">Reason:</span> <span className="break-words">{entry.reason}</span></p> : null}
+                          <p><span className="font-semibold text-slate-500">Changed:</span> {changedAtLabel(entry.changedAt)}</p>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>

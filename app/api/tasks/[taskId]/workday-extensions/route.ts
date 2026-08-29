@@ -1,4 +1,5 @@
 import { isDateOnly, parseTimeOnly } from "@/lib/projectDateTime";
+import { historicalReasonRequiredResponse } from "@/lib/scheduleChangeReason";
 import { getAuthenticatedUser, jsonNoStore } from "../../reviewWorkflow";
 
 type RouteContext = {
@@ -12,6 +13,14 @@ type ExtensionRequest = {
 };
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isHistoricalReasonError = (error: { code?: string; message?: string; details?: string } | null) => Boolean(
+  error?.code === "P0003"
+  && (
+    error.details === "HISTORICAL_REASON_REQUIRED"
+    || error.message === "A reason is required for a historical extension correction."
+  )
+);
 
 function rpcErrorStatus(code?: string) {
   if (code === "42501") return 403;
@@ -65,6 +74,7 @@ export async function PUT(req: Request, { params }: RouteContext) {
       p_reason: typeof body.reason === "string" ? body.reason : null,
       p_actor_id: user.id,
     });
+    if (isHistoricalReasonError(error)) return jsonNoStore(historicalReasonRequiredResponse(), 409);
     if (error) return jsonNoStore({ error: error.message }, rpcErrorStatus(error.code));
     return jsonNoStore(data);
   } catch (error) {

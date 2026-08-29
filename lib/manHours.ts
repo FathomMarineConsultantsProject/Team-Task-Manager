@@ -81,6 +81,19 @@ export type TaskWorkingDateAssignee = {
 export type TaskWorkingDateDetail = {
   assignees: TaskWorkingDateAssignee[];
   extension: TaskWorkingDateExtension | null;
+  history: TaskScheduleHistoryEntry[];
+};
+
+export type TaskScheduleHistoryEntry = {
+  id: string;
+  changeType: "WORKING_DATE_ADDED" | "WORKING_DATE_REMOVED" | "WORK_HOURS_EXTENDED" | "WORK_HOURS_CHANGED" | "WORK_HOURS_CANCELLED";
+  workDate: string;
+  oldValue: string | null;
+  newValue: string | null;
+  actorId: string | null;
+  actorName: string;
+  reason: string | null;
+  changedAt: string;
 };
 
 export type TaskWorkingSchedule = TaskSchedulePermission & {

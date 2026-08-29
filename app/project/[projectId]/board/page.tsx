@@ -20,7 +20,9 @@ import { useProjectManHours } from "@/lib/useProjectManHours";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 import TaskWorkingDatesCalendar from "@/components/tasks/TaskWorkingDatesCalendar";
 import WorkdayExtensionModal from "@/components/tasks/WorkdayExtensionModal";
+import ScheduleChangeReasonField from "@/components/tasks/ScheduleChangeReasonField";
 import type { TaskWorkingSchedule } from "@/lib/manHours";
+import { HISTORICAL_REASON_MESSAGE, isHistoricalReasonRequired } from "@/lib/scheduleChangeReason";
 import {
   addDaysToDateOnly,
   compareDateOnly,
@@ -325,6 +327,9 @@ export default function ProjectBoardPage({
   const [editOriginalWorkingDates, setEditOriginalWorkingDates] = useState<string[]>([]);
   const [editScheduleState, setEditScheduleState] = useState<"configured" | "legacy" | null>(null);
   const [editScheduleError, setEditScheduleError] = useState<string | null>(null);
+  const [editScheduleReason, setEditScheduleReason] = useState("");
+  const [editScheduleReasonRequired, setEditScheduleReasonRequired] = useState(false);
+  const [editScheduleReasonError, setEditScheduleReasonError] = useState<string | null>(null);
   const [editTarget, setEditTarget] = useState<"task" | "working-dates">("task");
   const editWorkingDatesSectionRef = useRef<HTMLDivElement | null>(null);
   const editTaskRequestRef = useRef<(taskId: string, target?: "task" | "working-dates") => void>(() => undefined);
@@ -2041,6 +2046,9 @@ export default function ProjectBoardPage({
     setEditOriginalWorkingDates([]);
     setEditScheduleState(null);
     setEditScheduleError(null);
+    setEditScheduleReason("");
+    setEditScheduleReasonRequired(false);
+    setEditScheduleReasonError(null);
     setEditTarget("task");
   }, []);
 
@@ -2073,6 +2081,9 @@ export default function ProjectBoardPage({
       }
 
       setEditTarget(target);
+      setEditScheduleReason("");
+      setEditScheduleReasonRequired(false);
+      setEditScheduleReasonError(null);
       setEditingTask({ ...task, description: task.description ?? null });
       const assignedIds = [...new Set([
         ...(task.assigneeId ? [task.assigneeId] : []),
@@ -2119,6 +2130,10 @@ export default function ProjectBoardPage({
       setEditScheduleError("Select at least one working date.");
       return;
     }
+    if (editScheduleReasonRequired && !editScheduleReason.trim()) {
+      setEditScheduleReasonError(HISTORICAL_REASON_MESSAGE);
+      return;
+    }
 
     setIsSavingEdit2(true);
     setEditScheduleError(null);
@@ -2132,10 +2147,16 @@ export default function ProjectBoardPage({
         body: JSON.stringify({
           title: editingTask.title.trim(),
           description: editingTask.description ?? null,
-          dates: editWorkingDates,
+          workingDates: editWorkingDates,
+          reason: editScheduleReason.trim() || null,
         }),
       });
-      const result = await response.json().catch(() => ({})) as { error?: string; schedule?: TaskWorkingSchedule };
+      const result = await response.json().catch(() => ({})) as { error?: string; message?: string; code?: string; requiresReason?: boolean; schedule?: TaskWorkingSchedule };
+      if (isHistoricalReasonRequired(result)) {
+        setEditScheduleReasonRequired(true);
+        setEditScheduleReasonError(HISTORICAL_REASON_MESSAGE);
+        return;
+      }
       if (!response.ok) throw new Error(result.error ?? "Failed to update task.");
       const currentSchedule = taskSchedules.getSchedule(editingTask.id);
       if (result.schedule) {
@@ -2234,7 +2255,7 @@ export default function ProjectBoardPage({
     } finally {
       setIsSavingEdit2(false);
     }
-  }, [canEditTaskAssignments, canMoveTask, closeEditTask, editAssigneeIds, editPrimaryAssigneeId, editWorkingDates, editingTask, handleExtensionChanged, handleScheduleChanged, members, projectId, supabase, taskSchedules.getSchedule, updateTaskDetailsAssignees]);
+  }, [canEditTaskAssignments, canMoveTask, closeEditTask, editAssigneeIds, editPrimaryAssigneeId, editScheduleReason, editScheduleReasonRequired, editWorkingDates, editingTask, handleExtensionChanged, handleScheduleChanged, members, projectId, supabase, taskSchedules.getSchedule, updateTaskDetailsAssignees]);
 
   const claimTask = useCallback(
     async (taskId: string) => {
@@ -3835,6 +3856,18 @@ export default function ProjectBoardPage({
                     <p><span className="font-semibold">Planned end:</span> {formatWorkingDate(editTaskBounds.end, projectTimeZone)}</p>
                     <p><span className="font-semibold">Working hours:</span> {formatWorkdayTime(projectTimeSettings.normalWorkdayStart)}–{formatWorkdayTime(projectTimeSettings.normalWorkdayEnd)}</p>
                     <p className="sm:col-span-2"><span className="font-semibold">Timezone:</span> {projectTimeZone}</p>
+                  </div>
+                  <div className="mt-3">
+                    <ScheduleChangeReasonField
+                      value={editScheduleReason}
+                      onChange={(value) => {
+                        setEditScheduleReason(value);
+                        if (value.trim()) setEditScheduleReasonError(null);
+                      }}
+                      required={editScheduleReasonRequired}
+                      disabled={isSavingEdit2}
+                      error={editScheduleReasonError}
+                    />
                   </div>
                 </>
               ) : null}
