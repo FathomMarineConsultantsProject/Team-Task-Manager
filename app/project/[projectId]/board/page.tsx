@@ -812,15 +812,12 @@ export default function ProjectBoardPage({
   });
   const handleScheduleChanged = useCallback((taskId: string, updatedSchedule: TaskWorkingSchedule) => {
     const dates = [...new Set(updatedSchedule.dates)].sort();
-    const selected = new Set(dates);
     taskSchedules.update(taskId, {
       ...updatedSchedule,
       dates,
       selectedDateCount: dates.length,
-      extensions: (updatedSchedule.extensions ?? []).filter((extension) => selected.has(extension.workDate)),
-      dateDetails: Object.fromEntries(
-        Object.entries(updatedSchedule.dateDetails ?? {}).filter(([workDate]) => selected.has(workDate)),
-      ),
+      extensions: updatedSchedule.extensions ?? [],
+      dateDetails: updatedSchedule.dateDetails ?? {},
     });
     void taskSchedules.invalidate(taskId);
     setColumns((current) => {
@@ -870,9 +867,13 @@ export default function ProjectBoardPage({
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ dates }),
+        body: JSON.stringify({ dates, reason: null }),
       });
-      const result = await response.json().catch(() => ({})) as { error?: string };
+      const result = await response.json().catch(() => ({})) as { error?: string; code?: string; requiresReason?: boolean };
+      if (isHistoricalReasonRequired(result)) {
+        setAddTodayError("This change affects recorded work history. Use Edit Working Dates to add today with a reason.");
+        return;
+      }
       if (!response.ok) throw new Error(result.error ?? "Unable to add today as a working date.");
       await taskSchedules.invalidate(offDayExtensionTask.task.id);
       setColumns((current) => {

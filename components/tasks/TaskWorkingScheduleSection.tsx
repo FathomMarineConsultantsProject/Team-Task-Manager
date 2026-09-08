@@ -100,16 +100,12 @@ export default function TaskWorkingScheduleSection({
       setDates(savedDates);
       setReasonRequired(false);
       setReason("");
-      const selected = new Set(savedDates);
       onChanged({
         ...savedSchedule,
-        extensions: (savedSchedule.extensions ?? schedule?.extensions ?? [])
-          .filter((extension) => selected.has(extension.workDate)),
-        dateDetails: Object.fromEntries(
-          Object.entries(savedSchedule.dateDetails ?? schedule?.dateDetails ?? {})
-            .filter(([workDate]) => selected.has(workDate)),
-        ),
+        extensions: savedSchedule.extensions ?? schedule?.extensions ?? [],
+        dateDetails: savedSchedule.dateDetails ?? schedule?.dateDetails ?? {},
       });
+      void onExtensionChanged();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save the working schedule.");
     } finally {
