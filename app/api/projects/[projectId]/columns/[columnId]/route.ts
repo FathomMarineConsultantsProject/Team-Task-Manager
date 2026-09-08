@@ -3,6 +3,7 @@ import {
   getAuthenticatedUser,
   jsonResponse,
 } from "../columnsHelper";
+import { isColumnColorKey } from "@/lib/columnColors";
 
 type RouteContext = {
   params: Promise<{ projectId: string; columnId: string }>;
@@ -24,7 +25,7 @@ export async function PATCH(req: Request, { params }: RouteContext) {
 
     const allowed = await canManageColumns(adminClient, projectId, user.id);
     if (!allowed) {
-      return jsonResponse({ error: "You do not have permission to rename columns for this project." }, 403);
+      return jsonResponse({ error: "You do not have permission to edit columns for this project." }, 403);
     }
 
     const { data: column, error: findError } = await adminClient
@@ -38,22 +39,28 @@ export async function PATCH(req: Request, { params }: RouteContext) {
       return jsonResponse({ error: "Column not found." }, 404);
     }
 
-    if (column.is_locked) {
-      return jsonResponse({ error: "Locked columns cannot be renamed." }, 400);
-    }
-
-    const body = (await req.json().catch(() => ({}))) as { title?: string };
-    const title = (body.title ?? "").trim();
+    const body = (await req.json().catch(() => ({}))) as { title?: string; colorKey?: string; trackManHours?: boolean };
+    const title = column.is_locked ? column.title : (body.title ?? "").trim();
     if (!title) {
       return jsonResponse({ error: "Column title is required." }, 400);
     }
     if (title.length > 50) {
       return jsonResponse({ error: "Column title cannot exceed 50 characters." }, 400);
     }
+    if (!isColumnColorKey(body.colorKey)) {
+      return jsonResponse({ error: "Choose a valid column color." }, 400);
+    }
+    if (typeof body.trackManHours !== "boolean") {
+      return jsonResponse({ error: "Track Man-Hours must be on or off." }, 400);
+    }
+
+    const trackManHours = column.status_key === "todo" || column.status_key === "done"
+      ? false
+      : body.trackManHours;
 
     const { data: updated, error: updateError } = await adminClient
       .from("project_board_columns")
-      .update({ title, updated_at: new Date().toISOString() })
+      .update({ title, color_key: body.colorKey, track_man_hours: trackManHours, updated_at: new Date().toISOString() })
       .eq("id", columnId)
       .select("*")
       .single();
@@ -65,7 +72,7 @@ export async function PATCH(req: Request, { params }: RouteContext) {
     return jsonResponse({ column: updated });
   } catch (error) {
     return jsonResponse(
-      { error: error instanceof Error ? error.message : "Failed to rename column." },
+      { error: error instanceof Error ? error.message : "Failed to edit column." },
       500,
     );
   }

@@ -1,9 +1,10 @@
-import { FileDown, GripVertical, Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Clock3, FileDown, GripVertical, Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
 import TaskCard from "./TaskCard";
 import type { ColumnId, Task } from "./types";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
+import { COLUMN_COLORS, type ColumnColorKey } from "@/lib/columnColors";
 
 interface BoardColumnProps {
   columnId: ColumnId;
@@ -36,7 +37,9 @@ interface BoardColumnProps {
   stageType?: string;
   statusKey?: string;
   canManageColumns?: boolean;
-  onRenameColumn?: (columnId: ColumnId, currentTitle: string) => void;
+  colorKey?: ColumnColorKey;
+  trackManHours?: boolean;
+  onEditColumn?: (columnId: ColumnId) => void;
   onDeleteColumn?: (columnId: ColumnId, currentTitle: string, taskCount: number) => void;
   onColumnHeaderDragStart?: (columnId: ColumnId, event: DragEvent<HTMLDivElement>) => void;
   onColumnHeaderDragOver?: (columnId: ColumnId, event: DragEvent<HTMLDivElement>) => void;
@@ -78,7 +81,9 @@ export default function BoardColumn({
   stageType,
   statusKey,
   canManageColumns = false,
-  onRenameColumn,
+  colorKey = "indigo",
+  trackManHours = true,
+  onEditColumn,
   onDeleteColumn,
   onColumnHeaderDragStart,
   onColumnHeaderDragOver,
@@ -96,33 +101,13 @@ export default function BoardColumn({
     setShowAllTasks(false);
   }, [resetKey]);
 
-  const resolveAccent = () => {
-    const key = stageType || statusKey || columnId;
-    if (key === "todo") {
-      return { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" };
-    }
-    if (key === "in_progress" || key === "inProgress") {
-      return { ring: "border-blue-200", text: "text-blue-700", bg: "bg-blue-50/70" };
-    }
-    if (key === "draft_review" || key === "draftReview") {
-      return { ring: "border-cyan-200", text: "text-cyan-700", bg: "bg-cyan-50/70" };
-    }
-    if (key === "in_review" || key === "review") {
-      return { ring: "border-amber-200", text: "text-amber-700", bg: "bg-amber-50/70" };
-    }
-    if (key === "done") {
-      return { ring: "border-emerald-200", text: "text-emerald-700", bg: "bg-emerald-50/70" };
-    }
-    return { ring: "border-indigo-200", text: "text-indigo-700", bg: "bg-indigo-50/70" };
-  };
-
-  const accent = resolveAccent();
+  const accent = COLUMN_COLORS[colorKey] ?? COLUMN_COLORS.indigo;
 
   const columnRing = isColumnDragOver
     ? "border-2 border-blue-500 bg-blue-50/40 shadow-lg ring-2 ring-blue-400/40"
     : isDragOver
       ? "border-2 border-dashed border-slate-400 bg-white shadow-md"
-      : `border border-slate-200 bg-gradient-to-b from-white to-slate-50 ${accent.ring}`;
+      : `border border-slate-200 bg-gradient-to-b from-white to-slate-50 ${accent.border}`;
   
   const placeholderVisible = isDragOver || tasks.length === 0;
 
@@ -194,7 +179,8 @@ export default function BoardColumn({
         isColumnDragging ? "opacity-40 scale-[0.98]" : ""
       }`}
     >
-      <div className="flex items-center justify-between rounded-xl px-2 py-2">
+      <div className={`relative flex items-center justify-between overflow-hidden rounded-xl px-2 py-2 ${accent.tint}`}>
+        <span aria-hidden="true" className={`absolute inset-y-1 left-0 w-1 rounded-full ${accent.indicator}`} />
         <div className="flex items-center gap-1.5 min-w-0 flex-1 mr-2">
           {!isLocked && canManageColumns ? (
             <div
@@ -214,13 +200,14 @@ export default function BoardColumn({
           ) : isLocked ? (
             <Lock size={13} className="text-slate-400 shrink-0 mr-0.5" title="Locked column" />
           ) : null}
-          <div className={`text-xs font-semibold uppercase tracking-[0.35em] truncate ${accent.text}`} title={title}>
+          <div className={`ml-1 text-xs font-semibold uppercase tracking-[0.35em] truncate ${accent.text}`} title={title}>
             {title}
           </div>
+          {trackManHours ? <Clock3 size={13} className={`${accent.text} shrink-0 opacity-65`} aria-label="Tracks man-hours" /> : null}
         </div>
 
         <div className="flex items-center gap-2 text-gray-400 shrink-0">
-          <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${accent.ring} ${accent.text} ${accent.bg}`}>
+          <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${accent.border} ${accent.text} ${accent.tint}`}>
             {tasks.length}
           </span>
           <div ref={menuRef} className="relative" onClick={handleMenuClick}>
@@ -254,7 +241,7 @@ export default function BoardColumn({
                   <FileDown size={14} />
                   Export Tasks
                 </button>
-                {!isLocked && canManageColumns ? (
+                {canManageColumns ? (
                   <>
                     <div className="my-1 border-t border-slate-100" />
                     <button
@@ -262,14 +249,14 @@ export default function BoardColumn({
                       onClick={(e) => {
                         e.stopPropagation();
                         setIsMenuOpen(false);
-                        onRenameColumn?.(columnId, title);
+                        onEditColumn?.(columnId);
                       }}
                       className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-slate-50 text-slate-700"
                     >
                       <Pencil size={14} />
-                      Rename Column
+                      Edit Column
                     </button>
-                    <button
+                    {!isLocked ? <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -280,7 +267,7 @@ export default function BoardColumn({
                     >
                       <Trash2 size={14} />
                       Delete Column
-                    </button>
+                    </button> : null}
                   </>
                 ) : null}
               </div>

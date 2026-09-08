@@ -1,9 +1,26 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import Cropper, { Area } from "react-easy-crop";
+import { useCallback, useState, type ComponentType } from "react";
+import Cropper, { Area, type CropperProps } from "react-easy-crop";
 import { X, Check, Loader2 } from "lucide-react";
 import ModalPortal from "@/components/ModalPortal";
+
+// react-easy-crop's class declaration is not recognized as JSX under React 19's
+// stricter element typing, although its runtime component contract is valid.
+type AvatarCropperProps = Pick<
+  CropperProps,
+  | "image"
+  | "crop"
+  | "zoom"
+  | "aspect"
+  | "cropShape"
+  | "showGrid"
+  | "onCropChange"
+  | "onZoomChange"
+  | "onCropComplete"
+  | "style"
+>;
+const CropperComponent = Cropper as unknown as ComponentType<AvatarCropperProps>;
 
 interface AvatarCropModalProps {
   isOpen: boolean;
@@ -131,7 +148,7 @@ export default function AvatarCropModal({
 
           {/* Crop area */}
           <div className="relative w-full bg-slate-950" style={{ height: 340 }}>
-            <Cropper
+            <CropperComponent
               image={imageSrc}
               crop={crop}
               zoom={zoom}

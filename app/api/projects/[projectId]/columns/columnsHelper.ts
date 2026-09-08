@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import type { ColumnColorKey } from "@/lib/columnColors";
 
 export type BoardColumnRow = {
   id: string;
@@ -8,16 +9,18 @@ export type BoardColumnRow = {
   stage_type: "todo" | "in_progress" | "draft_review" | "in_review" | "done" | "custom";
   status_key: "todo" | "in_progress" | "draft_review" | "in_review" | "done";
   is_locked: boolean;
+  color_key: ColumnColorKey;
+  track_man_hours: boolean;
   created_at: string;
   updated_at: string;
 };
 
 export const DEFAULT_COLUMNS = [
-  { title: "TO DO", sort_order: 0, stage_type: "todo", status_key: "todo", is_locked: true },
-  { title: "IN PROGRESS", sort_order: 1, stage_type: "in_progress", status_key: "in_progress", is_locked: false },
-  { title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false },
-  { title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false },
-  { title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false },
+  { title: "TO DO", sort_order: 0, stage_type: "todo", status_key: "todo", is_locked: true, color_key: "slate", track_man_hours: false },
+  { title: "IN PROGRESS", sort_order: 1, stage_type: "in_progress", status_key: "in_progress", is_locked: false, color_key: "blue", track_man_hours: true },
+  { title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false, color_key: "cyan", track_man_hours: true },
+  { title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false, color_key: "amber", track_man_hours: true },
+  { title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false, color_key: "green", track_man_hours: false },
 ] as const;
 
 export const normalizeRole = (role: string | null | undefined) => (role ?? "").toLowerCase();

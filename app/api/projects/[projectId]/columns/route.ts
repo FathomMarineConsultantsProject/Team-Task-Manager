@@ -5,6 +5,7 @@ import {
   getAuthenticatedUser,
   jsonResponse,
 } from "./columnsHelper";
+import { isColumnColorKey } from "@/lib/columnColors";
 
 type RouteContext = {
   params: Promise<{ projectId: string }>;
@@ -60,6 +61,8 @@ export async function POST(req: Request, { params }: RouteContext) {
     const body = (await req.json().catch(() => ({}))) as {
       title?: string;
       status_key?: string;
+      colorKey?: string;
+      trackManHours?: boolean;
     };
 
     const title = (body.title ?? "").trim();
@@ -68,6 +71,12 @@ export async function POST(req: Request, { params }: RouteContext) {
     }
     if (title.length > 50) {
       return jsonResponse({ error: "Column title cannot exceed 50 characters." }, 400);
+    }
+    if (!isColumnColorKey(body.colorKey)) {
+      return jsonResponse({ error: "Choose a valid column color." }, 400);
+    }
+    if (typeof body.trackManHours !== "boolean") {
+      return jsonResponse({ error: "Track Man-Hours must be on or off." }, 400);
     }
 
     const statusKey = body.status_key && ALLOWED_STATUS_KEYS.includes(body.status_key)
@@ -88,6 +97,8 @@ export async function POST(req: Request, { params }: RouteContext) {
         stage_type: "custom",
         status_key: statusKey,
         is_locked: false,
+        color_key: body.colorKey,
+        track_man_hours: body.trackManHours,
       })
       .select("*")
       .single();

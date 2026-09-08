@@ -8,6 +8,8 @@ export interface BoardColumnDefinition {
   stage_type: "todo" | "in_progress" | "draft_review" | "in_review" | "done" | "custom" | string;
   status_key: "todo" | "in_progress" | "draft_review" | "in_review" | "done";
   is_locked: boolean;
+  color_key: import("@/lib/columnColors").ColumnColorKey;
+  track_man_hours: boolean;
   created_at?: string;
   updated_at?: string;
 }

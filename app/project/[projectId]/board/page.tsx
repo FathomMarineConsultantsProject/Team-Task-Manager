@@ -22,6 +22,7 @@ import TaskWorkingDatesCalendar from "@/components/tasks/TaskWorkingDatesCalenda
 import WorkdayExtensionModal from "@/components/tasks/WorkdayExtensionModal";
 import ScheduleChangeReasonField from "@/components/tasks/ScheduleChangeReasonField";
 import type { TaskWorkingSchedule } from "@/lib/manHours";
+import { COLUMN_COLORS, COLUMN_COLOR_KEYS, type ColumnColorKey } from "@/lib/columnColors";
 import { HISTORICAL_REASON_MESSAGE, isHistoricalReasonRequired } from "@/lib/scheduleChangeReason";
 import {
   addDaysToDateOnly,
@@ -116,6 +117,7 @@ type StatusUpdateResult = {
   task?: {
     id: string;
     status: string | null;
+    column_id?: string | null;
     progress?: number | null;
     completed_at: string | null;
     updated_at: string | null;
@@ -137,11 +139,11 @@ type TaskReviewRow = {
 };
 
 const DEFAULT_BOARD_COLUMNS: BoardColumnDefinition[] = [
-  { id: "todo", project_id: "", title: "TO DO", sort_order: 0, stage_type: "todo", status_key: "todo", is_locked: true },
-  { id: "inProgress", project_id: "", title: "IN PROGRESS", sort_order: 1, stage_type: "in_progress", status_key: "in_progress", is_locked: false },
-  { id: "draftReview", project_id: "", title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false },
-  { id: "review", project_id: "", title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false },
-  { id: "done", project_id: "", title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false },
+  { id: "todo", project_id: "", title: "TO DO", sort_order: 0, stage_type: "todo", status_key: "todo", is_locked: true, color_key: "slate", track_man_hours: false },
+  { id: "inProgress", project_id: "", title: "IN PROGRESS", sort_order: 1, stage_type: "in_progress", status_key: "in_progress", is_locked: false, color_key: "blue", track_man_hours: true },
+  { id: "draftReview", project_id: "", title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false, color_key: "cyan", track_man_hours: true },
+  { id: "review", project_id: "", title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false, color_key: "amber", track_man_hours: true },
+  { id: "done", project_id: "", title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false, color_key: "green", track_man_hours: false },
 ];
 
 const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
@@ -194,6 +196,7 @@ const COLUMN_EXPORT_LABEL: Record<string, string> = {
 
 const getColumnAccent = (colId: string, cols: BoardColumnDefinition[] = []) => {
   const col = cols.find((c) => c.id === colId);
+  if (col?.color_key && COLUMN_COLORS[col.color_key]) return COLUMN_COLORS[col.color_key].indicator;
   const key = col?.stage_type || col?.status_key || colId;
   if (key === "todo") return "bg-orange-500";
   if (key === "in_progress" || key === "inProgress") return "bg-sky-500";
@@ -319,6 +322,73 @@ const formatDuration = (ms: number) => {
   };
 };
 
+function ColumnAppearanceFields({
+  color,
+  onColorChange,
+  trackManHours,
+  onTrackManHoursChange,
+  trackingLockedReason,
+  disabled,
+}: {
+  color: ColumnColorKey;
+  onColorChange: (color: ColumnColorKey) => void;
+  trackManHours: boolean;
+  onTrackManHoursChange: (value: boolean) => void;
+  trackingLockedReason?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <>
+      <fieldset disabled={disabled}>
+        <legend className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Color</legend>
+        <div className="mt-2 flex flex-wrap gap-2.5" aria-label="Column color">
+          {COLUMN_COLOR_KEYS.map((key) => {
+            const option = COLUMN_COLORS[key];
+            const selected = color === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                title={option.label}
+                aria-label={`${option.label}${selected ? ", selected" : ""}`}
+                aria-pressed={selected}
+                onClick={() => onColorChange(key)}
+                className={`grid h-8 w-8 place-items-center rounded-full transition focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 ${
+                  selected ? "ring-2 ring-slate-900 ring-offset-2" : "hover:scale-110"
+                }`}
+              >
+                <span className={`h-6 w-6 rounded-full border-2 border-white shadow-sm ${option.swatch}`} />
+              </button>
+            );
+          })}
+        </div>
+      </fieldset>
+
+      <div className="flex items-start justify-between gap-4 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5">
+        <div>
+          <div className="text-sm font-semibold text-slate-800">Track Man-Hours</div>
+          <p className="mt-0.5 text-xs leading-5 text-slate-500">
+            {trackingLockedReason ?? "Track time while tasks are in this column."}
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={trackManHours}
+          aria-label="Track Man-Hours"
+          disabled={disabled || Boolean(trackingLockedReason)}
+          onClick={() => onTrackManHoursChange(!trackManHours)}
+          className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+            trackManHours ? "bg-slate-900" : "bg-slate-300"
+          }`}
+        >
+          <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${trackManHours ? "translate-x-5" : "translate-x-0.5"}`} />
+        </button>
+      </div>
+    </>
+  );
+}
+
 export default function ProjectBoardPage({
   params,
 }: {
@@ -343,13 +413,21 @@ export default function ProjectBoardPage({
   // Column modals state
   const [showAddColumnModal, setShowAddColumnModal] = useState(false);
   const [addColumnTitle, setAddColumnTitle] = useState("");
+  const [addColumnColor, setAddColumnColor] = useState<ColumnColorKey>("indigo");
+  const [addColumnTracksHours, setAddColumnTracksHours] = useState(true);
   const [addColumnError, setAddColumnError] = useState<string | null>(null);
   const [isAddingColumn, setIsAddingColumn] = useState(false);
 
-  const [renamingColumn, setRenamingColumn] = useState<BoardColumnDefinition | null>(null);
-  const [renameTitle, setRenameTitle] = useState("");
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [isRenamingColumn, setIsRenamingColumn] = useState(false);
+  const [editingColumn, setEditingColumn] = useState<BoardColumnDefinition | null>(null);
+  const [editColumnTitle, setEditColumnTitle] = useState("");
+  const [editColumnColor, setEditColumnColor] = useState<ColumnColorKey>("indigo");
+  const [editColumnTracksHours, setEditColumnTracksHours] = useState(true);
+  const [editColumnError, setEditColumnError] = useState<string | null>(null);
+  const [isEditingColumn, setIsEditingColumn] = useState(false);
+  const [boardNotice, setBoardNotice] = useState<{ title: string; detail: string } | null>(null);
+  const showBoardNotice = useCallback((detail: string, title = "Action could not be completed") => {
+    setBoardNotice({ title, detail });
+  }, []);
 
   const [deletingColumn, setDeletingColumn] = useState<{ column: BoardColumnDefinition; taskCount: number } | null>(null);
   const [moveTasksTargetId, setMoveTasksTargetId] = useState<string>("");
@@ -1250,7 +1328,7 @@ export default function ProjectBoardPage({
             }
 
             if (failedUploads.length > 0) {
-              alert(`Task created successfully, but some attachments failed to upload: ${failedUploads.join(", ")}`);
+              showBoardNotice(`Some attachments failed to upload: ${failedUploads.join(", ")}`, "Task created with upload issues");
             }
           }
         setNewTaskTitle("");
@@ -1281,7 +1359,7 @@ export default function ProjectBoardPage({
       }
 
       if (!canManageProjectMembers) {
-        alert("Only the project owner, project lead, admin, or super admin can add members.");
+        showBoardNotice("Only the project owner, project lead, admin, or super admin can add members.");
         console.warn("Unauthorized: Non-manager attempted to add member");
         return;
       }
@@ -1291,7 +1369,7 @@ export default function ProjectBoardPage({
 
       if (newUserIds.length === 0) {
         setSelectedMemberIds([]);
-        alert("Selected users are already members of this project.");
+        showBoardNotice("Selected users are already members of this project.");
         return;
       }
 
@@ -1333,7 +1411,7 @@ export default function ProjectBoardPage({
         setMembers(((updatedMembers as unknown) as DbProjectMember[]) ?? []);
       } catch (error) {
         console.error("Failed to add member:", error);
-        alert(error instanceof Error ? error.message : "Failed to add member. Please try again.");
+        showBoardNotice(error instanceof Error ? error.message : "Failed to add member. Please try again.");
       } finally {
         setIsSubmitting(false);
       }
@@ -1348,7 +1426,7 @@ export default function ProjectBoardPage({
       }
 
       if (!canManageProjectMembers) {
-        alert("Only project owners, leads, admins, or super admins can assign reviewers.");
+        showBoardNotice("Only project owners, leads, admins, or super admins can assign reviewers.");
         return;
       }
 
@@ -1359,7 +1437,7 @@ export default function ProjectBoardPage({
         const accessToken = sessionData.session?.access_token;
 
         if (!accessToken) {
-          alert("Please sign in again to manage project reviewers.");
+          showBoardNotice("Please sign in again to manage project reviewers.");
           return;
         }
 
@@ -1398,7 +1476,7 @@ export default function ProjectBoardPage({
         setSelectedReviewerId("");
       } catch (error) {
         console.error("Failed to assign reviewer", error);
-        alert(error instanceof Error ? error.message : "Failed to assign project reviewer.");
+        showBoardNotice(error instanceof Error ? error.message : "Failed to assign project reviewer.");
       } finally {
         setManagingReviewerId(null);
       }
@@ -1413,7 +1491,7 @@ export default function ProjectBoardPage({
       }
 
       if (!canManageProjectMembers) {
-        alert("Only project owners, leads, admins, or super admins can remove reviewers.");
+        showBoardNotice("Only project owners, leads, admins, or super admins can remove reviewers.");
         return;
       }
 
@@ -1424,7 +1502,7 @@ export default function ProjectBoardPage({
         const accessToken = sessionData.session?.access_token;
 
         if (!accessToken) {
-          alert("Please sign in again to manage project reviewers.");
+          showBoardNotice("Please sign in again to manage project reviewers.");
           return;
         }
 
@@ -1443,7 +1521,7 @@ export default function ProjectBoardPage({
         setReviewers((current) => current.filter((reviewer) => reviewer.user_id !== userId));
       } catch (error) {
         console.error("Failed to remove reviewer", error);
-        alert(error instanceof Error ? error.message : "Failed to remove project reviewer.");
+        showBoardNotice(error instanceof Error ? error.message : "Failed to remove project reviewer.");
       } finally {
         setManagingReviewerId(null);
       }
@@ -1458,7 +1536,7 @@ export default function ProjectBoardPage({
       }
 
       if (!canManageProjectMembers) {
-        alert("Only project managers can promote project leads.");
+        showBoardNotice("Only project managers can promote project leads.");
         return;
       }
 
@@ -1469,7 +1547,7 @@ export default function ProjectBoardPage({
         const accessToken = sessionData.session?.access_token;
 
         if (!accessToken) {
-          alert("Please sign in again to manage project members.");
+          showBoardNotice("Please sign in again to manage project members.");
           return;
         }
 
@@ -1493,7 +1571,7 @@ export default function ProjectBoardPage({
         setOpenTeamMemberMenuId(null);
       } catch (error) {
         console.error("Failed to promote member", error);
-        alert(error instanceof Error ? error.message : "Failed to promote member to project lead.");
+        showBoardNotice(error instanceof Error ? error.message : "Failed to promote member to project lead.");
       } finally {
         setManagingMemberId(null);
       }
@@ -1508,7 +1586,7 @@ export default function ProjectBoardPage({
       }
 
       if (!canRemoveProjectMembers) {
-        alert("Only admins can remove project members.");
+        showBoardNotice("Only admins can remove project members.");
         return;
       }
 
@@ -1519,7 +1597,7 @@ export default function ProjectBoardPage({
         const accessToken = sessionData.session?.access_token;
 
         if (!accessToken) {
-          alert("Please sign in again to manage project members.");
+          showBoardNotice("Please sign in again to manage project members.");
           return;
         }
 
@@ -1560,7 +1638,7 @@ export default function ProjectBoardPage({
         setOpenTeamMemberMenuId(null);
       } catch (error) {
         console.error("Failed to remove member", error);
-        alert(error instanceof Error ? error.message : "Failed to remove member from project.");
+        showBoardNotice(error instanceof Error ? error.message : "Failed to remove member from project.");
       } finally {
         setManagingMemberId(null);
         setMemberPendingRemoval(null);
@@ -1748,6 +1826,7 @@ export default function ProjectBoardPage({
         groupedColumns[columnId].push({
           id: row.id,
           column_id: row.column_id ?? columnId,
+          status: row.status ?? "todo",
           title: row.title?.trim() || "Untitled task",
           description: row.description,
           accent: getColumnAccent(columnId, fetchedColumns),
@@ -1852,13 +1931,17 @@ export default function ProjectBoardPage({
           return { success: false, error: "Please sign in again to update task status." };
         }
 
-        const response = await fetch(`/api/tasks/${taskId}/status`, {
+        const currentStatus = sourceTask?.status
+          ?? projectColumns.find((column) => column.id === source)?.status_key
+          ?? "todo";
+        const isSameStatus = currentStatus === nextStatus;
+        const response = await fetch(`/api/tasks/${taskId}/${isSameStatus ? "column" : "status"}`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${accessToken}`,
           },
-          body: JSON.stringify({ status: nextStatus, columnId: destination }),
+          body: JSON.stringify(isSameStatus ? { columnId: destination } : { status: nextStatus, columnId: destination }),
         });
         const result = (await response.json()) as StatusUpdateResult;
 
@@ -1965,11 +2048,12 @@ export default function ProjectBoardPage({
             });
 
             const pendingNames = result.pendingReviewers?.filter(Boolean) ?? [];
-            alert(
-              pendingNames.length > 0
+            setBoardNotice({
+              title: "Unable to move task",
+              detail: pendingNames.length > 0
                 ? `Pending reviews: ${pendingNames.join(", ")}`
-                : result.error ?? "All assigned reviewers must complete their review before this task can be moved to Done.",
-            );
+                : result.error ?? "The task could not be moved.",
+            });
             return;
           }
 
@@ -2032,7 +2116,7 @@ export default function ProjectBoardPage({
       const canDelete = canManageProject || isAssignee || isMultiAssignee;
 
       if (!canDelete) {
-        alert("You don't have permission to delete this task.");
+        showBoardNotice("You don't have permission to delete this task.");
         return;
       }
 
@@ -2064,7 +2148,7 @@ export default function ProjectBoardPage({
       const accessToken = sessionData.session?.access_token;
 
       if (!accessToken) {
-        alert("Please sign in again to mark your review complete.");
+        showBoardNotice("Please sign in again to mark your review complete.");
         return;
       }
 
@@ -2075,7 +2159,7 @@ export default function ProjectBoardPage({
       const result = (await response.json()) as { error?: string };
 
       if (!response.ok) {
-        alert(result.error ?? "Failed to mark review complete.");
+        showBoardNotice(result.error ?? "Failed to mark review complete.");
         return;
       }
 
@@ -2149,7 +2233,7 @@ export default function ProjectBoardPage({
       if (!task) return;
 
       if (!canEditTaskSchedule(task)) {
-        alert("You don't have permission to edit this task.");
+        showBoardNotice("You don't have permission to edit this task.");
         return;
       }
 
@@ -2351,7 +2435,7 @@ export default function ProjectBoardPage({
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData.session?.access_token;
       if (!accessToken) {
-        alert("Please sign in again to claim this task.");
+        showBoardNotice("Please sign in again to claim this task.");
         return;
       }
 
@@ -2370,7 +2454,7 @@ export default function ProjectBoardPage({
 
       if (!response.ok) {
         console.error("Failed to claim task", result.error);
-        alert(result.error ?? "Failed to claim task.");
+        showBoardNotice(result.error ?? "Failed to claim task.");
         return;
       }
 
@@ -2539,7 +2623,11 @@ export default function ProjectBoardPage({
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ title, stageType: "in_progress" }),
+        body: JSON.stringify({
+          title,
+          colorKey: addColumnColor,
+          trackManHours: addColumnTracksHours,
+        }),
       });
 
       const result = await response.json();
@@ -2552,6 +2640,8 @@ export default function ProjectBoardPage({
       setColumns((current) => ({ ...current, [newCol.id]: [] }));
       setShowAddColumnModal(false);
       setAddColumnTitle("");
+      setAddColumnColor("indigo");
+      setAddColumnTracksHours(true);
     } catch (err) {
       setAddColumnError(err instanceof Error ? err.message : "Failed to create column.");
     } finally {
@@ -2559,49 +2649,53 @@ export default function ProjectBoardPage({
     }
   };
 
-  const handleRenameColumnSubmit = async (e?: React.FormEvent) => {
+  const handleEditColumnSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!renamingColumn) return;
-    const title = renameTitle.trim();
+    if (!editingColumn || isEditingColumn) return;
+    const title = editColumnTitle.trim();
     if (!title) {
-      setRenameError("Column title is required.");
+      setEditColumnError("Column name is required.");
       return;
     }
     if (title.length > 50) {
-      setRenameError("Column title cannot exceed 50 characters.");
+      setEditColumnError("Column name cannot exceed 50 characters.");
       return;
     }
 
-    setIsRenamingColumn(true);
-    setRenameError(null);
+    setIsEditingColumn(true);
+    setEditColumnError(null);
 
     try {
       const token = await getAccessToken();
       if (!token) throw new Error("Please sign in again.");
 
-      const response = await fetch(`/api/projects/${projectId}/columns/${renamingColumn.id}`, {
+      const response = await fetch(`/api/projects/${projectId}/columns/${editingColumn.id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({
+          title,
+          colorKey: editColumnColor,
+          trackManHours: editColumnTracksHours,
+        }),
       });
 
       const result = await response.json();
       if (!response.ok) {
-        throw new Error(result.error ?? "Failed to rename column.");
+        throw new Error(result.error ?? "Failed to edit column.");
       }
 
-      setProjectColumns((current) =>
-        current.map((col) => (col.id === renamingColumn.id ? { ...col, title } : col)),
-      );
-      setRenamingColumn(null);
-      setRenameTitle("");
+      const updated = result.column as BoardColumnDefinition;
+      setProjectColumns((current) => current.map((col) => (col.id === editingColumn.id ? updated : col)));
+      setEditingColumn(null);
+      setEditColumnTitle("");
+      setManHoursRefreshKey((current) => current + 1);
     } catch (err) {
-      setRenameError(err instanceof Error ? err.message : "Failed to rename column.");
+      setEditColumnError(err instanceof Error ? err.message : "Failed to edit column.");
     } finally {
-      setIsRenamingColumn(false);
+      setIsEditingColumn(false);
     }
   };
 
@@ -2675,6 +2769,29 @@ export default function ProjectBoardPage({
 
   return (
     <div className="space-y-6 p-8">
+      {boardNotice ? (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="fixed right-6 top-6 z-[10000] w-[min(420px,calc(100vw-3rem))] rounded-xl border border-red-200 bg-white p-4 shadow-xl shadow-slate-900/10"
+        >
+          <div className="flex items-start gap-3">
+            <div className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-slate-900">{boardNotice.title}</p>
+              <p className="mt-1 text-sm leading-5 text-slate-600">{boardNotice.detail}</p>
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss notification"
+              onClick={() => setBoardNotice(null)}
+              className="rounded-md p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-900"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+      ) : null}
       {/* PROJECT HEADER + TEAM CONTAINER */}
       {projectLoading ? (
         <div className="text-xs text-slate-500">Loading project...</div>
@@ -3055,13 +3172,17 @@ export default function ProjectBoardPage({
                 isLocked={Boolean(column.is_locked || colIndex === 0 || column.id === "todo")}
                 stageType={column.stage_type}
                 statusKey={column.status_key}
+                colorKey={column.color_key}
+                trackManHours={column.track_man_hours}
                 canManageColumns={canManageProjectColumns}
-                onRenameColumn={(colId, currentTitle) => {
+                onEditColumn={(colId) => {
                   const colDef = projectColumns.find((c) => c.id === colId);
                   if (colDef) {
-                    setRenamingColumn(colDef);
-                    setRenameTitle(currentTitle);
-                    setRenameError(null);
+                    setEditingColumn(colDef);
+                    setEditColumnTitle(colDef.title);
+                    setEditColumnColor(colDef.color_key);
+                    setEditColumnTracksHours(colDef.track_man_hours);
+                    setEditColumnError(null);
                   }
                 }}
                 onDeleteColumn={(colId, currentTitle, taskCount) => {
@@ -3088,6 +3209,8 @@ export default function ProjectBoardPage({
                 type="button"
                 onClick={() => {
                   setAddColumnTitle("");
+                  setAddColumnColor("indigo");
+                  setAddColumnTracksHours(true);
                   setAddColumnError(null);
                   setShowAddColumnModal(true);
                 }}
@@ -3965,12 +4088,12 @@ export default function ProjectBoardPage({
             setAddColumnError(null);
           }
         }}
-        title="Add Board Column"
+        title="Add Column"
       >
         <form onSubmit={(e) => void handleAddColumnSubmit(e)} className="space-y-4">
           <div>
             <label htmlFor="add-column-title" className="block text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-              Column Title
+              Column Name
             </label>
             <input
               id="add-column-title"
@@ -3989,6 +4112,14 @@ export default function ProjectBoardPage({
             <p className="mt-1 text-[11px] text-slate-400">Custom columns are placed at the end of the board and can be reordered.</p>
           </div>
 
+          <ColumnAppearanceFields
+            color={addColumnColor}
+            onColorChange={setAddColumnColor}
+            trackManHours={addColumnTracksHours}
+            onTrackManHoursChange={setAddColumnTracksHours}
+            disabled={isAddingColumn}
+          />
+
           {addColumnError && (
             <div className="rounded-lg bg-red-50 p-3 text-xs font-medium text-red-700">
               {addColumnError}
@@ -4002,6 +4133,8 @@ export default function ProjectBoardPage({
               onClick={() => {
                 setShowAddColumnModal(false);
                 setAddColumnTitle("");
+                setAddColumnColor("indigo");
+                setAddColumnTracksHours(true);
                 setAddColumnError(null);
               }}
               disabled={isAddingColumn}
@@ -4020,41 +4153,55 @@ export default function ProjectBoardPage({
         </form>
       </Modal>
 
-      {/* RENAME COLUMN MODAL */}
+      {/* EDIT COLUMN MODAL */}
       <Modal
-        isOpen={renamingColumn !== null}
+        isOpen={editingColumn !== null}
         onClose={() => {
-          if (!isRenamingColumn) {
-            setRenamingColumn(null);
-            setRenameTitle("");
-            setRenameError(null);
+          if (!isEditingColumn) {
+            setEditingColumn(null);
+            setEditColumnTitle("");
+            setEditColumnError(null);
           }
         }}
-        title="Rename Column"
+        title="Edit Column"
       >
-        <form onSubmit={(e) => void handleRenameColumnSubmit(e)} className="space-y-4">
+        <form onSubmit={(e) => void handleEditColumnSubmit(e)} className="space-y-4">
           <div>
-            <label htmlFor="rename-column-title" className="block text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-              New Title
+            <label htmlFor="edit-column-title" className="block text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              Column Name
             </label>
             <input
-              id="rename-column-title"
+              id="edit-column-title"
               type="text"
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
-              value={renameTitle}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none disabled:bg-slate-100 disabled:text-slate-500"
+              value={editColumnTitle}
               onChange={(e) => {
-                setRenameTitle(e.target.value);
-                if (renameError) setRenameError(null);
+                setEditColumnTitle(e.target.value);
+                if (editColumnError) setEditColumnError(null);
               }}
-              disabled={isRenamingColumn}
+              disabled={isEditingColumn || Boolean(editingColumn?.is_locked)}
               maxLength={50}
               autoFocus
             />
+            {editingColumn?.is_locked ? <p className="mt-1 text-[11px] text-slate-500">Name locked for this system column.</p> : null}
           </div>
 
-          {renameError && (
-            <div className="rounded-lg bg-red-50 p-3 text-xs font-medium text-red-700">
-              {renameError}
+          <ColumnAppearanceFields
+            color={editColumnColor}
+            onColorChange={setEditColumnColor}
+            trackManHours={editColumnTracksHours}
+            onTrackManHoursChange={setEditColumnTracksHours}
+            trackingLockedReason={editingColumn?.status_key === "todo"
+              ? "OFF — system column"
+              : editingColumn?.status_key === "done"
+                ? "OFF — completed tasks do not track time"
+                : undefined}
+            disabled={isEditingColumn}
+          />
+
+          {editColumnError && (
+            <div role="alert" className="rounded-lg bg-red-50 p-3 text-xs font-medium text-red-700">
+              {editColumnError}
             </div>
           )}
 
@@ -4063,21 +4210,21 @@ export default function ProjectBoardPage({
               type="button"
               variant="ghost"
               onClick={() => {
-                setRenamingColumn(null);
-                setRenameTitle("");
-                setRenameError(null);
+                setEditingColumn(null);
+                setEditColumnTitle("");
+                setEditColumnError(null);
               }}
-              disabled={isRenamingColumn}
+              disabled={isEditingColumn}
               className="rounded-lg px-4 py-2 text-sm font-semibold"
             >
               Cancel
             </Button>
             <Button
               type="submit"
-              disabled={isRenamingColumn || !renameTitle.trim()}
+              disabled={isEditingColumn || !editColumnTitle.trim()}
               className="rounded-lg px-4 py-2 text-sm font-semibold"
             >
-              {isRenamingColumn ? "Saving..." : "Save"}
+              {isEditingColumn ? "Saving..." : "Save"}
             </Button>
           </div>
         </form>

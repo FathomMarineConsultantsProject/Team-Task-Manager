@@ -49,24 +49,12 @@ export async function PATCH(req: Request, { params }: RouteContext) {
       return json({ error: "You must be signed in to update task status." }, 401);
     }
 
-    let rpcRes = await adminClient.rpc("transition_task_status", {
+    const rpcRes = await adminClient.rpc("transition_task_status", {
       p_task_id: taskId,
       p_new_status: status,
       p_actor_id: user.id,
       p_column_id: columnId || null,
     });
-
-    if (rpcRes.error && (rpcRes.error.message?.includes("function") || rpcRes.error.code === "42883" || rpcRes.error.code === "PGRST202")) {
-      // Fallback if 4-parameter transition_task_status is not yet migrated in DB
-      rpcRes = await adminClient.rpc("transition_task_status", {
-        p_task_id: taskId,
-        p_new_status: status,
-        p_actor_id: user.id,
-      });
-      if (!rpcRes.error && columnId) {
-        await adminClient.from("tasks").update({ column_id: columnId }).eq("id", taskId);
-      }
-    }
 
     const { data, error } = rpcRes;
 
@@ -91,6 +79,7 @@ export async function PATCH(req: Request, { params }: RouteContext) {
     }
 
     return json({
+      ok: true,
       task: result.task,
       reviewCycleReset: Boolean(result.reviewCycleReset),
     });
