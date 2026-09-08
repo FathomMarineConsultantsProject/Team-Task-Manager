@@ -14,6 +14,7 @@ type CreateTaskRequest = {
   description?: string | null;
   status?: string;
   priority?: string | null;
+  columnId?: string | null;
   primaryAssigneeId?: string | null;
   additionalAssigneeIds?: string[];
   workingDates?: string[];
@@ -78,6 +79,16 @@ export async function POST(req: Request, { params }: RouteContext) {
     });
 
     if (error) return jsonNoStore({ error: error.message }, rpcErrorStatus(error.code));
+
+    const taskResult = data as { task?: { id?: string; column_id?: string | null } } | null;
+    if (taskResult?.task?.id && body.columnId && UUID_PATTERN.test(body.columnId)) {
+      await adminClient
+        .from("tasks")
+        .update({ column_id: body.columnId })
+        .eq("id", taskResult.task.id);
+      taskResult.task.column_id = body.columnId;
+    }
+
     return jsonNoStore(data, 201);
   } catch (error) {
     return jsonNoStore({ error: error instanceof Error ? error.message : "Failed to create task." }, 500);

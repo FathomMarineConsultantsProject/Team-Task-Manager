@@ -2,14 +2,14 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus, Loader2 } from "lucide-react";
+import { Plus, Users, LayoutDashboard, ChevronDown, ChevronUp, Search, SlidersHorizontal, X, FileDown, MoreHorizontal, Crown, UserMinus, Loader2, Pencil, Trash2, GripVertical, Lock } from "lucide-react";
 import { useExportTasks } from "@/lib/useExportTasks";
 import BoardColumn from "@/components/board/BoardColumn";
 import ProjectManHours from "@/components/board/ProjectManHours";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
 import Avatar from "@/components/ui/Avatar";
-import type { ColumnId, Task, TaskReviewProgress } from "@/components/board/types";
+import type { BoardColumnDefinition, ColumnId, Task, TaskReviewProgress } from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
 import { createEmptyColumns } from "@/lib/data";
 import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
@@ -42,6 +42,7 @@ type DbTask = {
   title: string | null;
   description: string | null;
   status: string | null;
+  column_id?: string | null;
   assigned_to: string | null;
   start_date: string | null;
   end_date: string | null;
@@ -135,6 +136,14 @@ type TaskReviewRow = {
   status: string | null;
 };
 
+const DEFAULT_BOARD_COLUMNS: BoardColumnDefinition[] = [
+  { id: "todo", project_id: "", title: "TO DO", sort_order: 0, stage_type: "todo", status_key: "todo", is_locked: true },
+  { id: "inProgress", project_id: "", title: "IN PROGRESS", sort_order: 1, stage_type: "in_progress", status_key: "in_progress", is_locked: false },
+  { id: "draftReview", project_id: "", title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false },
+  { id: "review", project_id: "", title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false },
+  { id: "done", project_id: "", title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false },
+];
+
 const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
   { id: "todo", title: "TO DO" },
   { id: "inProgress", title: "IN PROGRESS" },
@@ -151,7 +160,7 @@ const STATUS_TO_COLUMN: Record<string, ColumnId> = {
   done: "done",
 };
 
-const COLUMN_TO_STATUS: Record<ColumnId, "todo" | "in_progress" | "draft_review" | "in_review" | "done"> = {
+const COLUMN_TO_STATUS: Record<string, "todo" | "in_progress" | "draft_review" | "in_review" | "done"> = {
   todo: "todo",
   inProgress: "in_progress",
   draftReview: "draft_review",
@@ -159,7 +168,7 @@ const COLUMN_TO_STATUS: Record<ColumnId, "todo" | "in_progress" | "draft_review"
   done: "done",
 };
 
-const COLUMN_ACCENT: Record<ColumnId, string> = {
+const COLUMN_ACCENT: Record<string, string> = {
   todo: "bg-orange-500",
   inProgress: "bg-sky-500",
   draftReview: "bg-cyan-500",
@@ -167,7 +176,7 @@ const COLUMN_ACCENT: Record<ColumnId, string> = {
   done: "bg-emerald-600",
 };
 
-const STATUS_LABEL: Record<ColumnId, string> = {
+const STATUS_LABEL: Record<string, string> = {
   todo: "TODO",
   inProgress: "IN PROGRESS",
   draftReview: "DRAFT REVIEW",
@@ -175,12 +184,54 @@ const STATUS_LABEL: Record<ColumnId, string> = {
   done: "DONE",
 };
 
-const COLUMN_EXPORT_LABEL: Record<ColumnId, string> = {
+const COLUMN_EXPORT_LABEL: Record<string, string> = {
   todo: "To Do",
   inProgress: "In Progress",
   draftReview: "Draft Review",
   review: "In Review",
   done: "Done",
+};
+
+const getColumnAccent = (colId: string, cols: BoardColumnDefinition[] = []) => {
+  const col = cols.find((c) => c.id === colId);
+  const key = col?.stage_type || col?.status_key || colId;
+  if (key === "todo") return "bg-orange-500";
+  if (key === "in_progress" || key === "inProgress") return "bg-sky-500";
+  if (key === "draft_review" || key === "draftReview") return "bg-cyan-500";
+  if (key === "in_review" || key === "review") return "bg-amber-500";
+  if (key === "done") return "bg-emerald-600";
+  return "bg-indigo-500";
+};
+
+const getColumnStatusLabel = (colId: string, cols: BoardColumnDefinition[] = []) => {
+  const col = cols.find((c) => c.id === colId);
+  return col?.title ?? "TODO";
+};
+
+const getColumnExportLabel = (colId: string, cols: BoardColumnDefinition[] = []) => {
+  const col = cols.find((c) => c.id === colId);
+  return col?.title ?? "Tasks";
+};
+
+const resolveTaskColumnId = (
+  task: { status?: string | null; column_id?: string | null },
+  cols: BoardColumnDefinition[]
+): string => {
+  if (task.column_id) {
+    const matching = cols.find((c) => c.id === task.column_id);
+    if (matching) return matching.id;
+  }
+  const rawStatus = (task.status ?? "todo").toLowerCase();
+  let targetStage = rawStatus;
+  if (rawStatus === "in_progress" || rawStatus === "inprogress") targetStage = "in_progress";
+  if (rawStatus === "draft_review" || rawStatus === "draftreview") targetStage = "draft_review";
+  if (rawStatus === "in_review" || rawStatus === "inreview" || rawStatus === "review") targetStage = "in_review";
+  if (rawStatus === "done" || rawStatus === "completed") targetStage = "done";
+
+  const byStage = cols.find((c) => c.stage_type === targetStage || c.status_key === targetStage);
+  if (byStage) return byStage.id;
+
+  return cols[0]?.id ?? "todo";
 };
 
 const getDraftReviewDateFields = (enteredAt = new Date()) => ({
@@ -279,14 +330,31 @@ export default function ProjectBoardPage({
   const deepLinkTaskId = searchParams?.get("taskId");
   const hasOpenedDeepLinkRef = React.useRef(false);
   const { supabase, profile } = useAppData();
-
-  // Board state (existing)
-  const [columns, setColumns] = useState<Record<ColumnId, Task[]>>(createEmptyColumns);
+  const [projectColumns, setProjectColumns] = useState<BoardColumnDefinition[]>(DEFAULT_BOARD_COLUMNS);
+  const [columns, setColumns] = useState<Record<string, Task[]>>({});
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<ColumnId | null>(null);
   const [activeDrag, setActiveDrag] = useState<{ taskId: string; from: ColumnId } | null>(null);
   const [pendingStatusTaskIds, setPendingStatusTaskIds] = useState<Set<string>>(() => new Set());
+  const [activeColumnDrag, setActiveColumnDrag] = useState<string | null>(null);
+  const [columnDragOverId, setColumnDragOverId] = useState<string | null>(null);
+
+  // Column modals state
+  const [showAddColumnModal, setShowAddColumnModal] = useState(false);
+  const [addColumnTitle, setAddColumnTitle] = useState("");
+  const [addColumnError, setAddColumnError] = useState<string | null>(null);
+  const [isAddingColumn, setIsAddingColumn] = useState(false);
+
+  const [renamingColumn, setRenamingColumn] = useState<BoardColumnDefinition | null>(null);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [isRenamingColumn, setIsRenamingColumn] = useState(false);
+
+  const [deletingColumn, setDeletingColumn] = useState<{ column: BoardColumnDefinition; taskCount: number } | null>(null);
+  const [moveTasksTargetId, setMoveTasksTargetId] = useState<string>("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isDeletingColumn, setIsDeletingColumn] = useState(false);
 
   // Project state (new)
   const [project, setProject] = useState<DbProject | null>(null);
@@ -416,6 +484,7 @@ export default function ProjectBoardPage({
   const canManageProjectMembers = isOwner || isProjectLead || isAdmin || isSuperAdmin;
   const canEditTaskAssignments = canManageProjectMembers;
   const canRemoveProjectMembers = isAdmin || isSuperAdmin;
+  const canManageProjectColumns = canManageProjectMembers;
   const isProjectMember = Boolean(profile?.id && members.some((member) => member.user_id === profile.id));
   const isProjectOwnerMember = Boolean(
     profile?.id &&
@@ -450,7 +519,7 @@ export default function ProjectBoardPage({
   const canParticipateInTaskUpdates = isProjectMember || isProjectOwnerMember || isSuperAdmin;
 
   const loadProjectReviewers = useCallback(async () => {
-    if (!projectId) {
+  if (!projectId) {
       setReviewers([]);
       return;
     }
@@ -677,11 +746,11 @@ export default function ProjectBoardPage({
   );
 
   const applyTaskUpdateCounts = useCallback(
-    (nextColumns: Record<ColumnId, Task[]>) => {
-      const countedColumns = createEmptyColumns();
+    (nextColumns: Record<string, Task[]>) => {
+      const countedColumns: Record<string, Task[]> = {};
 
-      BOARD_COLUMNS.forEach((column) => {
-        countedColumns[column.id] = nextColumns[column.id].map((task) => ({
+      Object.keys(nextColumns).forEach((columnId) => {
+        countedColumns[columnId] = (nextColumns[columnId] ?? []).map((task) => ({
           ...task,
           updatesCount: taskUpdateCounts[task.id] ?? 0,
         }));
@@ -724,7 +793,12 @@ export default function ProjectBoardPage({
     }
   }, [projectId, supabase]);
 
-  const inReviewTaskIds = useMemo(() => columns.review.map((task) => task.id), [columns.review]);
+  const inReviewTaskIds = useMemo(() => {
+    const reviewColIds = projectColumns
+      .filter((c) => c.stage_type === "in_review" || c.status_key === "in_review" || c.id === "review")
+      .map((c) => c.id);
+    return reviewColIds.flatMap((colId) => (columns[colId] ?? []).map((task) => task.id));
+  }, [columns, projectColumns]);
 
   useEffect(() => {
     let isMounted = true;
@@ -822,8 +896,8 @@ export default function ProjectBoardPage({
     void taskSchedules.invalidate(taskId);
     setColumns((current) => {
       const next = { ...current };
-      BOARD_COLUMNS.forEach((column) => {
-        next[column.id] = next[column.id].map((task) => task.id === taskId
+      Object.keys(next).forEach((columnId) => {
+        next[columnId] = next[columnId].map((task) => task.id === taskId
           ? {
               ...task,
               start_date: dates[0] ?? null,
@@ -837,13 +911,11 @@ export default function ProjectBoardPage({
     setManHoursRefreshKey((value) => value + 1);
   }, [canMoveTask, taskSchedules.invalidate, taskSchedules.update]);
   const handleExtensionChanged = useCallback(async (taskId: string) => {
-    if (taskSchedules.getSchedule(taskId)) await taskSchedules.invalidate(taskId);
+    await taskSchedules.invalidate(taskId);
     setManHoursRefreshKey((value) => value + 1);
-  }, [taskSchedules.getSchedule, taskSchedules.invalidate]);
+  }, [taskSchedules.invalidate]);
   const requestWorkdayExtension = useCallback(async (task: Task, summary: LiveTaskManHoursSummary) => {
-    const schedule = await taskSchedules.load(task.id);
-    if (!schedule) return;
-    if (schedule.todayIsSelected) {
+    if (summary.todayIsSelected) {
       setExtensionTask({ task, summary });
       return;
     }
@@ -878,8 +950,8 @@ export default function ProjectBoardPage({
       await taskSchedules.invalidate(offDayExtensionTask.task.id);
       setColumns((current) => {
         const next = { ...current };
-        BOARD_COLUMNS.forEach((column) => {
-          next[column.id] = next[column.id].map((task) => task.id === offDayExtensionTask.task.id
+        Object.keys(next).forEach((columnId) => {
+          next[columnId] = next[columnId].map((task) => task.id === offDayExtensionTask.task.id
             ? {
                 ...task,
                 start_date: dates[0] ?? null,
@@ -937,12 +1009,15 @@ export default function ProjectBoardPage({
         createdByIdValue = null;
       }
 
+      const colDef = projectColumns.find((c) => c.id === column);
+      const taskStatus = (colDef?.status_key || COLUMN_TO_STATUS[column] || "todo") as any;
+
       openTaskDetails({
         id: task.id,
         projectId,
         title: task.title,
         description: descriptionValue,
-        status: COLUMN_TO_STATUS[column],
+        status: taskStatus,
         assignee: task.assigneeName ?? task.assigneeEmail ?? "Unassigned",
         createdAt,
         createdByName: null,
@@ -956,7 +1031,7 @@ export default function ProjectBoardPage({
         normalWorkdayEnd: projectWorkdayEnd,
       });
     },
-    [columns, openTaskDetails, project?.name, project?.owner_id, projectId, projectTimeZone, projectWorkdayEnd, supabase],
+    [columns, openTaskDetails, project?.name, project?.owner_id, projectColumns, projectId, projectTimeZone, projectWorkdayEnd, supabase],
   );
 
   // Fetch project and members (new)
@@ -1537,184 +1612,176 @@ export default function ProjectBoardPage({
     };
   }, [showAddMemberModal, supabase]);
 
-  useEffect(() => {
-    let isMounted = true;
+  const loadBoard = useCallback(async () => {
+    if (!projectId) {
+      setColumns({});
+      setErrorMessage("Missing project identifier");
+      setLoading(false);
+      return;
+    }
 
-    const loadBoard = async () => {
-      if (!projectId) {
-        if (isMounted) {
-          setColumns(createEmptyColumns());
-          setErrorMessage("Missing project identifier");
-          setLoading(false);
+    setLoading(true);
+    setErrorMessage(null);
+
+    try {
+      // 1. Fetch project columns
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      let fetchedColumns = DEFAULT_BOARD_COLUMNS;
+      if (token) {
+        try {
+          const colsRes = await fetch(`/api/projects/${projectId}/columns`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (colsRes.ok) {
+            const colsJson = await colsRes.json();
+            if (Array.isArray(colsJson.columns) && colsJson.columns.length > 0) {
+              fetchedColumns = colsJson.columns;
+            }
+          }
+        } catch (e) {
+          console.error("Failed to fetch project columns", e);
         }
-        return;
+      }
+      setProjectColumns(fetchedColumns);
+
+      // 2. Fetch tasks
+      const { data: taskRows, error: taskError } = await supabase
+        .from("tasks")
+        .select("id, title, description, status, column_id, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, completed_at")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false, nullsFirst: false });
+
+      if (taskError) {
+        throw taskError;
       }
 
-      if (isMounted) {
-        setLoading(true);
-        setErrorMessage(null);
-      }
-
+      let updatesMap: Record<string, number> = {};
       try {
-        const { data: taskRows, error: taskError } = await supabase
-          .from("tasks")
-          .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, completed_at")
-          .eq("project_id", projectId)
-          .order("created_at", { ascending: false, nullsFirst: false });
+        const { data: updatesData, error: updatesError } = await supabase
+          .from("task_updates")
+          .select("task_id")
+          .eq("project_id", projectId);
 
-        if (taskError) {
-          throw taskError;
-        }
-
-        let updatesMap: Record<string, number> = {};
-        try {
-          const { data: updatesData, error: updatesError } = await supabase
-            .from("task_updates")
-            .select("task_id")
-            .eq("project_id", projectId);
-
-          if (!updatesError) {
-            updatesMap = (((updatesData as Array<{ task_id: string | null }> | null | undefined) ?? []).filter(
-              (row): row is { task_id: string } => Boolean(row.task_id),
-            )).reduce<Record<string, number>>((acc, row) => {
-              acc[row.task_id] = (acc[row.task_id] ?? 0) + 1;
-              return acc;
-            }, {});
-
-            if (isMounted) {
-              setTaskUpdateCounts(updatesMap);
-            }
-          }
-        } catch {
-          updatesMap = {};
-        }
-
-        try {
-          const { data: updatesData, error: updatesError } = await supabase
-            .from("task_updates")
-            .select("task_id")
-            .eq("project_id", projectId);
-
-          if (!updatesError) {
-            const updatesMap = (((updatesData as Array<{ task_id: string | null }> | null | undefined) ?? []).filter(
-              (row): row is { task_id: string } => Boolean(row.task_id),
-            )).reduce<Record<string, number>>((acc, row) => {
-              acc[row.task_id] = (acc[row.task_id] ?? 0) + 1;
-              return acc;
-            }, {});
-
-            if (isMounted) {
-              setTaskUpdateCounts(updatesMap);
-            }
-          }
-        } catch {
-          // Silent fallback: counts are optional and should not block board rendering.
-        }
-
-        const assignedIds = Array.from(
-          new Set(
-            ((taskRows as DbTask[] | null | undefined) ?? [])
-              .map((task) => task.assigned_to)
-              .filter((id): id is string => Boolean(id)),
-          ),
-        );
-
-        let usersById: Record<string, DbUser> = {};
-
-        if (assignedIds.length > 0) {
-          const { data: userRows, error: userError } = await supabase
-            .from("users")
-            .select("id, name, email, job_role, system_role, avatar_url")
-            .in("id", assignedIds);
-
-          if (userError) {
-            throw userError;
-          }
-
-          usersById = ((userRows as DbUser[] | null | undefined) ?? []).reduce<Record<string, DbUser>>((acc, user) => {
-            acc[user.id] = user;
+        if (!updatesError) {
+          updatesMap = (((updatesData as Array<{ task_id: string | null }> | null | undefined) ?? []).filter(
+            (row): row is { task_id: string } => Boolean(row.task_id),
+          )).reduce<Record<string, number>>((acc, row) => {
+            acc[row.task_id] = (acc[row.task_id] ?? 0) + 1;
             return acc;
           }, {});
+
+          setTaskUpdateCounts(updatesMap);
+        }
+      } catch {
+        updatesMap = {};
+      }
+
+      const assignedIds = Array.from(
+        new Set(
+          ((taskRows as DbTask[] | null | undefined) ?? [])
+            .map((task) => task.assigned_to)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      );
+
+      let usersById: Record<string, DbUser> = {};
+
+      if (assignedIds.length > 0) {
+        const { data: userRows, error: userError } = await supabase
+          .from("users")
+          .select("id, name, email, job_role, system_role, avatar_url")
+          .in("id", assignedIds);
+
+        if (userError) {
+          throw userError;
         }
 
-        const groupedColumns = createEmptyColumns();
+        usersById = ((userRows as DbUser[] | null | undefined) ?? []).reduce<Record<string, DbUser>>((acc, user) => {
+          acc[user.id] = user;
+          return acc;
+        }, {});
+      }
 
-        // Fetch multi-assignees for all tasks
-        const allTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
-        let assigneesMap: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
-        if (allTaskIds.length > 0) {
-          try {
-            const { data: assigneesData } = await supabase
-              .from("task_assignees")
-              .select("task_id, user:users(id, name, email, avatar_url)")
-              .in("task_id", allTaskIds);
+      const groupedColumns: Record<string, Task[]> = {};
+      fetchedColumns.forEach((c) => {
+        groupedColumns[c.id] = [];
+      });
 
-            if (assigneesData) {
-              (assigneesData as any[]).forEach((row: any) => {
-                if (!row.task_id || !row.user) return;
-                if (!assigneesMap[row.task_id]) assigneesMap[row.task_id] = [];
-                assigneesMap[row.task_id].push(row.user);
-              });
-            }
-          } catch {
-            // task_assignees table may not exist yet — fail silently
+      // Fetch multi-assignees for all tasks
+      const allTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
+      let assigneesMap: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
+      if (allTaskIds.length > 0) {
+        try {
+          const { data: assigneesData } = await supabase
+            .from("task_assignees")
+            .select("task_id, user:users(id, name, email, avatar_url)")
+            .in("task_id", allTaskIds);
+
+          if (assigneesData) {
+            (assigneesData as any[]).forEach((row: any) => {
+              if (!row.task_id || !row.user) return;
+              if (!assigneesMap[row.task_id]) assigneesMap[row.task_id] = [];
+              assigneesMap[row.task_id].push(row.user);
+            });
           }
-        }
-
-        ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
-          const columnId = resolveColumn(row.status);
-          const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
-
-          // Build multi-assignee list: primary + additional (deduplicated)
-          const multiUsers = assigneesMap[row.id] ?? [];
-          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
-          const assignees = [
-            ...(primaryUser ? [primaryUser] : []),
-            ...multiUsers.filter(u => u.id !== primaryUser?.id),
-          ];
-
-          groupedColumns[columnId] = [
-            ...groupedColumns[columnId],
-            {
-              id: row.id,
-              title: row.title?.trim() || "Untitled task",
-              description: row.description,
-              accent: COLUMN_ACCENT[columnId],
-              initials: buildInitials(assignee?.name, assignee?.email),
-              assigneeId: row.assigned_to,
-              assigneeName: assignee?.name ?? null,
-              assigneeEmail: assignee?.email ?? null,
-              assigneeRole: assignee?.job_role ?? null,
-              avatarUrl: assignee?.avatar_url ?? null,
-              start_date: row.start_date,
-              end_date: row.end_date,
-              draft_review_started_at: row.draft_review_started_at,
-              draft_review_due_at: row.draft_review_due_at,
-              completed_at: row.completed_at,
-              statusLabel: STATUS_LABEL[columnId],
-              canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
-              updatesCount: updatesMap[row.id] ?? 0,
-              assignees,
-            },
-          ];
-        });
-
-        if (isMounted) {
-          setColumns(groupedColumns);
-          setErrorMessage(null);
-        }
-      } catch (error) {
-        console.error("Failed to load board", error);
-        if (isMounted) {
-          setColumns(createEmptyColumns());
-          setErrorMessage("Failed to load board tasks.");
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
+        } catch {
+          // task_assignees table may not exist yet — fail silently
         }
       }
-    };
+
+      ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
+        const columnId = resolveTaskColumnId(row, fetchedColumns);
+        if (!groupedColumns[columnId]) {
+          groupedColumns[columnId] = [];
+        }
+        const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
+
+        // Build multi-assignee list: primary + additional (deduplicated)
+        const multiUsers = assigneesMap[row.id] ?? [];
+        const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
+        const assignees = [
+          ...(primaryUser ? [primaryUser] : []),
+          ...multiUsers.filter(u => u.id !== primaryUser?.id),
+        ];
+
+        groupedColumns[columnId].push({
+          id: row.id,
+          column_id: row.column_id ?? columnId,
+          title: row.title?.trim() || "Untitled task",
+          description: row.description,
+          accent: getColumnAccent(columnId, fetchedColumns),
+          initials: buildInitials(assignee?.name, assignee?.email),
+          assigneeId: row.assigned_to,
+          assigneeName: assignee?.name ?? null,
+          assigneeEmail: assignee?.email ?? null,
+          assigneeRole: assignee?.job_role ?? null,
+          avatarUrl: assignee?.avatar_url ?? null,
+          start_date: row.start_date,
+          end_date: row.end_date,
+          draft_review_started_at: row.draft_review_started_at,
+          draft_review_due_at: row.draft_review_due_at,
+          completed_at: row.completed_at,
+          statusLabel: getColumnStatusLabel(columnId, fetchedColumns),
+          canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
+          updatesCount: updatesMap[row.id] ?? 0,
+          assignees,
+        });
+      });
+
+      setColumns(groupedColumns);
+      setErrorMessage(null);
+    } catch (error) {
+      console.error("Failed to load board", error);
+      setColumns({});
+      setErrorMessage("Failed to load board tasks.");
+    } finally {
+      setLoading(false);
+    }
+  }, [canMoveTask, projectId, supabase]);
+
+  useEffect(() => {
+    void loadBoard();
 
     const handleAiTaskCreated = (event: Event) => {
       const detail = (event as CustomEvent<{ projectId?: string }>).detail;
@@ -1723,13 +1790,11 @@ export default function ProjectBoardPage({
     };
 
     window.addEventListener("ai-task-created", handleAiTaskCreated);
-    void loadBoard();
 
     return () => {
-      isMounted = false;
       window.removeEventListener("ai-task-created", handleAiTaskCreated);
     };
-  }, [canMoveTask, projectId, supabase]);
+  }, [loadBoard, projectId]);
 
   useEffect(() => {
     void loadTaskUpdateCounts();
@@ -1769,7 +1834,7 @@ export default function ProjectBoardPage({
 
   const updateTaskStatus = useCallback(
     async (taskId: string, destination: ColumnId, source: ColumnId): Promise<StatusUpdateOutcome> => {
-      const sourceTask = columns[source].find((task) => task.id === taskId);
+      const sourceTask = columns[source]?.find((task) => task.id === taskId);
       const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees, sourceTask?.start_date);
 
       if (!canMove) {
@@ -1777,7 +1842,8 @@ export default function ProjectBoardPage({
         return { success: false, error: "You do not have permission to update this task status." };
       }
 
-      const nextStatus = COLUMN_TO_STATUS[destination];
+      const destCol = projectColumns.find((c) => c.id === destination);
+      const nextStatus = destCol?.status_key || COLUMN_TO_STATUS[destination] || "in_progress";
 
       try {
         const { data: sessionData } = await supabase.auth.getSession();
@@ -1792,7 +1858,7 @@ export default function ProjectBoardPage({
             "Content-Type": "application/json",
             Authorization: `Bearer ${accessToken}`,
           },
-          body: JSON.stringify({ status: nextStatus }),
+          body: JSON.stringify({ status: nextStatus, columnId: destination }),
         });
         const result = (await response.json()) as StatusUpdateResult;
 
@@ -1812,7 +1878,7 @@ export default function ProjectBoardPage({
         };
       }
     },
-    [supabase, columns, canMoveTask],
+    [supabase, columns, canMoveTask, projectColumns],
   );
 
   const onColumnDrop = useCallback(
@@ -1844,12 +1910,18 @@ export default function ProjectBoardPage({
         return;
       }
 
-      const originalIndex = columns[from].findIndex((task) => task.id === taskId);
+      const destCol = projectColumns.find((c) => c.id === destination);
+      const nextStatus = destCol?.status_key || COLUMN_TO_STATUS[destination] || "in_progress";
+      const nextLabel = destCol?.title || STATUS_LABEL[destination] || "IN PROGRESS";
+      const nextAccent = getColumnAccent(destination, projectColumns);
+
+      const originalIndex = columns[from]?.findIndex((task) => task.id === taskId) ?? -1;
       const optimisticTask: Task = {
         ...sourceTask,
-        status: COLUMN_TO_STATUS[destination],
-        statusLabel: STATUS_LABEL[destination],
-        accent: COLUMN_ACCENT[destination],
+        column_id: destination,
+        status: nextStatus,
+        statusLabel: nextLabel,
+        accent: nextAccent,
       };
 
       setPendingStatusTaskIds((current) => {
@@ -1875,11 +1947,11 @@ export default function ProjectBoardPage({
           if (!result.success) {
             // Roll back only this task so other concurrent task moves are preserved.
             setColumns((current) => {
-              const withoutTask = createEmptyColumns();
-              BOARD_COLUMNS.forEach((column) => {
-                withoutTask[column.id] = current[column.id].filter((task) => task.id !== taskId);
+              const withoutTask = { ...current };
+              Object.keys(withoutTask).forEach((columnId) => {
+                withoutTask[columnId] = (withoutTask[columnId] ?? []).filter((task) => task.id !== taskId);
               });
-              const sourceTasks = withoutTask[from];
+              const sourceTasks = withoutTask[from] ?? [];
               const rollbackIndex = Math.max(0, Math.min(originalIndex, sourceTasks.length));
 
               return {
@@ -1937,7 +2009,7 @@ export default function ProjectBoardPage({
       setActiveDrag(null);
       setDragOverColumn(null);
     },
-    [activeDrag, canMoveTask, columns, pendingStatusTaskIds, updateTaskStatus],
+    [activeDrag, canMoveTask, columns, pendingStatusTaskIds, projectColumns, updateTaskStatus],
   );
 
   const onRemoveTask = useCallback((taskId: string, column: ColumnId) => {
@@ -2171,8 +2243,8 @@ export default function ProjectBoardPage({
       }
       setColumns((prev) => {
         const updated = { ...prev };
-        BOARD_COLUMNS.forEach((col) => {
-          updated[col.id] = updated[col.id].map((task) => task.id === editingTask.id
+        Object.keys(updated).forEach((colId) => {
+          updated[colId] = updated[colId].map((task) => task.id === editingTask.id
             ? { ...task, title: editingTask.title.trim(), description: editingTask.description }
             : task);
         });
@@ -2226,8 +2298,8 @@ export default function ProjectBoardPage({
         const primaryAssignee = assignees.find((assignee) => assignee.id === primaryAssigneeId) ?? null;
         setColumns((current) => {
           const next = { ...current };
-          BOARD_COLUMNS.forEach((column) => {
-            next[column.id] = next[column.id].map((task) => task.id === editingTask.id
+          Object.keys(next).forEach((columnId) => {
+            next[columnId] = next[columnId].map((task) => task.id === editingTask.id
               ? {
                   ...task,
                   assigneeId: primaryAssigneeId,
@@ -2321,321 +2393,16 @@ export default function ProjectBoardPage({
         });
       }
 
-      const { data: taskRows, error: taskError } = await supabase
-        .from("tasks")
-        .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: false, nullsFirst: false });
-
-      if (taskError) {
-        console.error("Failed to refresh tasks", taskError);
-        return;
-      }
-
-      let updatesMap: Record<string, number> = {};
-      try {
-        const { data: updatesData, error: updatesError } = await supabase
-          .from("task_updates")
-          .select("task_id")
-          .eq("project_id", projectId);
-
-        if (!updatesError) {
-          updatesMap = (((updatesData as Array<{ task_id: string | null }> | null | undefined) ?? []).filter(
-            (row): row is { task_id: string } => Boolean(row.task_id),
-          )).reduce<Record<string, number>>((acc, row) => {
-            acc[row.task_id] = (acc[row.task_id] ?? 0) + 1;
-            return acc;
-          }, {});
-
-          setTaskUpdateCounts(updatesMap);
-        }
-      } catch {
-        updatesMap = {};
-      }
-
-      const assignedIds = Array.from(
-        new Set(
-          ((taskRows as DbTask[] | null | undefined) ?? [])
-            .map((task) => task.assigned_to)
-            .filter((id): id is string => Boolean(id)),
-        ),
-      );
-
-      let usersById: Record<string, DbUser> = {};
-
-      if (assignedIds.length > 0) {
-        const { data: userRows, error: userError } = await supabase
-          .from("users")
-          .select("id, name, email, job_role, system_role, avatar_url")
-          .in("id", assignedIds);
-
-        if (userError) {
-          console.error("Failed to refresh users", userError);
-          return;
-        }
-
-        usersById = ((userRows as DbUser[] | null | undefined) ?? []).reduce<Record<string, DbUser>>((acc, user) => {
-          acc[user.id] = user;
-          return acc;
-        }, {});
-      }
-
-      const groupedColumns = createEmptyColumns();
-
-      // Fetch multi-assignees for all tasks
-      const claimTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
-      let claimAssigneesMap: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
-      if (claimTaskIds.length > 0) {
-        try {
-          const { data: assigneesData } = await supabase
-            .from("task_assignees")
-            .select("task_id, user:users(id, name, email, avatar_url)")
-            .in("task_id", claimTaskIds);
-
-          if (assigneesData) {
-            (assigneesData as any[]).forEach((row: any) => {
-              if (!row.task_id || !row.user) return;
-              if (!claimAssigneesMap[row.task_id]) claimAssigneesMap[row.task_id] = [];
-              claimAssigneesMap[row.task_id].push(row.user);
-            });
-          }
-        } catch {
-          // task_assignees table may not exist yet — fail silently
-        }
-      }
-
-      ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
-        const columnId = resolveColumn(row.status);
-        const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
-
-        // Build multi-assignee list: primary + additional (deduplicated)
-        const multiUsers = claimAssigneesMap[row.id] ?? [];
-        const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
-        const assignees = [
-          ...(primaryUser ? [primaryUser] : []),
-          ...multiUsers.filter(u => u.id !== primaryUser?.id),
-        ];
-
-        groupedColumns[columnId] = [
-          ...groupedColumns[columnId],
-          {
-            id: row.id,
-            title: row.title?.trim() || "Untitled task",
-            description: row.description,
-            accent: COLUMN_ACCENT[columnId],
-            initials: buildInitials(assignee?.name, assignee?.email),
-            assigneeId: row.assigned_to,
-            assigneeName: assignee?.name ?? null,
-            assigneeEmail: assignee?.email ?? null,
-            assigneeRole: assignee?.job_role ?? null,
-            avatarUrl: assignee?.avatar_url ?? null,
-            start_date: row.start_date,
-            end_date: row.end_date,
-            draft_review_started_at: row.draft_review_started_at,
-            draft_review_due_at: row.draft_review_due_at,
-            statusLabel: STATUS_LABEL[columnId],
-            canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
-            updatesCount: updatesMap[row.id] ?? 0,
-            assignees,
-          },
-        ];
-      });
-
-      setColumns(groupedColumns);
+      await loadBoard();
     },
-    [profile?.id, supabase, projectId, canMoveTask, columns, insertTaskLog, findTaskFromColumns],
+    [profile?.id, supabase, projectId, insertTaskLog, loadBoard],
   );
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const loadBoard = async () => {
-      if (!projectId) {
-        if (isMounted) {
-          setColumns(createEmptyColumns());
-          setErrorMessage("Missing project identifier");
-          setLoading(false);
-        }
-        return;
-      }
-
-      if (isMounted) {
-        setLoading(true);
-        setErrorMessage(null);
-      }
-
-      try {
-        const { data: taskRows, error: taskError } = await supabase
-          .from("tasks")
-          .select("id, title, description, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at")
-          .eq("project_id", projectId)
-          .order("created_at", { ascending: false, nullsFirst: false });
-
-        if (taskError) {
-          throw taskError;
-        }
-
-        let updatesMap: Record<string, number> = {};
-        try {
-          const { data: updatesData, error: updatesError } = await supabase
-            .from("task_updates")
-            .select("task_id")
-            .eq("project_id", projectId);
-
-          if (!updatesError) {
-            updatesMap = (((updatesData as Array<{ task_id: string | null }> | null | undefined) ?? []).filter(
-              (row): row is { task_id: string } => Boolean(row.task_id),
-            )).reduce<Record<string, number>>((acc, row) => {
-              acc[row.task_id] = (acc[row.task_id] ?? 0) + 1;
-              return acc;
-            }, {});
-
-            if (isMounted) {
-              setTaskUpdateCounts(updatesMap);
-            }
-          }
-        } catch {
-          updatesMap = {};
-        }
-
-        try {
-          const { data: updatesData, error: updatesError } = await supabase
-            .from("task_updates")
-            .select("task_id")
-            .eq("project_id", projectId);
-
-          if (!updatesError) {
-            const updatesMap = (((updatesData as Array<{ task_id: string | null }> | null | undefined) ?? []).filter(
-              (row): row is { task_id: string } => Boolean(row.task_id),
-            )).reduce<Record<string, number>>((acc, row) => {
-              acc[row.task_id] = (acc[row.task_id] ?? 0) + 1;
-              return acc;
-            }, {});
-
-            if (isMounted) {
-              setTaskUpdateCounts(updatesMap);
-            }
-          }
-        } catch {
-          // Silent fallback: counts are optional and should not block board rendering.
-        }
-
-        const assignedIds = Array.from(
-          new Set(
-            ((taskRows as DbTask[] | null | undefined) ?? [])
-              .map((task) => task.assigned_to)
-              .filter((id): id is string => Boolean(id)),
-          ),
-        );
-
-        let usersById: Record<string, DbUser> = {};
-
-        if (assignedIds.length > 0) {
-          const { data: userRows, error: userError } = await supabase
-            .from("users")
-            .select("id, name, email, job_role, system_role, avatar_url")
-            .in("id", assignedIds);
-
-          if (userError) {
-            throw userError;
-          }
-
-          usersById = ((userRows as DbUser[] | null | undefined) ?? []).reduce<Record<string, DbUser>>((acc, user) => {
-            acc[user.id] = user;
-            return acc;
-          }, {});
-        }
-
-        const groupedColumns = createEmptyColumns();
-
-        // Fetch multi-assignees for all tasks
-        const allTaskIds2 = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
-        let assigneesMap2: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
-        if (allTaskIds2.length > 0) {
-          try {
-            const { data: assigneesData } = await supabase
-              .from("task_assignees")
-              .select("task_id, user:users(id, name, email, avatar_url)")
-              .in("task_id", allTaskIds2);
-
-            if (assigneesData) {
-              (assigneesData as any[]).forEach((row: any) => {
-                if (!row.task_id || !row.user) return;
-                if (!assigneesMap2[row.task_id]) assigneesMap2[row.task_id] = [];
-                assigneesMap2[row.task_id].push(row.user);
-              });
-            }
-          } catch {
-            // task_assignees table may not exist yet — fail silently
-          }
-        }
-
-        ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
-          const columnId = resolveColumn(row.status);
-          const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
-
-          // Build multi-assignee list: primary + additional (deduplicated)
-          const multiUsers = assigneesMap2[row.id] ?? [];
-          const primaryUser = assignee ? { id: assignee.id, name: assignee.name ?? null, email: assignee.email ?? null, avatar_url: assignee.avatar_url ?? null } : null;
-          const assignees = [
-            ...(primaryUser ? [primaryUser] : []),
-            ...multiUsers.filter(u => u.id !== primaryUser?.id),
-          ];
-
-          groupedColumns[columnId] = [
-            ...groupedColumns[columnId],
-            {
-              id: row.id,
-              title: row.title?.trim() || "Untitled task",
-              description: row.description,
-              accent: COLUMN_ACCENT[columnId],
-              initials: buildInitials(assignee?.name, assignee?.email),
-              assigneeId: row.assigned_to,
-              assigneeName: assignee?.name ?? null,
-              assigneeEmail: assignee?.email ?? null,
-              assigneeRole: assignee?.job_role ?? null,
-              avatarUrl: assignee?.avatar_url ?? null,
-              start_date: row.start_date,
-              end_date: row.end_date,
-              draft_review_started_at: row.draft_review_started_at,
-              draft_review_due_at: row.draft_review_due_at,
-              statusLabel: STATUS_LABEL[columnId],
-              canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
-              updatesCount: updatesMap[row.id] ?? 0,
-              assignees,
-            },
-          ];
-        });
-
-        if (isMounted) {
-          setColumns(groupedColumns);
-          setErrorMessage(null);
-        }
-      } catch (error) {
-        console.error("Failed to load board", error);
-        if (isMounted) {
-          setColumns(createEmptyColumns());
-          setErrorMessage("Failed to load board tasks.");
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    };
-
-    void loadBoard();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [canMoveTask, projectId, supabase]);
 
   // Deep linking for task ID
   useEffect(() => {
     if (!loading && deepLinkTaskId && !hasOpenedDeepLinkRef.current) {
       let foundColumn: ColumnId | null = null;
-      for (const col of BOARD_COLUMNS) {
+      for (const col of projectColumns) {
         if (columns[col.id]?.some(t => t.id === deepLinkTaskId)) {
           foundColumn = col.id;
           break;
@@ -2658,6 +2425,249 @@ export default function ProjectBoardPage({
       }
     }
   }, [loading, deepLinkTaskId, columns, handleOpenTaskDetails]);
+
+// Column management handlers
+  const handleColumnDragStart = (columnId: string, event: React.DragEvent<HTMLDivElement>) => {
+    if (!canManageProjectColumns) {
+      event.preventDefault();
+      return;
+    }
+    const colIndex = projectColumns.findIndex((c) => c.id === columnId);
+    const col = projectColumns[colIndex];
+    if (colIndex === 0 || col?.is_locked || col?.id === "todo" || col?.stage_type === "todo") {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.setData("text/plain", columnId);
+    event.dataTransfer.effectAllowed = "move";
+    setActiveColumnDrag(columnId);
+  };
+
+  const handleColumnDragOver = (columnId: string, event: React.DragEvent<HTMLDivElement>) => {
+    if (!activeColumnDrag || activeColumnDrag === columnId) return;
+    const targetIndex = projectColumns.findIndex((c) => c.id === columnId);
+    if (targetIndex === 0) return;
+    const targetCol = projectColumns[targetIndex];
+    if (targetCol?.is_locked || targetCol?.id === "todo") return;
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (columnDragOverId !== columnId) {
+      setColumnDragOverId(columnId);
+    }
+  };
+
+  const handleColumnDragEnd = () => {
+    setActiveColumnDrag(null);
+    setColumnDragOverId(null);
+  };
+
+  const handleColumnDrop = async (targetColumnId: string, event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (!activeColumnDrag || activeColumnDrag === targetColumnId) {
+      setActiveColumnDrag(null);
+      setColumnDragOverId(null);
+      return;
+    }
+
+    const sourceColId = activeColumnDrag;
+    setActiveColumnDrag(null);
+    setColumnDragOverId(null);
+
+    const fromIndex = projectColumns.findIndex((c) => c.id === sourceColId);
+    const toIndex = projectColumns.findIndex((c) => c.id === targetColumnId);
+
+    if (fromIndex === -1 || toIndex === -1) return;
+    if (fromIndex === 0 || toIndex === 0) return;
+
+    const reordered = [...projectColumns];
+    const [movedCol] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, movedCol);
+
+    if (reordered[0].id !== "todo" && reordered[0].stage_type !== "todo") {
+      return;
+    }
+
+    const updatedWithOrder = reordered.map((col, idx) => ({ ...col, sort_order: idx }));
+    setProjectColumns(updatedWithOrder);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) return;
+
+      const response = await fetch(`/api/projects/${projectId}/columns/reorder`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ columnIds: updatedWithOrder.map((c) => c.id) }),
+      });
+
+      if (!response.ok) {
+        console.error("Failed to persist column reorder");
+        void loadBoard();
+      }
+    } catch (err) {
+      console.error("Failed to reorder columns", err);
+      void loadBoard();
+    }
+  };
+
+  const handleAddColumnSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const title = addColumnTitle.trim();
+    if (!title) {
+      setAddColumnError("Column title is required.");
+      return;
+    }
+    if (title.length > 50) {
+      setAddColumnError("Column title cannot exceed 50 characters.");
+      return;
+    }
+
+    setIsAddingColumn(true);
+    setAddColumnError(null);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Please sign in again.");
+
+      const response = await fetch(`/api/projects/${projectId}/columns`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ title, stageType: "in_progress" }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error ?? "Failed to create column.");
+      }
+
+      const newCol: BoardColumnDefinition = result.column;
+      setProjectColumns((current) => [...current, newCol]);
+      setColumns((current) => ({ ...current, [newCol.id]: [] }));
+      setShowAddColumnModal(false);
+      setAddColumnTitle("");
+    } catch (err) {
+      setAddColumnError(err instanceof Error ? err.message : "Failed to create column.");
+    } finally {
+      setIsAddingColumn(false);
+    }
+  };
+
+  const handleRenameColumnSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!renamingColumn) return;
+    const title = renameTitle.trim();
+    if (!title) {
+      setRenameError("Column title is required.");
+      return;
+    }
+    if (title.length > 50) {
+      setRenameError("Column title cannot exceed 50 characters.");
+      return;
+    }
+
+    setIsRenamingColumn(true);
+    setRenameError(null);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Please sign in again.");
+
+      const response = await fetch(`/api/projects/${projectId}/columns/${renamingColumn.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ title }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error ?? "Failed to rename column.");
+      }
+
+      setProjectColumns((current) =>
+        current.map((col) => (col.id === renamingColumn.id ? { ...col, title } : col)),
+      );
+      setRenamingColumn(null);
+      setRenameTitle("");
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : "Failed to rename column.");
+    } finally {
+      setIsRenamingColumn(false);
+    }
+  };
+
+  const handleDeleteColumnSubmit = async () => {
+    if (!deletingColumn) return;
+    const colId = deletingColumn.column.id;
+
+    if (deletingColumn.taskCount > 0 && !moveTasksTargetId) {
+      setDeleteError("Please select a destination column to move tasks to.");
+      return;
+    }
+
+    setIsDeletingColumn(true);
+    setDeleteError(null);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Please sign in again.");
+
+      const response = await fetch(`/api/projects/${projectId}/columns/${colId}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          moveTasksToColumnId: deletingColumn.taskCount > 0 ? moveTasksTargetId : undefined,
+        }),
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error ?? "Failed to delete column.");
+      }
+
+      // Optimistically update columns and projectColumns
+      setColumns((current) => {
+        const next = { ...current };
+        const movingTasks = next[colId] ?? [];
+        delete next[colId];
+        if (movingTasks.length > 0 && moveTasksTargetId && next[moveTasksTargetId]) {
+          const targetColDef = projectColumns.find((c) => c.id === moveTasksTargetId);
+          const targetStatus = targetColDef?.status_key || "in_progress";
+          const targetAccent = getColumnAccent(moveTasksTargetId, projectColumns);
+          const targetLabel = getColumnStatusLabel(moveTasksTargetId, projectColumns);
+          const reassigned = movingTasks.map((t) => ({
+            ...t,
+            column_id: moveTasksTargetId,
+            status: targetStatus,
+            accent: targetAccent,
+            statusLabel: targetLabel,
+          }));
+          next[moveTasksTargetId] = [...next[moveTasksTargetId], ...reassigned];
+        }
+        return next;
+      });
+
+      setProjectColumns((current) => current.filter((col) => col.id !== colId));
+      setDeletingColumn(null);
+      setMoveTasksTargetId("");
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete column.");
+    } finally {
+      setIsDeletingColumn(false);
+    }
+  };
 
   if (!projectId) {
     return <div className="p-6 text-sm text-red-600">Missing project identifier</div>;
@@ -2908,11 +2918,11 @@ export default function ProjectBoardPage({
       {/* KANBAN BOARD */}
       <div className="overflow-x-auto">
         <div className="flex min-h-[500px] gap-6">
-          {BOARD_COLUMNS.map((column) => {
+          {projectColumns.map((column, colIndex) => {
             const now = boardNow;
 
             // 1) Apply search filter
-            let filtered = columns[column.id].filter((t) => {
+            let filtered = (columns[column.id] ?? []).filter((t) => {
               if (!boardSearch.trim()) return true;
               const q = boardSearch.trim().toLowerCase();
               const titleMatch = t.title?.toLowerCase().includes(q);
@@ -3020,12 +3030,13 @@ export default function ProjectBoardPage({
                   setCreateTaskError(null);
                   setShowCreateTaskModal(true);
                 }}
-                onExportTasks={(columnId) =>
-                  handleExportTasks({
-                    statusFilter: COLUMN_TO_STATUS[columnId],
-                    statusLabel: COLUMN_EXPORT_LABEL[columnId],
-                  })
-                }
+                onExportTasks={(columnId) => {
+                  const colDef = projectColumns.find((c) => c.id === columnId);
+                  return handleExportTasks({
+                    statusFilter: (colDef?.status_key || COLUMN_TO_STATUS[columnId]) as any,
+                    statusLabel: colDef?.title || COLUMN_EXPORT_LABEL[columnId] || "Tasks",
+                  });
+                }}
                 onClaimTask={claimTask}
                 onMarkReviewed={handleMarkTaskReviewed}
                 onExtendWorkday={(taskId) => {
@@ -3041,9 +3052,52 @@ export default function ProjectBoardPage({
                 taskSummaryById={manHours.taskSummaryById}
                 projectTimeZone={projectTimeZone}
                 normalWorkdayEnd={projectWorkdayEnd}
+                isLocked={Boolean(column.is_locked || colIndex === 0 || column.id === "todo")}
+                stageType={column.stage_type}
+                statusKey={column.status_key}
+                canManageColumns={canManageProjectColumns}
+                onRenameColumn={(colId, currentTitle) => {
+                  const colDef = projectColumns.find((c) => c.id === colId);
+                  if (colDef) {
+                    setRenamingColumn(colDef);
+                    setRenameTitle(currentTitle);
+                    setRenameError(null);
+                  }
+                }}
+                onDeleteColumn={(colId, currentTitle, taskCount) => {
+                  const colDef = projectColumns.find((c) => c.id === colId);
+                  if (colDef) {
+                    setDeletingColumn({ column: colDef, taskCount });
+                    const defaultTarget = projectColumns.find((c) => c.id !== colId)?.id ?? "";
+                    setMoveTasksTargetId(defaultTarget);
+                    setDeleteError(null);
+                  }
+                }}
+                onColumnHeaderDragStart={(colId, e) => handleColumnDragStart(colId, e)}
+                onColumnHeaderDragOver={(colId, e) => handleColumnDragOver(colId, e)}
+                onColumnHeaderDrop={(colId, e) => handleColumnDrop(colId, e)}
+                onColumnHeaderDragEnd={handleColumnDragEnd}
+                isColumnDragging={activeColumnDrag === column.id}
+                isColumnDragOver={columnDragOverId === column.id}
               />
             );
           })}
+          {canManageProjectColumns && (
+            <div className="flex w-[320px] flex-shrink-0 flex-col items-center justify-start pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setAddColumnTitle("");
+                  setAddColumnError(null);
+                  setShowAddColumnModal(true);
+                }}
+                className="group flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/50 p-4 text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-100/70 hover:text-slate-700"
+              >
+                <Plus size={18} className="text-slate-400 transition group-hover:text-slate-600" />
+                <span>Add Column</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -3900,6 +3954,211 @@ export default function ProjectBoardPage({
             </div>
           </div>
         )}
+      </Modal>
+      {/* ADD COLUMN MODAL */}
+      <Modal
+        isOpen={showAddColumnModal}
+        onClose={() => {
+          if (!isAddingColumn) {
+            setShowAddColumnModal(false);
+            setAddColumnTitle("");
+            setAddColumnError(null);
+          }
+        }}
+        title="Add Board Column"
+      >
+        <form onSubmit={(e) => void handleAddColumnSubmit(e)} className="space-y-4">
+          <div>
+            <label htmlFor="add-column-title" className="block text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              Column Title
+            </label>
+            <input
+              id="add-column-title"
+              type="text"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+              placeholder="e.g., QA Testing, Blocked..."
+              value={addColumnTitle}
+              onChange={(e) => {
+                setAddColumnTitle(e.target.value);
+                if (addColumnError) setAddColumnError(null);
+              }}
+              disabled={isAddingColumn}
+              maxLength={50}
+              autoFocus
+            />
+            <p className="mt-1 text-[11px] text-slate-400">Custom columns are placed at the end of the board and can be reordered.</p>
+          </div>
+
+          {addColumnError && (
+            <div className="rounded-lg bg-red-50 p-3 text-xs font-medium text-red-700">
+              {addColumnError}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setShowAddColumnModal(false);
+                setAddColumnTitle("");
+                setAddColumnError(null);
+              }}
+              disabled={isAddingColumn}
+              className="rounded-lg px-4 py-2 text-sm font-semibold"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={isAddingColumn || !addColumnTitle.trim()}
+              className="rounded-lg px-4 py-2 text-sm font-semibold"
+            >
+              {isAddingColumn ? "Adding..." : "Add Column"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* RENAME COLUMN MODAL */}
+      <Modal
+        isOpen={renamingColumn !== null}
+        onClose={() => {
+          if (!isRenamingColumn) {
+            setRenamingColumn(null);
+            setRenameTitle("");
+            setRenameError(null);
+          }
+        }}
+        title="Rename Column"
+      >
+        <form onSubmit={(e) => void handleRenameColumnSubmit(e)} className="space-y-4">
+          <div>
+            <label htmlFor="rename-column-title" className="block text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+              New Title
+            </label>
+            <input
+              id="rename-column-title"
+              type="text"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+              value={renameTitle}
+              onChange={(e) => {
+                setRenameTitle(e.target.value);
+                if (renameError) setRenameError(null);
+              }}
+              disabled={isRenamingColumn}
+              maxLength={50}
+              autoFocus
+            />
+          </div>
+
+          {renameError && (
+            <div className="rounded-lg bg-red-50 p-3 text-xs font-medium text-red-700">
+              {renameError}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setRenamingColumn(null);
+                setRenameTitle("");
+                setRenameError(null);
+              }}
+              disabled={isRenamingColumn}
+              className="rounded-lg px-4 py-2 text-sm font-semibold"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={isRenamingColumn || !renameTitle.trim()}
+              className="rounded-lg px-4 py-2 text-sm font-semibold"
+            >
+              {isRenamingColumn ? "Saving..." : "Save"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* DELETE COLUMN MODAL */}
+      <Modal
+        isOpen={deletingColumn !== null}
+        onClose={() => {
+          if (!isDeletingColumn) {
+            setDeletingColumn(null);
+            setMoveTasksTargetId("");
+            setDeleteError(null);
+          }
+        }}
+        title="Delete Column"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Are you sure you want to delete the column{" "}
+            <span className="font-semibold text-slate-900">{deletingColumn?.column.title}</span>?
+          </p>
+
+          {deletingColumn && deletingColumn.taskCount > 0 && (
+            <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-xs font-semibold text-amber-800">
+                This column contains {deletingColumn.taskCount} task{deletingColumn.taskCount === 1 ? "" : "s"}.
+              </p>
+              <p className="text-xs text-amber-700">
+                Choose a destination column to move these tasks to before deleting:
+              </p>
+              <select
+                className="mt-2 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
+                value={moveTasksTargetId}
+                onChange={(e) => {
+                  setMoveTasksTargetId(e.target.value);
+                  if (deleteError) setDeleteError(null);
+                }}
+                disabled={isDeletingColumn}
+              >
+                {projectColumns
+                  .filter((c) => c.id !== deletingColumn.column.id)
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.title}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          )}
+
+          {deleteError && (
+            <div className="rounded-lg bg-red-50 p-3 text-xs font-medium text-red-700">
+              {deleteError}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setDeletingColumn(null);
+                setMoveTasksTargetId("");
+                setDeleteError(null);
+              }}
+              disabled={isDeletingColumn}
+              className="rounded-lg px-4 py-2 text-sm font-semibold"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleDeleteColumnSubmit()}
+              disabled={isDeletingColumn || (Boolean(deletingColumn && deletingColumn.taskCount > 0) && !moveTasksTargetId)}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
+            >
+              {isDeletingColumn ? "Deleting..." : "Delete Column"}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

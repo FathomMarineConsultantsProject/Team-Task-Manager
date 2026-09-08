@@ -1,4 +1,4 @@
-import { FileDown, MoreHorizontal, Plus } from "lucide-react";
+import { FileDown, GripVertical, Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
 import TaskCard from "./TaskCard";
@@ -31,6 +31,19 @@ interface BoardColumnProps {
   taskSummaryById?: Map<string, LiveTaskManHoursSummary>;
   projectTimeZone?: string;
   normalWorkdayEnd?: string;
+  // Dynamic column management props
+  isLocked?: boolean;
+  stageType?: string;
+  statusKey?: string;
+  canManageColumns?: boolean;
+  onRenameColumn?: (columnId: ColumnId, currentTitle: string) => void;
+  onDeleteColumn?: (columnId: ColumnId, currentTitle: string, taskCount: number) => void;
+  onColumnHeaderDragStart?: (columnId: ColumnId, event: DragEvent<HTMLDivElement>) => void;
+  onColumnHeaderDragOver?: (columnId: ColumnId, event: DragEvent<HTMLDivElement>) => void;
+  onColumnHeaderDrop?: (columnId: ColumnId, event: DragEvent<HTMLDivElement>) => void;
+  onColumnHeaderDragEnd?: () => void;
+  isColumnDragOver?: boolean;
+  isColumnDragging?: boolean;
 }
 
 const DEFAULT_VISIBLE_TASKS = 7;
@@ -61,6 +74,18 @@ export default function BoardColumn({
   taskSummaryById,
   projectTimeZone,
   normalWorkdayEnd,
+  isLocked = false,
+  stageType,
+  statusKey,
+  canManageColumns = false,
+  onRenameColumn,
+  onDeleteColumn,
+  onColumnHeaderDragStart,
+  onColumnHeaderDragOver,
+  onColumnHeaderDrop,
+  onColumnHeaderDragEnd,
+  isColumnDragOver = false,
+  isColumnDragging = false,
 }: BoardColumnProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [showAllTasks, setShowAllTasks] = useState(false);
@@ -71,26 +96,51 @@ export default function BoardColumn({
     setShowAllTasks(false);
   }, [resetKey]);
 
-  const columnAccent: Record<ColumnId, { ring: string; text: string; bg: string }> = {
-    todo: { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" },
-    inProgress: { ring: "border-blue-200", text: "text-blue-700", bg: "bg-blue-50/70" },
-    draftReview: { ring: "border-cyan-200", text: "text-cyan-700", bg: "bg-cyan-50/70" },
-    review: { ring: "border-amber-200", text: "text-amber-700", bg: "bg-amber-50/70" },
-    done: { ring: "border-emerald-200", text: "text-emerald-700", bg: "bg-emerald-50/70" },
+  const resolveAccent = () => {
+    const key = stageType || statusKey || columnId;
+    if (key === "todo") {
+      return { ring: "border-purple-200", text: "text-purple-700", bg: "bg-purple-50/70" };
+    }
+    if (key === "in_progress" || key === "inProgress") {
+      return { ring: "border-blue-200", text: "text-blue-700", bg: "bg-blue-50/70" };
+    }
+    if (key === "draft_review" || key === "draftReview") {
+      return { ring: "border-cyan-200", text: "text-cyan-700", bg: "bg-cyan-50/70" };
+    }
+    if (key === "in_review" || key === "review") {
+      return { ring: "border-amber-200", text: "text-amber-700", bg: "bg-amber-50/70" };
+    }
+    if (key === "done") {
+      return { ring: "border-emerald-200", text: "text-emerald-700", bg: "bg-emerald-50/70" };
+    }
+    return { ring: "border-indigo-200", text: "text-indigo-700", bg: "bg-indigo-50/70" };
   };
 
-  const columnRing = isDragOver
-    ? "border-2 border-dashed border-slate-400 bg-white shadow-md"
-    : `border border-slate-200 bg-gradient-to-b from-white to-slate-50 ${columnAccent[columnId].ring}`;
+  const accent = resolveAccent();
+
+  const columnRing = isColumnDragOver
+    ? "border-2 border-blue-500 bg-blue-50/40 shadow-lg ring-2 ring-blue-400/40"
+    : isDragOver
+      ? "border-2 border-dashed border-slate-400 bg-white shadow-md"
+      : `border border-slate-200 bg-gradient-to-b from-white to-slate-50 ${accent.ring}`;
+  
   const placeholderVisible = isDragOver || tasks.length === 0;
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (event.dataTransfer.types.includes("application/x-column-drag")) {
+      onColumnHeaderDragOver?.(columnId, event);
+      return;
+    }
     onColumnDragOver(columnId);
   };
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (event.dataTransfer.types.includes("application/x-column-drag")) {
+      onColumnHeaderDrop?.(columnId, event);
+      return;
+    }
     onColumnDrop(columnId);
     onColumnDragOver(null);
   };
@@ -140,14 +190,37 @@ export default function BoardColumn({
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onDragLeave={handleDragLeave}
-      className={`group flex w-[290px] shrink-0 flex-col rounded-2xl ${columnRing} p-4 shadow-[0_18px_35px_-30px_rgba(15,23,42,0.45)] transition`}
+      className={`group flex w-[290px] shrink-0 flex-col rounded-2xl ${columnRing} p-4 shadow-[0_18px_35px_-30px_rgba(15,23,42,0.45)] transition ${
+        isColumnDragging ? "opacity-40 scale-[0.98]" : ""
+      }`}
     >
       <div className="flex items-center justify-between rounded-xl px-2 py-2">
-        <div className={`text-xs font-semibold uppercase tracking-[0.35em] ${columnAccent[columnId].text}`}>
-          {title}
+        <div className="flex items-center gap-1.5 min-w-0 flex-1 mr-2">
+          {!isLocked && canManageColumns ? (
+            <div
+              draggable
+              onDragStart={(e) => {
+                e.stopPropagation();
+                e.dataTransfer.setData("application/x-column-drag", columnId);
+                e.dataTransfer.effectAllowed = "move";
+                onColumnHeaderDragStart?.(columnId, e);
+              }}
+              onDragEnd={onColumnHeaderDragEnd}
+              className="cursor-grab active:cursor-grabbing text-slate-400 hover:text-slate-600 -ml-1 p-0.5 rounded transition shrink-0"
+              title="Drag to reorder column"
+            >
+              <GripVertical size={16} />
+            </div>
+          ) : isLocked ? (
+            <Lock size={13} className="text-slate-400 shrink-0 mr-0.5" title="Locked column" />
+          ) : null}
+          <div className={`text-xs font-semibold uppercase tracking-[0.35em] truncate ${accent.text}`} title={title}>
+            {title}
+          </div>
         </div>
-        <div className="flex items-center gap-3 text-gray-400">
-          <span className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] ${columnAccent[columnId].ring} ${columnAccent[columnId].text} ${columnAccent[columnId].bg}`}>
+
+        <div className="flex items-center gap-2 text-gray-400 shrink-0">
+          <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${accent.ring} ${accent.text} ${accent.bg}`}>
             {tasks.length}
           </span>
           <div ref={menuRef} className="relative" onClick={handleMenuClick}>
@@ -181,11 +254,41 @@ export default function BoardColumn({
                   <FileDown size={14} />
                   Export Tasks
                 </button>
+                {!isLocked && canManageColumns ? (
+                  <>
+                    <div className="my-1 border-t border-slate-100" />
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsMenuOpen(false);
+                        onRenameColumn?.(columnId, title);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-slate-50 text-slate-700"
+                    >
+                      <Pencil size={14} />
+                      Rename Column
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsMenuOpen(false);
+                        onDeleteColumn?.(columnId, title, tasks.length);
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left transition hover:bg-red-50 text-red-600"
+                    >
+                      <Trash2 size={14} />
+                      Delete Column
+                    </button>
+                  </>
+                ) : null}
               </div>
             ) : null}
           </div>
         </div>
       </div>
+
       <div className="mt-4 flex flex-1 flex-col gap-3">
         {visibleTasks.map((task) => (
           <TaskCard

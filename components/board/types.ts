@@ -1,4 +1,16 @@
-export type ColumnId = "todo" | "inProgress" | "draftReview" | "review" | "done";
+export type ColumnId = string;
+
+export interface BoardColumnDefinition {
+  id: string;
+  project_id: string;
+  title: string;
+  sort_order: number;
+  stage_type: "todo" | "in_progress" | "draft_review" | "in_review" | "done" | "custom" | string;
+  status_key: "todo" | "in_progress" | "draft_review" | "in_review" | "done";
+  is_locked: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
 
 export type TaskDirection = "up" | "down" | "right";
 
@@ -12,6 +24,7 @@ export type TaskReviewProgress = {
 export type Task = {
   title: string;
   id: string;
+  column_id?: string | null;
   status?: string | null;
   progress?: number | null;
   completed_at?: string | null;
