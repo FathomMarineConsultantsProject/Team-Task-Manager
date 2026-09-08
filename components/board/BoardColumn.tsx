@@ -198,7 +198,9 @@ export default function BoardColumn({
               <GripVertical size={16} />
             </div>
           ) : isLocked ? (
-            <Lock size={13} className="text-slate-400 shrink-0 mr-0.5" title="Locked column" />
+            <span title="Locked column" aria-label="Locked column" className="inline-flex shrink-0">
+              <Lock size={13} className="mr-0.5 text-slate-400" aria-hidden="true" />
+            </span>
           ) : null}
           <div className={`ml-1 text-xs font-semibold uppercase tracking-[0.35em] truncate ${accent.text}`} title={title}>
             {title}
