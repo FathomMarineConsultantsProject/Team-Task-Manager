@@ -6,7 +6,7 @@ import Modal from "@/components/ui/modal";
 import ChatPanel from "@/components/ui/ChatPanel";
 import TaskAttachments from "@/components/tasks/TaskAttachments";
 import TaskDependencies from "@/components/tasks/TaskDependencies";
-import TaskLinks from "@/components/tasks/TaskLinks";
+import TaskLinks, { type TaskLink } from "@/components/tasks/TaskLinks";
 import TaskReviewApprovals from "@/components/tasks/TaskReviewApprovals";
 import LinkifiedText from "@/components/ui/LinkifiedText";
 import ModalPortal from "@/components/ModalPortal";
@@ -51,6 +51,12 @@ type TaskDetailsState = Required<Omit<TaskDetailsSeed, "assignees" | "assignee" 
   createdById: string | null;
   projectTimeZone: string;
   normalWorkdayEnd: string;
+  completedAt: string | null;
+  reviewedAt: string | null;
+  issuedAt: string | null;
+  reviewCompletedBy: string | null;
+  requiredBy: string | null;
+  documentReference: Pick<TaskLink, "url" | "label"> | null;
 };
 
 type TaskDetailsRow = {
@@ -59,6 +65,11 @@ type TaskDetailsRow = {
   title: string | null;
   start_date: string | null;
   end_date: string | null;
+  completed_at: string | null;
+  reviewed_at: string | null;
+  issued_at: string | null;
+  review_completed_by: string | null;
+  required_by: string | null;
   project_id: string | null;
   projects?: { owner_id: string | null; time_zone: string | null; normal_workday_end: string | null } | { owner_id: string | null; time_zone: string | null; normal_workday_end: string | null }[] | null;
 };
@@ -368,6 +379,12 @@ export function useTaskDetailsWorkflow({
       createdById: null, // Will be loaded from DB
       projectTimeZone: seed.projectTimeZone ?? DEFAULT_PROJECT_TIME_ZONE,
       normalWorkdayEnd: seed.normalWorkdayEnd ?? DEFAULT_PROJECT_WORKDAY_END,
+      completedAt: null,
+      reviewedAt: null,
+      issuedAt: null,
+      reviewCompletedBy: null,
+      requiredBy: null,
+      documentReference: null,
     });
     setIsReviewApprovalsOpen(false);
     setReviewApprovalCounts(null);
@@ -393,7 +410,7 @@ export function useTaskDetailsWorkflow({
 
       const { data: taskData, error: taskError } = await supabase
         .from("tasks")
-        .select("created_by, description, title, start_date, end_date, project_id, projects(owner_id, time_zone, normal_workday_end)")
+        .select("created_by, description, title, start_date, end_date, completed_at, reviewed_at, issued_at, review_completed_by, required_by, project_id, projects(owner_id, time_zone, normal_workday_end)")
         .eq("id", taskId)
         .single();
 
@@ -439,6 +456,11 @@ export function useTaskDetailsWorkflow({
           projectTimeZone: projectRelation?.time_zone ?? prev.projectTimeZone,
           normalWorkdayEnd: projectRelation?.normal_workday_end ?? prev.normalWorkdayEnd,
           createdById: taskDetails?.created_by ?? prev.createdById,
+          completedAt: taskDetails?.completed_at ?? null,
+          reviewedAt: taskDetails?.reviewed_at ?? null,
+          issuedAt: taskDetails?.issued_at ?? null,
+          reviewCompletedBy: taskDetails?.review_completed_by ?? null,
+          requiredBy: taskDetails?.required_by ?? null,
         };
       });
 
@@ -880,6 +902,33 @@ export function useTaskDetailsWorkflow({
                   <p className="mt-1 text-slate-900">{selectedTaskDetails.projectName}</p>
                 </div>
               </div>
+              <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Document Tracking</p>
+                <div className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3 text-sm">
+                  {[
+                    ["Start Date", formatOptionalDate(selectedTaskDetails.startDate) ?? "—"],
+                    ["Expected Date", formatOptionalDate(selectedTaskDetails.endDate) ?? "—"],
+                    ["Completed Date", formatOptionalDate(selectedTaskDetails.completedAt) ?? "—"],
+                    ["Reviewed Date", formatOptionalDate(selectedTaskDetails.reviewedAt) ?? "—"],
+                    ["Issued Date", formatOptionalDate(selectedTaskDetails.issuedAt) ?? "—"],
+                    ["Required By", selectedTaskDetails.requiredBy ?? "—"],
+                    ["Review Completed By", selectedTaskDetails.reviewCompletedBy ?? "—"],
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <p className="text-xs text-slate-500">{label}</p>
+                      <p className="mt-0.5 font-medium text-slate-800">{value}</p>
+                    </div>
+                  ))}
+                  <div className="col-span-2">
+                    <p className="text-xs text-slate-500">Document / Reference</p>
+                    {selectedTaskDetails.documentReference ? (
+                      <a href={selectedTaskDetails.documentReference.url} target="_blank" rel="noreferrer" className="mt-0.5 inline-block font-medium text-blue-700 hover:underline">
+                        {selectedTaskDetails.documentReference.label?.trim() || selectedTaskDetails.documentReference.url}
+                      </a>
+                    ) : <p className="mt-0.5 font-medium text-slate-800">—</p>}
+                  </div>
+                </div>
+              </section>
             </div>
 
             <TaskWorkingScheduleSection
@@ -1031,6 +1080,12 @@ export function useTaskDetailsWorkflow({
                     canManageLinks={attachmentPermissions.canUpload}
                     showHeader={false}
                     onLinksCountChange={setLinksCount}
+                    onLinksChange={(links) => setSelectedTaskDetails((current) => {
+                      if (current?.id !== selectedTaskDetails.id) return current;
+                      const next = links[0] ? { url: links[0].url, label: links[0].label } : null;
+                      if (current.documentReference?.url === next?.url && current.documentReference?.label === next?.label) return current;
+                      return { ...current, documentReference: next };
+                    })}
                   />
                 </div>
               )}

@@ -173,7 +173,7 @@ export function useExportTasks({
       const { data: tasksData, error: tasksErr } = await supabase
         .from("tasks")
         .select(
-          "id, title, description, status, priority, assigned_to, created_by, start_date, end_date, draft_review_started_at, draft_review_due_at, completed_at, created_at, updated_at",
+          "id, title, description, status, priority, assigned_to, created_by, start_date, end_date, draft_review_started_at, draft_review_due_at, completed_at, reviewed_at, issued_at, required_by, review_completed_by, column_id, created_at, updated_at",
         )
         .eq("project_id", projectId)
         .order("created_at", { ascending: false });
@@ -197,9 +197,25 @@ export function useExportTasks({
         draft_review_started_at: string | null;
         draft_review_due_at: string | null;
         completed_at: string | null;
+        reviewed_at: string | null;
+        issued_at: string | null;
+        required_by: string | null;
+        review_completed_by: string | null;
+        column_id: string | null;
         created_at: string | null;
         updated_at: string | null;
       }[];
+
+      const columnNameById: Record<string, string> = {};
+      const columnNameByStatus: Record<string, string> = {};
+      const { data: columnData } = await supabase
+        .from("project_board_columns")
+        .select("id, title, status_key")
+        .eq("project_id", projectId);
+      ((columnData ?? []) as { id: string; title: string; status_key: string }[]).forEach((column) => {
+        columnNameById[column.id] = column.title;
+        columnNameByStatus[column.status_key] ??= column.title;
+      });
 
       const scopedTaskIds = options?.taskIds?.length ? new Set(options.taskIds) : null;
       taskRows = taskRows.filter((task) => {
@@ -399,6 +415,16 @@ export function useExportTasks({
           createdBy: t.created_by ? (userMap[t.created_by] ?? "Unknown") : "Unknown",
           startDate: t.start_date,
           dueDate: t.end_date,
+          expectedDate: t.end_date,
+          completedDate: t.completed_at,
+          reviewedDate: t.reviewed_at,
+          issuedDate: t.issued_at,
+          requiredBy: t.required_by,
+          reviewCompletedBy: t.review_completed_by,
+          documentReferenceUrl: linkItems[0]?.url ?? null,
+          column: t.column_id
+            ? (columnNameById[t.column_id] ?? columnNameByStatus[t.status ?? ""] ?? "")
+            : (columnNameByStatus[t.status ?? ""] ?? ""),
           draftReviewStartDate: isDraftReview ? t.draft_review_started_at : null,
           reviewDueDate: isDraftReview ? t.draft_review_due_at : null,
           createdAt: t.created_at,

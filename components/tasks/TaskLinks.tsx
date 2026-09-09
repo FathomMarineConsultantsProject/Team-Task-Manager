@@ -7,7 +7,7 @@ type SupabaseClient = {
   from: (table: string) => any;
 };
 
-type TaskLink = {
+export type TaskLink = {
   id: string;
   task_id: string;
   project_id: string;
@@ -27,6 +27,7 @@ type TaskLinksProps = {
   canManageLinks: boolean;
   showHeader?: boolean;
   onLinksCountChange?: (count: number) => void;
+  onLinksChange?: (links: TaskLink[]) => void;
 };
 
 export function normalizeUrl(value: string): string | null {
@@ -72,6 +73,7 @@ export default function TaskLinks({
   canManageLinks,
   showHeader = true,
   onLinksCountChange,
+  onLinksChange,
 }: TaskLinksProps) {
   const [links, setLinks] = useState<TaskLink[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -123,7 +125,8 @@ export default function TaskLinks({
 
   useEffect(() => {
     onLinksCountChange?.(links.length);
-  }, [links.length, onLinksCountChange]);
+    onLinksChange?.(links);
+  }, [links, onLinksChange, onLinksCountChange]);
 
   const resetAddForm = () => {
     setUrl("");

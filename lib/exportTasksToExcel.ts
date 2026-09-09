@@ -17,6 +17,14 @@ export type ExportTask = {
   createdBy: string;
   startDate: string | null;
   dueDate: string | null;
+  expectedDate?: string | null;
+  completedDate?: string | null;
+  reviewedDate?: string | null;
+  issuedDate?: string | null;
+  requiredBy?: string | null;
+  reviewCompletedBy?: string | null;
+  documentReferenceUrl?: string | null;
+  column?: string | null;
   draftReviewStartDate?: string | null;
   reviewDueDate?: string | null;
   createdAt: string | null;
@@ -119,11 +127,19 @@ const HEADER_COLUMNS = [
   { header: "S.No", key: "serialNo", width: 8 },
   { header: "Task Name", key: "title", width: 45 },
   { header: "Description", key: "description", width: 60 },
+  { header: "Required By", key: "requiredBy", width: 28 },
   { header: "Status", key: "status", width: 16 },
   { header: "Assigned To", key: "assignees", width: 35 },
   { header: "Created By", key: "createdBy", width: 20 },
   { header: "Start Date", key: "startDate", width: 14 },
   { header: "Due Date", key: "dueDate", width: 14 },
+  { header: "Expected Date", key: "expectedDate", width: 16 },
+  { header: "Completed Date", key: "completedDate", width: 16 },
+  { header: "Reviewed Date", key: "reviewedDate", width: 16 },
+  { header: "Issued Date", key: "issuedDate", width: 16 },
+  { header: "Review Completed By", key: "reviewCompletedBy", width: 24 },
+  { header: "Document / Reference Link", key: "documentReferenceUrl", width: 40 },
+  { header: "Column", key: "column", width: 22 },
   { header: "Draft Review Start Date", key: "draftReviewStartDate", width: 22 },
   { header: "Review Due Date", key: "reviewDueDate", width: 18 },
   { header: "Progress %", key: "progress", width: 12 },
@@ -751,11 +767,19 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       serialNo: prepared.serialNo,
       title: sanitizeExcelText(task.title),
       description: truncateExcelText(task.description ?? ""),
+      requiredBy: sanitizeExcelText(task.requiredBy ?? ""),
       status: sanitizeExcelText(formatStatusLabel(task.status)),
       assignees: sanitizeExcelText(task.assignees || "Unassigned"),
       createdBy: sanitizeExcelText(task.createdBy || "Unknown"),
       startDate: formatDate(task.startDate),
       dueDate: formatDate(task.dueDate),
+      expectedDate: formatDate(task.expectedDate ?? null),
+      completedDate: formatDate(task.completedDate ?? null),
+      reviewedDate: formatDate(task.reviewedDate ?? null),
+      issuedDate: formatDate(task.issuedDate ?? null),
+      reviewCompletedBy: sanitizeExcelText(task.reviewCompletedBy ?? ""),
+      documentReferenceUrl: sanitizeExcelText(task.documentReferenceUrl ?? ""),
+      column: sanitizeExcelText(task.column ?? ""),
       draftReviewStartDate: formatDate(task.draftReviewStartDate ?? null),
       reviewDueDate: formatDate(task.reviewDueDate ?? null),
       progress: progress,
@@ -787,6 +811,9 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     if (prepared.pendingInputsHyperlink) {
       const pendingInputsCell = row.getCell("pendingInputs");
       setSafeHyperlinkCell(pendingInputsCell, prepared.pendingInputs, prepared.pendingInputsHyperlink);
+    }
+    if (task.documentReferenceUrl) {
+      setSafeHyperlinkCell(row.getCell("documentReferenceUrl"), task.documentReferenceUrl, task.documentReferenceUrl);
     }
     linkColumns.forEach((column, linkIndex) => {
       const link = task.linkItems?.[linkIndex];

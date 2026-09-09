@@ -8,6 +8,7 @@ import BoardColumn from "@/components/board/BoardColumn";
 import ProjectManHours from "@/components/board/ProjectManHours";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
+import Switch from "@/components/ui/switch";
 import Avatar from "@/components/ui/Avatar";
 import type { BoardColumnDefinition, ColumnId, Task, TaskReviewProgress } from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
@@ -144,14 +145,6 @@ const DEFAULT_BOARD_COLUMNS: BoardColumnDefinition[] = [
   { id: "draftReview", project_id: "", title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false, color_key: "cyan", track_man_hours: true },
   { id: "review", project_id: "", title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false, color_key: "amber", track_man_hours: true },
   { id: "done", project_id: "", title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false, color_key: "green", track_man_hours: false },
-];
-
-const BOARD_COLUMNS: Array<{ id: ColumnId; title: string }> = [
-  { id: "todo", title: "TO DO" },
-  { id: "inProgress", title: "IN PROGRESS" },
-  { id: "draftReview", title: "DRAFT REVIEW" },
-  { id: "review", title: "IN REVIEW" },
-  { id: "done", title: "DONE" },
 ];
 
 const STATUS_TO_COLUMN: Record<string, ColumnId> = {
@@ -371,19 +364,12 @@ function ColumnAppearanceFields({
             {trackingLockedReason ?? "Track time while tasks are in this column."}
           </p>
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={trackManHours}
-          aria-label="Track Man-Hours"
+        <Switch
+          checked={trackManHours}
+          onCheckedChange={onTrackManHoursChange}
+          ariaLabel="Track Man-Hours"
           disabled={disabled || Boolean(trackingLockedReason)}
-          onClick={() => onTrackManHoursChange(!trackManHours)}
-          className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 ${
-            trackManHours ? "bg-slate-900" : "bg-slate-300"
-          }`}
-        >
-          <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${trackManHours ? "translate-x-5" : "translate-x-0.5"}`} />
-        </button>
+        />
       </div>
     </>
   );
@@ -439,6 +425,11 @@ export default function ProjectBoardPage({
   const [members, setMembers] = useState<DbProjectMember[]>([]);
   const [reviewers, setReviewers] = useState<ProjectReviewer[]>([]);
   const [projectLoading, setProjectLoading] = useState(true);
+  const [workingHoursStart, setWorkingHoursStart] = useState("09:00");
+  const [workingHoursEnd, setWorkingHoursEnd] = useState("19:00");
+  const [workingHoursError, setWorkingHoursError] = useState<string | null>(null);
+  const [workingHoursSaved, setWorkingHoursSaved] = useState(false);
+  const [isSavingWorkingHours, setIsSavingWorkingHours] = useState(false);
 
   // Modal state (new)
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
@@ -584,6 +575,52 @@ export default function ProjectBoardPage({
     const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? null;
   }, [supabase]);
+
+  useEffect(() => {
+    if (!project) return;
+    setWorkingHoursStart(project.normal_workday_start.slice(0, 5));
+    setWorkingHoursEnd(project.normal_workday_end.slice(0, 5));
+  }, [project]);
+
+  const dailyWorkingMinutes = useMemo(() => {
+    const [startHour, startMinute] = workingHoursStart.split(":").map(Number);
+    const [endHour, endMinute] = workingHoursEnd.split(":").map(Number);
+    if (![startHour, startMinute, endHour, endMinute].every(Number.isFinite)) return null;
+    const total = endHour * 60 + endMinute - (startHour * 60 + startMinute);
+    return total > 0 ? total : null;
+  }, [workingHoursEnd, workingHoursStart]);
+
+  const saveProjectWorkingHours = useCallback(async () => {
+    if (!dailyWorkingMinutes || isSavingWorkingHours) return;
+    setIsSavingWorkingHours(true);
+    setWorkingHoursError(null);
+    setWorkingHoursSaved(false);
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Your session has expired. Please sign in again.");
+      const response = await fetch(`/api/projects/${projectId}/working-hours`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ startTime: workingHoursStart, endTime: workingHoursEnd }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        workingHours?: { normal_workday_start: string; normal_workday_end: string };
+      };
+      if (!response.ok || !payload.workingHours) throw new Error(payload.error ?? "Failed to save working hours.");
+      setProject((current) => current ? {
+        ...current,
+        normal_workday_start: payload.workingHours!.normal_workday_start,
+        normal_workday_end: payload.workingHours!.normal_workday_end,
+      } : current);
+      setManHoursRefreshKey((value) => value + 1);
+      setWorkingHoursSaved(true);
+    } catch (error) {
+      setWorkingHoursError(error instanceof Error ? error.message : "Failed to save working hours.");
+    } finally {
+      setIsSavingWorkingHours(false);
+    }
+  }, [dailyWorkingMinutes, getAccessToken, isSavingWorkingHours, projectId, workingHoursEnd, workingHoursStart]);
   const requestEditTask = useCallback((taskId: string, target: "task" | "working-dates" = "task") => {
     editTaskRequestRef.current(taskId, target);
   }, []);
@@ -2186,8 +2223,8 @@ export default function ProjectBoardPage({
 
   const findTaskFromColumns = useCallback(
     (taskId: string): Task | null => {
-      for (const col of BOARD_COLUMNS) {
-        const found = columns[col.id].find((t) => t.id === taskId);
+      for (const taskList of Object.values(columns)) {
+        const found = taskList?.find((t) => t.id === taskId);
         if (found) return found;
       }
       return null;
@@ -2421,12 +2458,13 @@ export default function ProjectBoardPage({
       }
 
       let previousAssignee: string | null = null;
-      BOARD_COLUMNS.forEach((column) => {
-        const foundTask = columns[column.id].find((task) => task.id === taskId);
+      for (const taskList of Object.values(columns)) {
+        const foundTask = taskList?.find((task) => task.id === taskId);
         if (foundTask) {
           previousAssignee = foundTask.assigneeId ?? null;
+          break;
         }
-      });
+      }
 
       const sourceTask = findTaskFromColumns(taskId);
       const additionalAssigneeIds = (sourceTask?.assignees ?? [])
@@ -2904,7 +2942,8 @@ export default function ProjectBoardPage({
                   }
                 </button>
                 {teamExpanded && (
-                  <div className="mt-3 flex flex-wrap gap-4 animate-in fade-in slide-in-from-top-1 duration-200">
+                  <div className="mt-3 space-y-5 animate-in fade-in slide-in-from-top-1 duration-200">
+                    <div className="flex flex-wrap gap-4">
                     {members.map((member) => {
                       const user = member.user;
                       if (!user) return null;
@@ -2942,6 +2981,34 @@ export default function ProjectBoardPage({
                         </div>
                       );
                     })}
+                    </div>
+                    <div className="max-w-2xl rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                      <div className="flex flex-wrap items-end gap-4">
+                        <div className="mr-auto">
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Project Working Hours</p>
+                          <p className="mt-1 text-xs text-slate-500">Working window in {projectTimeZone}. New schedule calculations use these hours; recorded sessions are unchanged.</p>
+                        </div>
+                        <label className="text-xs font-semibold text-slate-600">
+                          Start Time
+                          <input type="time" value={workingHoursStart} onChange={(event) => { setWorkingHoursStart(event.target.value); setWorkingHoursSaved(false); }} disabled={!canManageProjectMembers || isSavingWorkingHours} className="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-100" />
+                        </label>
+                        <label className="text-xs font-semibold text-slate-600">
+                          End Time
+                          <input type="time" value={workingHoursEnd} onChange={(event) => { setWorkingHoursEnd(event.target.value); setWorkingHoursSaved(false); }} disabled={!canManageProjectMembers || isSavingWorkingHours} className="mt-1 block rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-100" />
+                        </label>
+                        <div className="min-w-28">
+                          <p className="text-xs font-semibold text-slate-600">Daily Working Time</p>
+                          <p className="mt-2 text-sm font-semibold text-slate-900">{dailyWorkingMinutes ? `${Math.floor(dailyWorkingMinutes / 60)}h ${String(dailyWorkingMinutes % 60).padStart(2, "0")}m` : "—"}</p>
+                        </div>
+                        {canManageProjectMembers && (
+                          <Button type="button" onClick={() => void saveProjectWorkingHours()} disabled={!dailyWorkingMinutes || isSavingWorkingHours} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50">
+                            {isSavingWorkingHours ? "Saving…" : "Save Working Hours"}
+                          </Button>
+                        )}
+                      </div>
+                      {workingHoursError ? <p role="alert" className="mt-3 text-sm font-medium text-red-600">{workingHoursError}</p> : null}
+                      {workingHoursSaved ? <p role="status" className="mt-3 text-sm font-medium text-emerald-700">Working hours saved.</p> : null}
+                    </div>
                   </div>
                 )}
                 {reviewerNames.length > 0 && (
