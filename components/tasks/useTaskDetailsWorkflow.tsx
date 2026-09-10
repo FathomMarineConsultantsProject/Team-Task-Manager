@@ -170,6 +170,7 @@ type WorkflowOptions = {
   onTaskUpdated?: () => void | Promise<void>;
   onScheduleChanged?: (taskId: string, schedule: TaskWorkingSchedule) => void;
   onExtensionChanged?: (taskId: string) => void | Promise<void>;
+  onEditTask?: (taskId: string) => void;
   onEditWorkingDates?: (taskId: string) => void;
   showWorkingDaysPanel?: boolean;
   manHoursByTaskId?: Map<string, LiveTaskManHoursSummary>;
@@ -268,6 +269,7 @@ export function useTaskDetailsWorkflow({
   onTaskUpdated,
   onScheduleChanged,
   onExtensionChanged,
+  onEditTask,
   onEditWorkingDates,
   showWorkingDaysPanel = false,
   manHoursByTaskId,
@@ -838,6 +840,35 @@ export function useTaskDetailsWorkflow({
                   {selectedTaskDetails.status}
                 </p>
               </div>
+
+              {onEditTask ? (
+                <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const taskId = selectedTaskDetails.id;
+                      closeTaskDetails();
+                      onEditTask(taskId);
+                    }}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900"
+                  >
+                    Edit Task
+                  </button>
+                  {onEditWorkingDates ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const taskId = selectedTaskDetails.id;
+                        closeTaskDetails();
+                        onEditWorkingDates(taskId);
+                      }}
+                      className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900"
+                    >
+                      Edit Working Dates
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
 
               {selectedTaskManHours ? <TaskManHoursPanel summary={selectedTaskManHours} variant="inline" /> : null}
 

@@ -179,7 +179,7 @@ export default function BoardColumn({
         isColumnDragging ? "opacity-40 scale-[0.98]" : ""
       }`}
     >
-      <div className={`relative flex items-center justify-between overflow-hidden rounded-xl px-2 py-2 ${accent.tint}`}>
+      <div className={`relative flex items-center justify-between rounded-xl px-2 py-2 ${accent.tint}`}>
         <span aria-hidden="true" className={`absolute inset-y-1 left-0 w-1 rounded-full ${accent.indicator}`} />
         <div className="flex items-center gap-1.5 min-w-0 flex-1 mr-2">
           {!isLocked && canManageColumns ? (
@@ -215,8 +215,11 @@ export default function BoardColumn({
           <div ref={menuRef} className="relative" onClick={handleMenuClick}>
             <button
               type="button"
+              draggable={false}
               aria-label={`${title} actions`}
               aria-expanded={isMenuOpen}
+              onPointerDown={(event) => event.stopPropagation()}
+              onDragStart={(event) => event.preventDefault()}
               onClick={(event) => {
                 event.stopPropagation();
                 setIsMenuOpen((open) => !open);
@@ -226,7 +229,7 @@ export default function BoardColumn({
               <MoreHorizontal size={14} />
             </button>
             {isMenuOpen ? (
-              <div className="absolute right-0 top-8 z-30 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-lg">
+              <div className="absolute right-0 top-8 z-50 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-lg">
                 <button
                   type="button"
                   onClick={handleAddTask}
@@ -284,6 +287,8 @@ export default function BoardColumn({
             key={task.id}
             {...task}
             columnId={columnId}
+            stageType={stageType}
+            statusKey={statusKey}
             onRemoveTask={onRemoveTask}
             onDeleteTask={onDeleteTask}
             onEditTask={onEditTask}

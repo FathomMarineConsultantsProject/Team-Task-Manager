@@ -83,17 +83,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const logSupabaseRequest = async (context: Record<string, unknown>) => {
-    console.log("SUPABASE REQUEST:", context);
-    const { data } = await supabase.auth.getUser();
-    console.log("AUTH USER:", data?.user ?? null);
+  const logSupabaseRequest = (context: Record<string, unknown>) => {
+    if (process.env.NODE_ENV === "development") console.debug("SUPABASE REQUEST:", context);
   };
-
-  useEffect(() => {
-    void supabase.auth.getUser().then((res) => {
-      console.log("GLOBAL AUTH:", res.data.user ?? null);
-    });
-  }, []);
 
   const loadUserProfile = useCallback(
     async (user: User): Promise<WorkspaceUser> => {
@@ -144,7 +136,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         data: { user },
       } = await supabase.auth.getUser();
 
-      console.log("AUTH USER:", user ?? null);
+      if (process.env.NODE_ENV === "development") console.debug("AUTH USER:", user ?? null);
 
       if (user) {
         setAuthUser(user);

@@ -8,11 +8,17 @@ import BoardColumn from "@/components/board/BoardColumn";
 import ProjectManHours from "@/components/board/ProjectManHours";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
-import Switch from "@/components/ui/switch";
 import Avatar from "@/components/ui/Avatar";
-import type { BoardColumnDefinition, ColumnId, Task, TaskReviewProgress } from "@/components/board/types";
+import {
+  getColumnTasks,
+  initializeColumnTaskMap,
+  type BoardColumnDefinition,
+  type ColumnId,
+  type ColumnTaskMap,
+  type Task,
+  type TaskReviewProgress,
+} from "@/components/board/types";
 import { useAppData } from "@/components/providers/AppDataProvider";
-import { createEmptyColumns } from "@/lib/data";
 import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
 import type { PendingAttachment } from "@/components/tasks/CreateTaskAttachments";
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
@@ -139,54 +145,6 @@ type TaskReviewRow = {
   status: string | null;
 };
 
-const DEFAULT_BOARD_COLUMNS: BoardColumnDefinition[] = [
-  { id: "todo", project_id: "", title: "TO DO", sort_order: 0, stage_type: "todo", status_key: "todo", is_locked: true, color_key: "slate", track_man_hours: false },
-  { id: "inProgress", project_id: "", title: "IN PROGRESS", sort_order: 1, stage_type: "in_progress", status_key: "in_progress", is_locked: false, color_key: "blue", track_man_hours: true },
-  { id: "draftReview", project_id: "", title: "DRAFT REVIEW", sort_order: 2, stage_type: "draft_review", status_key: "draft_review", is_locked: false, color_key: "cyan", track_man_hours: true },
-  { id: "review", project_id: "", title: "IN REVIEW", sort_order: 3, stage_type: "in_review", status_key: "in_review", is_locked: false, color_key: "amber", track_man_hours: true },
-  { id: "done", project_id: "", title: "DONE", sort_order: 4, stage_type: "done", status_key: "done", is_locked: false, color_key: "green", track_man_hours: false },
-];
-
-const STATUS_TO_COLUMN: Record<string, ColumnId> = {
-  todo: "todo",
-  in_progress: "inProgress",
-  draft_review: "draftReview",
-  in_review: "review",
-  done: "done",
-};
-
-const COLUMN_TO_STATUS: Record<string, "todo" | "in_progress" | "draft_review" | "in_review" | "done"> = {
-  todo: "todo",
-  inProgress: "in_progress",
-  draftReview: "draft_review",
-  review: "in_review",
-  done: "done",
-};
-
-const COLUMN_ACCENT: Record<string, string> = {
-  todo: "bg-orange-500",
-  inProgress: "bg-sky-500",
-  draftReview: "bg-cyan-500",
-  review: "bg-amber-500",
-  done: "bg-emerald-600",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  todo: "TODO",
-  inProgress: "IN PROGRESS",
-  draftReview: "DRAFT REVIEW",
-  review: "IN REVIEW",
-  done: "DONE",
-};
-
-const COLUMN_EXPORT_LABEL: Record<string, string> = {
-  todo: "To Do",
-  inProgress: "In Progress",
-  draftReview: "Draft Review",
-  review: "In Review",
-  done: "Done",
-};
-
 const getColumnAccent = (colId: string, cols: BoardColumnDefinition[] = []) => {
   const col = cols.find((c) => c.id === colId);
   if (col?.color_key && COLUMN_COLORS[col.color_key]) return COLUMN_COLORS[col.color_key].indicator;
@@ -208,6 +166,17 @@ const getColumnExportLabel = (colId: string, cols: BoardColumnDefinition[] = [])
   const col = cols.find((c) => c.id === colId);
   return col?.title ?? "Tasks";
 };
+
+const findColumnByStatus = (
+  cols: BoardColumnDefinition[],
+  status: BoardColumnDefinition["status_key"],
+) => cols.find((column) => column.status_key === status || column.stage_type === status);
+
+const isDoneColumn = (column: BoardColumnDefinition) =>
+  column.stage_type === "done" || column.status_key === "done";
+
+const isReviewColumn = (column: BoardColumnDefinition | undefined) =>
+  column?.stage_type === "in_review" || column?.status_key === "in_review";
 
 const resolveTaskColumnId = (
   task: { status?: string | null; column_id?: string | null },
@@ -236,13 +205,6 @@ const getDraftReviewDateFields = (enteredAt = new Date()) => ({
 });
 
 const normalizeRole = (role: string | null | undefined) => (role ?? "").toLowerCase();
-
-const resolveColumn = (status: string | null | undefined): ColumnId => {
-  if (!status) {
-    return "todo";
-  }
-  return STATUS_TO_COLUMN[status] ?? "todo";
-};
 
 const buildInitials = (name: string | null | undefined, email: string | null | undefined) => {
   const trimmedName = name?.trim();
@@ -331,10 +293,10 @@ function ColumnAppearanceFields({
   disabled?: boolean;
 }) {
   return (
-    <>
-      <fieldset disabled={disabled}>
+    <div className="space-y-5">
+      <fieldset disabled={disabled} className="border-0 p-0">
         <legend className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Color</legend>
-        <div className="mt-2 flex flex-wrap gap-2.5" aria-label="Column color">
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3" aria-label="Column color">
           {COLUMN_COLOR_KEYS.map((key) => {
             const option = COLUMN_COLORS[key];
             const selected = color === key;
@@ -346,32 +308,41 @@ function ColumnAppearanceFields({
                 aria-label={`${option.label}${selected ? ", selected" : ""}`}
                 aria-pressed={selected}
                 onClick={() => onColorChange(key)}
-                className={`grid h-8 w-8 place-items-center rounded-full transition focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2 ${
-                  selected ? "ring-2 ring-slate-900 ring-offset-2" : "hover:scale-110"
+                className={`flex h-9 items-center gap-2 rounded-md border px-2.5 text-left text-sm font-medium focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-1 ${
+                  selected ? "border-slate-800 bg-slate-50 text-slate-900" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
                 }`}
               >
-                <span className={`h-6 w-6 rounded-full border-2 border-white shadow-sm ${option.swatch}`} />
+                <span aria-hidden="true" className={`h-3 w-3 shrink-0 rounded-[2px] ${option.swatch}`} />
+                <span>{option.label}</span>
               </button>
             );
           })}
         </div>
       </fieldset>
 
-      <div className="flex items-start justify-between gap-4 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5">
-        <div>
-          <div className="text-sm font-semibold text-slate-800">Track Man-Hours</div>
-          <p className="mt-0.5 text-xs leading-5 text-slate-500">
-            {trackingLockedReason ?? "Track time while tasks are in this column."}
-          </p>
+      <fieldset disabled={disabled || Boolean(trackingLockedReason)} className="border-0 p-0">
+        <legend className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Track Man-Hours</legend>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          {trackingLockedReason ?? "Track time while tasks are in this column."}
+        </p>
+        <div className="mt-2 inline-flex overflow-hidden rounded-md border border-slate-300" aria-label="Track Man-Hours">
+          {[false, true].map((value) => (
+            <button
+              key={String(value)}
+              type="button"
+              aria-label={`Track Man-Hours ${value ? "On" : "Off"}`}
+              aria-pressed={trackManHours === value}
+              onClick={() => onTrackManHoursChange(value)}
+              className={`min-w-20 border-r border-slate-300 px-4 py-2 text-sm font-semibold last:border-r-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-900 ${
+                trackManHours === value ? "bg-slate-100 text-slate-950" : "bg-white text-slate-500 hover:bg-slate-50"
+              }`}
+            >
+              {value ? "On" : "Off"}
+            </button>
+          ))}
         </div>
-        <Switch
-          checked={trackManHours}
-          onCheckedChange={onTrackManHoursChange}
-          ariaLabel="Track Man-Hours"
-          disabled={disabled || Boolean(trackingLockedReason)}
-        />
-      </div>
-    </>
+      </fieldset>
+    </div>
   );
 }
 
@@ -386,8 +357,8 @@ export default function ProjectBoardPage({
   const deepLinkTaskId = searchParams?.get("taskId");
   const hasOpenedDeepLinkRef = React.useRef(false);
   const { supabase, profile } = useAppData();
-  const [projectColumns, setProjectColumns] = useState<BoardColumnDefinition[]>(DEFAULT_BOARD_COLUMNS);
-  const [columns, setColumns] = useState<Record<string, Task[]>>({});
+  const [projectColumns, setProjectColumns] = useState<BoardColumnDefinition[]>([]);
+  const [columns, setColumns] = useState<ColumnTaskMap>({});
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<ColumnId | null>(null);
@@ -436,7 +407,8 @@ export default function ProjectBoardPage({
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
   const [showProjectOverviewModal, setShowProjectOverviewModal] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
-  const [newTaskStatus, setNewTaskStatus] = useState<ColumnId>("todo");
+  const [newTaskTargetColumnId, setNewTaskTargetColumnId] = useState<string | null>(null);
+  const [newTaskStatusKey, setNewTaskStatusKey] = useState<BoardColumnDefinition["status_key"]>("todo");
   const [newTaskAssignee, setNewTaskAssignee] = useState("");
   const [newTaskDescription, setNewTaskDescription] = useState("");
   const [newTaskWorkingDates, setNewTaskWorkingDates] = useState<string[]>([]);
@@ -485,6 +457,17 @@ export default function ProjectBoardPage({
   const [boardMemberFilter, setBoardMemberFilter] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const newTaskTargetColumn = useMemo(
+    () => projectColumns.find((column) => column.id === newTaskTargetColumnId) ?? null,
+    [newTaskTargetColumnId, projectColumns],
+  );
+  const openCreateTaskForColumn = useCallback((column: BoardColumnDefinition) => {
+    setNewTaskTargetColumnId(column.id);
+    setNewTaskStatusKey(column.status_key);
+    setWorkingDatesDirty(false);
+    setCreateTaskError(null);
+    setShowCreateTaskModal(true);
+  }, []);
   const [managingMemberId, setManagingMemberId] = useState<string | null>(null);
   const [projectTeamTab, setProjectTeamTab] = useState<"add" | "manage" | "reviewer">("add");
   const [teamMemberSearch, setTeamMemberSearch] = useState("");
@@ -861,8 +844,8 @@ export default function ProjectBoardPage({
   );
 
   const applyTaskUpdateCounts = useCallback(
-    (nextColumns: Record<string, Task[]>) => {
-      const countedColumns: Record<string, Task[]> = {};
+    (nextColumns: ColumnTaskMap) => {
+      const countedColumns: ColumnTaskMap = {};
 
       Object.keys(nextColumns).forEach((columnId) => {
         countedColumns[columnId] = (nextColumns[columnId] ?? []).map((task) => ({
@@ -910,9 +893,9 @@ export default function ProjectBoardPage({
 
   const inReviewTaskIds = useMemo(() => {
     const reviewColIds = projectColumns
-      .filter((c) => c.stage_type === "in_review" || c.status_key === "in_review" || c.id === "review")
+      .filter((c) => c.stage_type === "in_review" || c.status_key === "in_review")
       .map((c) => c.id);
-    return reviewColIds.flatMap((colId) => (columns[colId] ?? []).map((task) => task.id));
+    return reviewColIds.flatMap((colId) => getColumnTasks(columns, colId).map((task) => task.id));
   }, [columns, projectColumns]);
 
   useEffect(() => {
@@ -995,6 +978,7 @@ export default function ProjectBoardPage({
     onTaskUpdated: loadTaskUpdateCounts,
     onScheduleChanged: requestScheduleChanged,
     onExtensionChanged: requestExtensionChanged,
+    onEditTask: (taskId) => requestEditTask(taskId, "task"),
     onEditWorkingDates: (taskId) => requestEditTask(taskId, "working-dates"),
     showWorkingDaysPanel: true,
     manHoursByTaskId: manHours.taskSummaryById,
@@ -1012,7 +996,7 @@ export default function ProjectBoardPage({
     setColumns((current) => {
       const next = { ...current };
       Object.keys(next).forEach((columnId) => {
-        next[columnId] = next[columnId].map((task) => task.id === taskId
+        next[columnId] = getColumnTasks(next, columnId).map((task) => task.id === taskId
           ? {
               ...task,
               start_date: dates[0] ?? null,
@@ -1066,7 +1050,7 @@ export default function ProjectBoardPage({
       setColumns((current) => {
         const next = { ...current };
         Object.keys(next).forEach((columnId) => {
-          next[columnId] = next[columnId].map((task) => task.id === offDayExtensionTask.task.id
+          next[columnId] = getColumnTasks(next, columnId).map((task) => task.id === offDayExtensionTask.task.id
             ? {
                 ...task,
                 start_date: dates[0] ?? null,
@@ -1090,7 +1074,7 @@ export default function ProjectBoardPage({
 
   const handleOpenTaskDetails = useCallback(
     async (taskId: string, column: ColumnId) => {
-      const task = columns[column].find((item) => item.id === taskId);
+      const task = getColumnTasks(columns, column).find((item) => item.id === taskId);
       if (!task) {
         return;
       }
@@ -1125,7 +1109,7 @@ export default function ProjectBoardPage({
       }
 
       const colDef = projectColumns.find((c) => c.id === column);
-      const taskStatus = (colDef?.status_key || COLUMN_TO_STATUS[column] || "todo") as any;
+      const taskStatus = (colDef?.status_key || task.status || "todo") as any;
 
       openTaskDetails({
         id: task.id,
@@ -1249,6 +1233,18 @@ export default function ProjectBoardPage({
         return;
       }
 
+      const targetColumn = (newTaskTargetColumnId
+        ? projectColumns.find((column) => column.id === newTaskTargetColumnId)
+        : undefined) ?? findColumnByStatus(projectColumns, "todo");
+      if (!targetColumn) {
+        setCreateTaskError("The destination column is unavailable. Refresh the board and try again.");
+        return;
+      }
+      if (newTaskStatusKey !== targetColumn.status_key) {
+        setCreateTaskError("The destination column changed. Close this form and choose the column again.");
+        return;
+      }
+
       setIsSubmitting(true);
       setCreateTaskError(null);
 
@@ -1264,7 +1260,8 @@ export default function ProjectBoardPage({
           body: JSON.stringify({
             title: title.trim(),
             description: newTaskDescription.trim() || null,
-            status: COLUMN_TO_STATUS[newTaskStatus],
+            status: newTaskStatusKey,
+            columnId: targetColumn.id,
             primaryAssigneeId: newTaskAssignee || null,
             additionalAssigneeIds: selectedAdditionalAssignees.map((user) => user.id),
             workingDates: newTaskWorkingDates,
@@ -1281,7 +1278,9 @@ export default function ProjectBoardPage({
 
           const additionalAssigneesToInsert = selectedAdditionalAssignees.filter((user) => user.id !== newTask.assigned_to);
 
-          const columnId = resolveColumn(newTask.status);
+          const columnId = newTask.column_id && projectColumns.some((column) => column.id === newTask.column_id)
+            ? newTask.column_id
+            : targetColumn.id;
           const assignee = newTask.assigned_to
             ? members.find((m) => m.user_id === newTask.assigned_to)?.user
             : undefined;
@@ -1298,9 +1297,11 @@ export default function ProjectBoardPage({
             [columnId]: [
               {
                 id: newTask.id,
+                column_id: columnId,
+                status: newTask.status ?? targetColumn.status_key,
                 title: newTask.title?.trim() || "Untitled task",
                 description: newTask.description ?? null,
-                accent: COLUMN_ACCENT[columnId],
+                accent: getColumnAccent(columnId, projectColumns),
                 initials: buildInitials(assignee?.name, assignee?.email),
                 assigneeId: newTask.assigned_to,
                 assigneeName: assignee?.name ?? null,
@@ -1311,11 +1312,11 @@ export default function ProjectBoardPage({
                 end_date: newTask.end_date ?? null,
                 draft_review_started_at: newTask.draft_review_started_at ?? null,
                 draft_review_due_at: newTask.draft_review_due_at ?? null,
-                statusLabel: STATUS_LABEL[columnId],
+                statusLabel: getColumnStatusLabel(columnId, projectColumns),
                 canDrag: canMoveTask(newTask.assigned_to, assignees, newTask.start_date),
                 assignees,
               },
-              ...prev[columnId],
+              ...getColumnTasks(prev, columnId),
             ],
           }));
 
@@ -1370,7 +1371,8 @@ export default function ProjectBoardPage({
           }
         setNewTaskTitle("");
         setNewTaskAssignee("");
-        setNewTaskStatus("todo");
+        setNewTaskTargetColumnId(null);
+        setNewTaskStatusKey("todo");
         setNewTaskDescription("");
         setSelectedAdditionalAssignees([]);
         setNewTaskWorkingDates([]);
@@ -1386,7 +1388,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, workingDatesValidation, supabase, profile?.id, newTaskDescription, newTaskStatus, newTaskAssignee, selectedAdditionalAssignees, newTaskWorkingDates, initializeTaskReviewCycle, members, canMoveTask, pendingAttachments],
+    [projectId, workingDatesValidation, supabase, profile?.id, newTaskDescription, newTaskTargetColumnId, newTaskStatusKey, newTaskAssignee, selectedAdditionalAssignees, newTaskWorkingDates, initializeTaskReviewCycle, members, canMoveTask, pendingAttachments, projectColumns, showBoardNotice],
   );
 
   const handleAddMembers = useCallback(
@@ -1657,9 +1659,9 @@ export default function ProjectBoardPage({
         }
         setBoardMemberFilter((current) => (current === userId ? "all" : current));
         setColumns((current) => {
-          const next = createEmptyColumns();
-          (Object.keys(current) as ColumnId[]).forEach((columnId) => {
-            next[columnId] = current[columnId].map((task) => {
+          const next = initializeColumnTaskMap(projectColumns);
+          projectColumns.forEach((column) => {
+            next[column.id] = getColumnTasks(current, column.id).map((task) => {
               const updatedAssignees = task.assignees?.filter((assignee) => assignee.id !== userId);
               return {
                 ...task,
@@ -1681,7 +1683,7 @@ export default function ProjectBoardPage({
         setMemberPendingRemoval(null);
       }
     },
-    [projectId, supabase, canRemoveProjectMembers, newTaskAssignee],
+    [projectId, supabase, canRemoveProjectMembers, newTaskAssignee, projectColumns],
   );
 
   const requestRemoveMember = useCallback((member: DbProjectMember) => {
@@ -1742,22 +1744,16 @@ export default function ProjectBoardPage({
       // 1. Fetch project columns
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
-      let fetchedColumns = DEFAULT_BOARD_COLUMNS;
-      if (token) {
-        try {
-          const colsRes = await fetch(`/api/projects/${projectId}/columns`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (colsRes.ok) {
-            const colsJson = await colsRes.json();
-            if (Array.isArray(colsJson.columns) && colsJson.columns.length > 0) {
-              fetchedColumns = colsJson.columns;
-            }
-          }
-        } catch (e) {
-          console.error("Failed to fetch project columns", e);
-        }
+      if (!token) throw new Error("Please sign in again to load this board.");
+      const colsRes = await fetch(`/api/projects/${projectId}/columns`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const colsJson = await colsRes.json().catch(() => ({}));
+      if (!colsRes.ok) throw new Error(colsJson.error ?? "Failed to load project columns.");
+      if (!Array.isArray(colsJson.columns) || colsJson.columns.length === 0) {
+        throw new Error("This project has no board columns.");
       }
+      const fetchedColumns = colsJson.columns as BoardColumnDefinition[];
       setProjectColumns(fetchedColumns);
 
       // 2. Fetch tasks
@@ -1818,10 +1814,7 @@ export default function ProjectBoardPage({
         }, {});
       }
 
-      const groupedColumns: Record<string, Task[]> = {};
-      fetchedColumns.forEach((c) => {
-        groupedColumns[c.id] = [];
-      });
+      const groupedColumns = initializeColumnTaskMap(fetchedColumns);
 
       // Fetch multi-assignees for all tasks
       const allTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
@@ -1847,9 +1840,7 @@ export default function ProjectBoardPage({
 
       ((taskRows as DbTask[] | null | undefined) ?? []).forEach((row) => {
         const columnId = resolveTaskColumnId(row, fetchedColumns);
-        if (!groupedColumns[columnId]) {
-          groupedColumns[columnId] = [];
-        }
+        const targetTasks = getColumnTasks(groupedColumns, columnId);
         const assignee = row.assigned_to ? usersById[row.assigned_to] : undefined;
 
         // Build multi-assignee list: primary + additional (deduplicated)
@@ -1860,7 +1851,7 @@ export default function ProjectBoardPage({
           ...multiUsers.filter(u => u.id !== primaryUser?.id),
         ];
 
-        groupedColumns[columnId].push({
+        groupedColumns[columnId] = [...targetTasks, {
           id: row.id,
           column_id: row.column_id ?? columnId,
           status: row.status ?? "todo",
@@ -1882,7 +1873,7 @@ export default function ProjectBoardPage({
           canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
           updatesCount: updatesMap[row.id] ?? 0,
           assignees,
-        });
+        }];
       });
 
       setColumns(groupedColumns);
@@ -1930,7 +1921,7 @@ export default function ProjectBoardPage({
         return;
       }
 
-      const task = columns[from].find((item) => item.id === taskId);
+      const task = getColumnTasks(columns, from).find((item) => item.id === taskId);
       const canMove = canMoveTask(task?.assigneeId ?? null, task?.assignees, task?.start_date);
 
       if (!canMove) {
@@ -1950,7 +1941,7 @@ export default function ProjectBoardPage({
 
   const updateTaskStatus = useCallback(
     async (taskId: string, destination: ColumnId, source: ColumnId): Promise<StatusUpdateOutcome> => {
-      const sourceTask = columns[source]?.find((task) => task.id === taskId);
+      const sourceTask = getColumnTasks(columns, source).find((task) => task.id === taskId);
       const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees, sourceTask?.start_date);
 
       if (!canMove) {
@@ -1959,7 +1950,8 @@ export default function ProjectBoardPage({
       }
 
       const destCol = projectColumns.find((c) => c.id === destination);
-      const nextStatus = destCol?.status_key || COLUMN_TO_STATUS[destination] || "in_progress";
+      if (!destCol) return { success: false, error: "The destination column is unavailable." };
+      const nextStatus = destCol.status_key;
 
       try {
         const { data: sessionData } = await supabase.auth.getSession();
@@ -2021,7 +2013,7 @@ export default function ProjectBoardPage({
         return;
       }
 
-      const sourceTask = columns[from].find((task) => task.id === taskId);
+      const sourceTask = getColumnTasks(columns, from).find((task) => task.id === taskId);
       const canMove = canMoveTask(sourceTask?.assigneeId ?? null, sourceTask?.assignees, sourceTask?.start_date);
       if (!sourceTask || !canMove) {
         console.warn("Unauthorized action");
@@ -2031,11 +2023,17 @@ export default function ProjectBoardPage({
       }
 
       const destCol = projectColumns.find((c) => c.id === destination);
-      const nextStatus = destCol?.status_key || COLUMN_TO_STATUS[destination] || "in_progress";
-      const nextLabel = destCol?.title || STATUS_LABEL[destination] || "IN PROGRESS";
+      if (!destCol) {
+        setActiveDrag(null);
+        setDragOverColumn(null);
+        showBoardNotice("The destination column is unavailable. Refresh the board and try again.", "Unable to move task");
+        return;
+      }
+      const nextStatus = destCol.status_key;
+      const nextLabel = destCol.title;
       const nextAccent = getColumnAccent(destination, projectColumns);
 
-      const originalIndex = columns[from]?.findIndex((task) => task.id === taskId) ?? -1;
+      const originalIndex = getColumnTasks(columns, from).findIndex((task) => task.id === taskId);
       const optimisticTask: Task = {
         ...sourceTask,
         column_id: destination,
@@ -2053,10 +2051,10 @@ export default function ProjectBoardPage({
       // Optimistic move: update the board before waiting for the status API.
       setColumns((current) => ({
         ...current,
-        [from]: current[from].filter((task) => task.id !== taskId),
+        [from]: getColumnTasks(current, from).filter((task) => task.id !== taskId),
         [destination]: [
           optimisticTask,
-          ...current[destination].filter((task) => task.id !== taskId),
+          ...getColumnTasks(current, destination).filter((task) => task.id !== taskId),
         ],
       }));
 
@@ -2069,9 +2067,9 @@ export default function ProjectBoardPage({
             setColumns((current) => {
               const withoutTask = { ...current };
               Object.keys(withoutTask).forEach((columnId) => {
-                withoutTask[columnId] = (withoutTask[columnId] ?? []).filter((task) => task.id !== taskId);
+                withoutTask[columnId] = getColumnTasks(withoutTask, columnId).filter((task) => task.id !== taskId);
               });
-              const sourceTasks = withoutTask[from] ?? [];
+              const sourceTasks = getColumnTasks(withoutTask, from);
               const rollbackIndex = Math.max(0, Math.min(originalIndex, sourceTasks.length));
 
               return {
@@ -2100,7 +2098,7 @@ export default function ProjectBoardPage({
             const updatedTask = result.task;
             setColumns((current) => ({
               ...current,
-              [destination]: current[destination].map((task) =>
+              [destination]: getColumnTasks(current, destination).map((task) =>
                 task.id === taskId
                   ? {
                       ...task,
@@ -2116,7 +2114,8 @@ export default function ProjectBoardPage({
             }));
           }
 
-          if (from === "review" || destination === "review") {
+          const sourceColumn = projectColumns.find((column) => column.id === from);
+          if (isReviewColumn(sourceColumn) || isReviewColumn(destCol)) {
             setReviewProgressRefreshVersion((current) => current + 1);
           }
         } finally {
@@ -2136,13 +2135,15 @@ export default function ProjectBoardPage({
   const onRemoveTask = useCallback((taskId: string, column: ColumnId) => {
     setColumns((current) => ({
       ...current,
-      [column]: current[column].filter((task) => task.id !== taskId),
+      [column]: getColumnTasks(current, column).filter((task) => task.id !== taskId),
     }));
   }, []);
 
   const onDeleteTask = useCallback(
     async (taskId: string, column: ColumnId) => {
-      const existingTask = columns[column].find((task) => task.id === taskId);
+      const sourceTasks = getColumnTasks(columns, column);
+      const originalIndex = sourceTasks.findIndex((task) => task.id === taskId);
+      const existingTask = originalIndex >= 0 ? sourceTasks[originalIndex] : undefined;
       if (!existingTask) {
         return;
       }
@@ -2159,7 +2160,7 @@ export default function ProjectBoardPage({
 
       setColumns((current) => ({
         ...current,
-        [column]: current[column].filter((task) => task.id !== taskId),
+        [column]: getColumnTasks(current, column).filter((task) => task.id !== taskId),
       }));
 
       console.log("Deleting task:", { taskId, projectId });
@@ -2168,10 +2169,18 @@ export default function ProjectBoardPage({
 
       if (error) {
         console.error("Task delete error:", error);
-        setColumns((current) => ({
-          ...current,
-          [column]: [...current[column], existingTask],
-        }));
+        setColumns((current) => {
+          const withoutTask = getColumnTasks(current, column).filter((task) => task.id !== taskId);
+          const rollbackIndex = Math.max(0, Math.min(originalIndex, withoutTask.length));
+          return {
+            ...current,
+            [column]: [
+              ...withoutTask.slice(0, rollbackIndex),
+              existingTask,
+              ...withoutTask.slice(rollbackIndex),
+            ],
+          };
+        });
       } else {
         console.log("Task deleted successfully");
       }
@@ -2365,7 +2374,7 @@ export default function ProjectBoardPage({
       setColumns((prev) => {
         const updated = { ...prev };
         Object.keys(updated).forEach((colId) => {
-          updated[colId] = updated[colId].map((task) => task.id === editingTask.id
+          updated[colId] = getColumnTasks(updated, colId).map((task) => task.id === editingTask.id
             ? { ...task, title: editingTask.title.trim(), description: editingTask.description }
             : task);
         });
@@ -2420,7 +2429,7 @@ export default function ProjectBoardPage({
         setColumns((current) => {
           const next = { ...current };
           Object.keys(next).forEach((columnId) => {
-            next[columnId] = next[columnId].map((task) => task.id === editingTask.id
+            next[columnId] = getColumnTasks(next, columnId).map((task) => task.id === editingTask.id
               ? {
                   ...task,
                   assigneeId: primaryAssigneeId,
@@ -2525,7 +2534,7 @@ export default function ProjectBoardPage({
     if (!loading && deepLinkTaskId && !hasOpenedDeepLinkRef.current) {
       let foundColumn: ColumnId | null = null;
       for (const col of projectColumns) {
-        if (columns[col.id]?.some(t => t.id === deepLinkTaskId)) {
+        if (getColumnTasks(columns, col.id).some(t => t.id === deepLinkTaskId)) {
           foundColumn = col.id;
           break;
         }
@@ -2556,7 +2565,7 @@ export default function ProjectBoardPage({
     }
     const colIndex = projectColumns.findIndex((c) => c.id === columnId);
     const col = projectColumns[colIndex];
-    if (colIndex === 0 || col?.is_locked || col?.id === "todo" || col?.stage_type === "todo") {
+    if (colIndex === 0 || col?.is_locked || col?.stage_type === "todo") {
       event.preventDefault();
       return;
     }
@@ -2570,7 +2579,7 @@ export default function ProjectBoardPage({
     const targetIndex = projectColumns.findIndex((c) => c.id === columnId);
     if (targetIndex === 0) return;
     const targetCol = projectColumns[targetIndex];
-    if (targetCol?.is_locked || targetCol?.id === "todo") return;
+    if (targetCol?.is_locked || targetCol?.stage_type === "todo") return;
 
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
@@ -2606,7 +2615,7 @@ export default function ProjectBoardPage({
     const [movedCol] = reordered.splice(fromIndex, 1);
     reordered.splice(toIndex, 0, movedCol);
 
-    if (reordered[0].id !== "todo" && reordered[0].stage_type !== "todo") {
+    if (reordered[0]?.stage_type !== "todo" || !reordered[0]?.is_locked) {
       return;
     }
 
@@ -2772,9 +2781,9 @@ export default function ProjectBoardPage({
       // Optimistically update columns and projectColumns
       setColumns((current) => {
         const next = { ...current };
-        const movingTasks = next[colId] ?? [];
+        const movingTasks = getColumnTasks(next, colId);
         delete next[colId];
-        if (movingTasks.length > 0 && moveTasksTargetId && next[moveTasksTargetId]) {
+        if (movingTasks.length > 0 && moveTasksTargetId) {
           const targetColDef = projectColumns.find((c) => c.id === moveTasksTargetId);
           const targetStatus = targetColDef?.status_key || "in_progress";
           const targetAccent = getColumnAccent(moveTasksTargetId, projectColumns);
@@ -2786,7 +2795,7 @@ export default function ProjectBoardPage({
             accent: targetAccent,
             statusLabel: targetLabel,
           }));
-          next[moveTasksTargetId] = [...next[moveTasksTargetId], ...reassigned];
+          next[moveTasksTargetId] = [...getColumnTasks(next, moveTasksTargetId), ...reassigned];
         }
         return next;
       });
@@ -2913,10 +2922,12 @@ export default function ProjectBoardPage({
                   </Button>
                   <Button
                     onClick={() => {
-                      setNewTaskStatus("todo");
-                      setWorkingDatesDirty(false);
-                      setCreateTaskError(null);
-                      setShowCreateTaskModal(true);
+                      const todoColumn = findColumnByStatus(projectColumns, "todo");
+                      if (!todoColumn) {
+                        showBoardNotice("The To Do column is unavailable. Refresh the board and try again.");
+                        return;
+                      }
+                      openCreateTaskForColumn(todoColumn);
                     }}
                     className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
                   >
@@ -3102,11 +3113,11 @@ export default function ProjectBoardPage({
       {/* KANBAN BOARD */}
       <div className="overflow-x-auto">
         <div className="flex min-h-[500px] gap-6">
-          {projectColumns.map((column, colIndex) => {
+          {projectColumns.map((column) => {
             const now = boardNow;
 
             // 1) Apply search filter
-            let filtered = (columns[column.id] ?? []).filter((t) => {
+            let filtered = getColumnTasks(columns, column.id).filter((t) => {
               if (!boardSearch.trim()) return true;
               const q = boardSearch.trim().toLowerCase();
               const titleMatch = t.title?.toLowerCase().includes(q);
@@ -3133,13 +3144,13 @@ export default function ProjectBoardPage({
                   case "today": return dueState.state === "due_today";
                   case "week": return daysRemaining !== null && daysRemaining >= 0 && daysRemaining <= 7;
                   case "month": return daysRemaining !== null && daysRemaining >= 0 && daysRemaining <= 30;
-                  case "overdue": return dueState.state === "overdue" && column.id !== "done";
+                  case "overdue": return dueState.state === "overdue" && !isDoneColumn(column);
                   case "near_due": {
-                    if (!due || dueState.state === "overdue" || column.id === "done") return false;
+                    if (!due || dueState.state === "overdue" || isDoneColumn(column)) return false;
                     const diff = (due.getTime() - now.getTime()) / 86400000;
                     return diff >= 0 && diff <= 3;
                   }
-                  case "completed": return column.id === "done";
+                  case "completed": return isDoneColumn(column);
                   default: return true;
                 }
               });
@@ -3209,16 +3220,18 @@ export default function ProjectBoardPage({
                 onEditTask={handleEditTask}
                 onOpenTaskDetails={handleOpenTaskDetails}
                 onQuickAddTask={(columnId) => {
-                  setNewTaskStatus(columnId);
-                  setWorkingDatesDirty(false);
-                  setCreateTaskError(null);
-                  setShowCreateTaskModal(true);
+                  const targetColumn = projectColumns.find((item) => item.id === columnId);
+                  if (!targetColumn) {
+                    showBoardNotice("The selected column is unavailable. Refresh the board and try again.");
+                    return;
+                  }
+                  openCreateTaskForColumn(targetColumn);
                 }}
                 onExportTasks={(columnId) => {
                   const colDef = projectColumns.find((c) => c.id === columnId);
                   return handleExportTasks({
-                    statusFilter: (colDef?.status_key || COLUMN_TO_STATUS[columnId]) as any,
-                    statusLabel: colDef?.title || COLUMN_EXPORT_LABEL[columnId] || "Tasks",
+                    statusFilter: (colDef?.status_key || "todo") as any,
+                    statusLabel: colDef?.title || getColumnExportLabel(columnId, projectColumns),
                   });
                 }}
                 onClaimTask={claimTask}
@@ -3236,7 +3249,7 @@ export default function ProjectBoardPage({
                 taskSummaryById={manHours.taskSummaryById}
                 projectTimeZone={projectTimeZone}
                 normalWorkdayEnd={projectWorkdayEnd}
-                isLocked={Boolean(column.is_locked || colIndex === 0 || column.id === "todo")}
+                isLocked={Boolean(column.is_locked || column.stage_type === "todo")}
                 stageType={column.stage_type}
                 statusKey={column.status_key}
                 colorKey={column.color_key}
@@ -3400,8 +3413,12 @@ export default function ProjectBoardPage({
       </Modal>
 
       {/* CREATE TASK MODAL */}
-      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setPendingAttachments([]); setWorkingDatesDirty(false); setCreateTaskError(null); }}>
+      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setNewTaskTargetColumnId(null); setNewTaskStatusKey("todo"); setPendingAttachments([]); setWorkingDatesDirty(false); setCreateTaskError(null); }}>
         <div className="space-y-4">
+          <div className="border-b border-slate-200 pb-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Column</p>
+            <p className="mt-1 text-sm font-semibold text-slate-900">{newTaskTargetColumn?.title ?? "To Do"}</p>
+          </div>
           <div>
             <label htmlFor="task-title" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
               Task Title
@@ -3455,9 +3472,6 @@ export default function ProjectBoardPage({
                 );
               })}
             </select>
-            <p className="mt-1 text-xs text-slate-500">
-              Creating in: {STATUS_LABEL[newTaskStatus]}
-            </p>
           </div>
 
           <div className={newTaskAssignee ? "" : "opacity-50 pointer-events-none"}>
@@ -3569,6 +3583,8 @@ export default function ProjectBoardPage({
             variant="ghost"
             onClick={() => {
               setShowCreateTaskModal(false);
+              setNewTaskTargetColumnId(null);
+              setNewTaskStatusKey("todo");
               setPendingAttachments([]);
               setWorkingDatesDirty(false);
               setCreateTaskError(null);

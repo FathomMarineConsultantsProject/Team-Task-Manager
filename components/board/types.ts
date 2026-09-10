@@ -51,6 +51,16 @@ export type Task = {
   assignees?: { id: string; name: string | null; email: string | null; avatar_url?: string | null }[];
 };
 
+export type ColumnTaskMap = Record<string, Task[] | undefined>;
+
+export function getColumnTasks(columns: ColumnTaskMap, columnId: string): Task[] {
+  return columns[columnId] ?? [];
+}
+
+export function initializeColumnTaskMap(projectColumns: BoardColumnDefinition[]): ColumnTaskMap {
+  return Object.fromEntries(projectColumns.map((column) => [column.id, []]));
+}
+
 export type TaskUpdateSummary = {
   id: string;
   taskId: string;
