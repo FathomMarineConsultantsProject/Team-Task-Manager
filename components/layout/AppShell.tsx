@@ -7,6 +7,7 @@ import Sidebar from "@/components/sidebar/Sidebar";
 import Topbar from "@/components/topbar/Topbar";
 import AiAssistantPanel from "@/components/ai/AiAssistantPanel";
 import { useAppData } from "@/components/providers/AppDataProvider";
+import { TopbarContentProvider } from "@/components/layout/TopbarContentContext";
 
 const LOGIN_ROUTE = "/login";
 
@@ -19,6 +20,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   routerRef.current = router;
   const isLoggedIn = Boolean(profile?.id);
   const [isAiOpen, setIsAiOpen] = useState(false);
+  const [topbarLeadingContent, setTopbarLeadingContent] = useState<React.ReactNode>(null);
 
   // Extract project ID from URL if on a project board
   const projectId = useMemo(() => {
@@ -177,8 +179,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen overflow-hidden bg-white text-slate-900">
       <Sidebar />
       <div className={`ml-[260px] flex h-screen flex-col overflow-hidden bg-white transition-all ${isAiOpen ? "mr-[420px]" : ""}`}>
-        <Topbar />
-        <main className="flex-1 overflow-y-auto bg-white p-8">{children}</main>
+        <Topbar leadingContent={topbarLeadingContent} />
+        <TopbarContentProvider leadingContent={topbarLeadingContent} setLeadingContent={setTopbarLeadingContent}>
+          <main className="flex-1 overflow-y-auto bg-white p-8">{children}</main>
+        </TopbarContentProvider>
       </div>
 
       {/* AI Panel */}

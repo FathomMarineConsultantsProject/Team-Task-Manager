@@ -3,6 +3,7 @@
 import { formatDuration, type ProjectManHoursTotals } from "@/lib/manHours";
 import { normalizeStatus, STATUS_CONFIG } from "@/lib/statusConfig";
 import { isLiveManHoursTaskRunning, type LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
+import { getReportStageClasses, type TaskReportingStage } from "@/lib/taskReportingStage";
 
 type ProjectManHoursProps = {
   asOf?: string | null;
@@ -11,6 +12,7 @@ type ProjectManHoursProps = {
   loading: boolean;
   error: string | null;
   retry: () => void;
+  taskStagesById?: Record<string, TaskReportingStage>;
 };
 
 function taskState(task: LiveTaskManHoursSummary) {
@@ -35,7 +37,7 @@ function recentActivityValue(value: string | null) {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-export default function ProjectManHours({ asOf, taskSummaries, projectTotals, loading, error, retry }: ProjectManHoursProps) {
+export default function ProjectManHours({ asOf, taskSummaries, projectTotals, loading, error, retry, taskStagesById = {} }: ProjectManHoursProps) {
   const sortedTasks = [...taskSummaries].sort((left, right) => {
     const groupDifference = taskSortGroup(left) - taskSortGroup(right);
     if (groupDifference !== 0) return groupDifference;
@@ -81,21 +83,27 @@ export default function ProjectManHours({ asOf, taskSummaries, projectTotals, lo
           ) : (
             <div className="mt-4 overflow-hidden rounded-xl border border-slate-200">
               <div className="sticky top-0 z-10 hidden grid-cols-[minmax(180px,2fr)_120px_130px_140px_minmax(220px,2fr)] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 md:grid">
-                <span>Task</span><span>Status</span><span>Active Duration</span><span>Total Man-Hours</span><span>Assignee Effort</span>
+                <span>Task</span><span>Stage</span><span>Active Duration</span><span>Total Man-Hours</span><span>Assignee Effort</span>
               </div>
               <div className="divide-y divide-slate-100 md:max-h-[560px] md:overflow-y-auto">
                 {sortedTasks.map((task) => {
                   const tracked = task.trackingState === "tracked";
                   const status = normalizeStatus(task.status);
+                  const stage = taskStagesById[task.taskId];
+                  const stageLabel = stage?.stageTitle ?? STATUS_CONFIG[status].label;
+                  const stageColorClasses = stage ? getReportStageClasses(stage.stageColorKey) : null;
+                  const stageBadgeClass = stageColorClasses
+                    ? `${stageColorClasses.tint} ${stageColorClasses.text} border ${stageColorClasses.border}`
+                    : STATUS_CONFIG[status].badge;
                   const state = taskState(task);
                   return (
                     <article key={task.taskId} className="px-4 py-3 md:grid md:grid-cols-[minmax(180px,2fr)_120px_130px_140px_minmax(220px,2fr)] md:items-start md:gap-3">
                       <div className="min-w-0">
                         <p className="break-words text-sm font-semibold text-slate-950">{task.taskTitle}</p>
-                        <p className="mt-0.5 text-[11px] text-slate-400 md:hidden">{STATUS_CONFIG[status].label} - {state}</p>
+                        <p className="mt-0.5 text-[11px] text-slate-400 md:hidden">Workflow: {STATUS_CONFIG[status].label} - {state}</p>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-1.5 md:mt-0">
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS_CONFIG[status].badge}`}>{STATUS_CONFIG[status].label}</span>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${stageBadgeClass}`}>{stageLabel}</span>
                         <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600">{state}</span>
                       </div>
                       <div className="mt-2 md:mt-0"><p className="text-[10px] font-medium uppercase text-slate-400 md:hidden">Active Duration</p><p className="text-sm font-medium text-slate-800">{tracked ? formatDuration(task.liveActiveDurationSeconds) : "Not tracked"}</p></div>

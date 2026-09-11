@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import ProjectCard from "@/components/dashboard/ProjectCard";
 import Button from "@/components/ui/button";
 import Modal from "@/components/ui/modal";
 import { supabase } from "@/lib/supabaseClient";
 import { useExportTasks } from "@/lib/useExportTasks";
+import { useTopbarContent } from "@/components/layout/TopbarContentContext";
 
 type ProjectMemberUser = {
   id: string | null;
@@ -109,6 +111,8 @@ export default function DashboardPage() {
   const [editProjectName, setEditProjectName] = useState("");
   const [editProjectDescription, setEditProjectDescription] = useState("");
   const [editEndDate, setEditEndDate] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
+  const { setLeadingContent } = useTopbarContent();
 
   const fetchProjectsForUser = async (userId: string, isAdmin: boolean) => {
     let projectQuery = supabase
@@ -258,6 +262,35 @@ export default function DashboardPage() {
       isMounted = false;
     };
   }, []);
+
+  const normalizedProjectSearch = projectSearch.trim().toLowerCase();
+  const filteredProjects = useMemo(() => {
+    if (!normalizedProjectSearch) return projects;
+
+    return projects.filter((project) => {
+      const projectNameMatch = project.name.toLowerCase().includes(normalizedProjectSearch);
+      const ownerNameMatch = (project.users?.name ?? "").toLowerCase().includes(normalizedProjectSearch);
+      return projectNameMatch || ownerNameMatch;
+    });
+  }, [normalizedProjectSearch, projects]);
+
+  useEffect(() => {
+    setLeadingContent(
+      <label className="relative block w-full min-w-0" htmlFor="dashboard-project-search">
+        <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          id="dashboard-project-search"
+          type="search"
+          value={projectSearch}
+          onChange={(event) => setProjectSearch(event.target.value)}
+          placeholder="Search projects..."
+          className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+        />
+      </label>,
+    );
+
+    return () => setLeadingContent(null);
+  }, [projectSearch, setLeadingContent]);
 
   const handleDelete = async (projectId: string) => {
     const project = projects.find((p) => p.id === projectId);
@@ -495,9 +528,13 @@ export default function DashboardPage() {
           <p className="text-xl font-semibold text-slate-900">No projects yet</p>
           <p className="text-sm text-slate-500">Create a project to get started.</p>
         </div>
+      ) : normalizedProjectSearch && filteredProjects.length === 0 ? (
+        <div className="flex min-h-[40vh] flex-col items-center justify-center gap-4 text-center">
+          <p className="text-xl font-semibold text-slate-900">No projects match "{projectSearch.trim()}".</p>
+        </div>
       ) : (
         <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-          {projects.map((project) => {
+          {filteredProjects.map((project) => {
             return (
               <DashboardProjectCard
                 key={project.id}

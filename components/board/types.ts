@@ -27,6 +27,7 @@ export type Task = {
   title: string;
   id: string;
   column_id?: string | null;
+  sourceColumnId?: string | null;
   status?: string | null;
   progress?: number | null;
   created_at?: string | null;

@@ -49,6 +49,7 @@ import {
   listDateOnlyRange,
   parseTimeOnly,
 } from "@/lib/projectDateTime";
+import { buildColumnLookup, resolveTaskReportingStage, type TaskReportingStage } from "@/lib/taskReportingStage";
 
 type DbTask = {
   id: string;
@@ -583,6 +584,26 @@ export default function ProjectBoardPage({
   const extensionChangedRequestRef = useRef<(taskId: string) => void>(() => undefined);
   const [unreadTaskNotifs, setUnreadTaskNotifs] = useState<Record<string, number>>({});
   const [timerNow, setTimerNow] = useState<number | null>(null);
+
+  const manHoursTaskStagesById = useMemo<Record<string, TaskReportingStage>>(() => {
+    const columnsById = buildColumnLookup(projectColumns);
+    const stagesByTaskId: Record<string, TaskReportingStage> = {};
+
+    Object.values(columns).forEach((taskList) => {
+      (taskList ?? []).forEach((task) => {
+        stagesByTaskId[task.id] = resolveTaskReportingStage(
+          {
+            column_id: task.sourceColumnId === undefined ? task.column_id ?? null : task.sourceColumnId,
+            status: task.status ?? null,
+            project_id: projectId,
+          },
+          columnsById,
+        );
+      });
+    });
+
+    return stagesByTaskId;
+  }, [columns, projectColumns, projectId]);
 
   // Part 2 - Team collapse
   const [teamExpanded, setTeamExpanded] = useState(false);
@@ -2009,6 +2030,7 @@ export default function ProjectBoardPage({
         groupedColumns[columnId] = [...targetTasks, {
           id: row.id,
           column_id: row.column_id ?? columnId,
+          sourceColumnId: row.column_id ?? null,
           status: row.status ?? "todo",
           title: row.title?.trim() || "Untitled task",
           description: row.description,
@@ -3463,6 +3485,7 @@ export default function ProjectBoardPage({
         loading={manHours.loading}
         error={manHours.error}
         retry={manHours.retry}
+        taskStagesById={manHoursTaskStagesById}
       />
 
       {loading ? <div className="text-xs text-slate-500">Loading board tasks...</div> : null}
