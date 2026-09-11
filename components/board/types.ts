@@ -55,12 +55,13 @@ export type Task = {
 export type ColumnTaskMap = Record<string, Task[] | undefined>;
 
 export type ColumnSortBy =
+  | "ascending"
+  | "descending"
+  | "alphabetical"
   | "due_date"
   | "start_date"
-  | "title"
-  | "created_at"
-  | "man_hours"
-  | "completed_at";
+  | "near_due"
+  | "overdue";
 
 export type ColumnSortDirection = "asc" | "desc";
 
@@ -77,7 +78,6 @@ export type ColumnDateFilter =
 
 export interface ColumnViewState {
   sortBy?: ColumnSortBy;
-  sortDirection?: ColumnSortDirection;
   dateFilter?: ColumnDateFilter;
 }
 

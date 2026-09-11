@@ -208,61 +208,72 @@ const compareNullableNumber = (left: number | null, right: number | null, direct
   return direction === "asc" ? left - right : right - left;
 };
 
-const getColumnSortDefaultDirection = (sortBy: ColumnSortBy): ColumnSortDirection => {
-  if (sortBy === "title" || sortBy === "due_date" || sortBy === "start_date") return "asc";
-  return "desc";
+const getLeadingTaskNumber = (title: string): number | null => {
+  const match = title.trim().match(/^(\d+)/);
+  return match ? Number(match[1]) : null;
 };
 
 const sortTasksForColumnView = ({
   tasks,
   sortBy,
-  sortDirection,
+  now,
   timeZone,
   workdayEnd,
-  taskSummaryById,
 }: {
   tasks: Task[];
   sortBy: ColumnSortBy;
-  sortDirection: ColumnSortDirection;
+  now: Date;
   timeZone: string;
   workdayEnd: string;
-  taskSummaryById: Map<string, LiveTaskManHoursSummary>;
 }) => [...tasks].sort((a, b) => {
   switch (sortBy) {
-    case "title": {
-      const result = (a.title ?? "").localeCompare(b.title ?? "");
-      return sortDirection === "asc" ? result : -result;
+    case "ascending":
+    case "descending": {
+      const aNumber = getLeadingTaskNumber(a.title ?? "");
+      const bNumber = getLeadingTaskNumber(b.title ?? "");
+      const aHasNumber = aNumber !== null;
+      const bHasNumber = bNumber !== null;
+
+      if (aHasNumber && bHasNumber) {
+        if (aNumber !== bNumber) {
+          return sortBy === "ascending" ? aNumber - bNumber : bNumber - aNumber;
+        }
+        return (a.title ?? "").localeCompare(b.title ?? "");
+      }
+      if (aHasNumber) return -1;
+      if (bHasNumber) return 1;
+      return (a.title ?? "").localeCompare(b.title ?? "");
     }
+    case "alphabetical":
+      return (a.title ?? "").localeCompare(b.title ?? "");
     case "due_date":
       return compareNullableNumber(
         getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone, workdayEnd })?.getTime() ?? null,
         getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone, workdayEnd })?.getTime() ?? null,
-        sortDirection,
+        "asc",
       );
     case "start_date":
       return compareNullableNumber(
         a.start_date ? new Date(a.start_date).getTime() : null,
         b.start_date ? new Date(b.start_date).getTime() : null,
-        sortDirection,
+        "asc",
       );
-    case "created_at":
-      return compareNullableNumber(
-        a.created_at ? new Date(a.created_at).getTime() : null,
-        b.created_at ? new Date(b.created_at).getTime() : null,
-        sortDirection,
-      );
-    case "man_hours":
-      return compareNullableNumber(
-        taskSummaryById.get(a.id)?.totalManHoursSeconds ?? 0,
-        taskSummaryById.get(b.id)?.totalManHoursSeconds ?? 0,
-        sortDirection,
-      );
-    case "completed_at":
-      return compareNullableNumber(
-        a.completed_at ? new Date(a.completed_at).getTime() : null,
-        b.completed_at ? new Date(b.completed_at).getTime() : null,
-        sortDirection,
-      );
+    case "near_due": {
+      const aDue = Math.abs((getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone, workdayEnd })?.getTime() ?? Infinity) - now.getTime());
+      const bDue = Math.abs((getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone, workdayEnd })?.getTime() ?? Infinity) - now.getTime());
+      return aDue - bDue;
+    }
+    case "overdue": {
+      const aDueAt = getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone, workdayEnd });
+      const bDueAt = getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone, workdayEnd });
+      const aOver = getTaskDueState({ dueDate: a.end_date, completedAt: a.completed_at, now, timeZone, workdayEnd }).state === "overdue" && aDueAt
+        ? now.getTime() - aDueAt.getTime()
+        : -Infinity;
+      const bOver = getTaskDueState({ dueDate: b.end_date, completedAt: b.completed_at, now, timeZone, workdayEnd }).state === "overdue" && bDueAt
+        ? now.getTime() - bDueAt.getTime()
+        : -Infinity;
+      return bOver - aOver;
+    }
     default:
       return 0;
   }
@@ -3318,10 +3329,9 @@ export default function ProjectBoardPage({
               ? sortTasksForColumnView({
                   tasks: filtered,
                   sortBy: viewState.sortBy,
-                  sortDirection: viewState.sortDirection ?? getColumnSortDefaultDirection(viewState.sortBy),
+                  now,
                   timeZone: projectTimeZone,
                   workdayEnd: projectWorkdayEnd,
-                  taskSummaryById: manHours.taskSummaryById,
                 })
               : [...filtered].sort((a, b) => {
                   switch (boardSort) {

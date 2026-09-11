@@ -2,7 +2,7 @@ import { Clock3, FileDown, GripVertical, Lock, MoreHorizontal, Pencil, Plus, Sli
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
 import TaskCard from "./TaskCard";
-import type { ColumnDateFilter, ColumnId, ColumnSortBy, ColumnSortDirection, ColumnViewState, Task } from "./types";
+import type { ColumnDateFilter, ColumnId, ColumnSortBy, ColumnViewState, Task } from "./types";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 import { COLUMN_COLORS, type ColumnColorKey } from "@/lib/columnColors";
 
@@ -54,15 +54,18 @@ interface BoardColumnProps {
 
 const DEFAULT_VISIBLE_TASKS = 7;
 
-const sortOptions: { value: ColumnSortBy; label: string }[] = [
+type ColumnSortOption = ColumnSortBy | "default";
+
+const sortOptions: { value: ColumnSortOption; label: string }[] = [
+  { value: "default", label: "Default" },
+  { value: "ascending", label: "Ascending" },
+  { value: "descending", label: "Descending" },
+  { value: "alphabetical", label: "Alphabetical" },
   { value: "due_date", label: "Due Date" },
   { value: "start_date", label: "Start Date" },
-  { value: "title", label: "Task Name" },
-  { value: "created_at", label: "Created" },
-  { value: "man_hours", label: "Man-Hours" },
+  { value: "near_due", label: "Near Due First" },
+  { value: "overdue", label: "Overdue First" },
 ];
-
-const completedSortOption: { value: ColumnSortBy; label: string } = { value: "completed_at", label: "Completed Date" };
 
 const dateFilterOptions: { value: ColumnDateFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -75,30 +78,6 @@ const dateFilterOptions: { value: ColumnDateFilter; label: string }[] = [
   { value: "no_due_date", label: "No Due Date" },
   { value: "completed", label: "Completed" },
 ];
-
-const getDefaultDirection = (sortBy: ColumnSortBy): ColumnSortDirection => {
-  if (sortBy === "title" || sortBy === "due_date" || sortBy === "start_date") return "asc";
-  return "desc";
-};
-
-const getDirectionLabels = (sortBy: ColumnSortBy) => {
-  switch (sortBy) {
-    case "due_date":
-      return { asc: "Soonest first", desc: "Latest first" };
-    case "start_date":
-      return { asc: "Earliest first", desc: "Latest first" };
-    case "title":
-      return { asc: "A-Z", desc: "Z-A" };
-    case "created_at":
-      return { desc: "Newest first", asc: "Oldest first" };
-    case "man_hours":
-      return { desc: "Highest first", asc: "Lowest first" };
-    case "completed_at":
-      return { desc: "Newest first", asc: "Oldest first" };
-    default:
-      return { asc: "Ascending", desc: "Descending" };
-  }
-};
 
 export default function BoardColumn({
   columnId,
@@ -151,15 +130,12 @@ export default function BoardColumn({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const viewMenuRef = useRef<HTMLDivElement | null>(null);
   const visibleTasks = showAllTasks ? tasks : tasks.slice(0, DEFAULT_VISIBLE_TASKS);
-  const isCompletedColumn = stageType === "done" || statusKey === "done";
   const activeViewState = columnViewState ?? {};
   const hasActiveViewState = Boolean(
     activeViewState.sortBy ||
     (activeViewState.dateFilter && activeViewState.dateFilter !== "all"),
   );
-  const currentSortBy = draftViewState.sortBy ?? "due_date";
-  const currentDirection = draftViewState.sortDirection ?? getDefaultDirection(currentSortBy);
-  const directionLabels = getDirectionLabels(currentSortBy);
+  const currentSortBy: ColumnSortOption = draftViewState.sortBy ?? "default";
 
   useEffect(() => {
     setShowAllTasks(false);
@@ -219,23 +195,18 @@ export default function BoardColumn({
 
   const handleOpenViewMenu = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
-    const nextSortBy = activeViewState.sortBy ?? "due_date";
     setDraftViewState({
-      sortBy: nextSortBy,
-      sortDirection: activeViewState.sortDirection ?? getDefaultDirection(nextSortBy),
+      sortBy: activeViewState.sortBy,
       dateFilter: activeViewState.dateFilter ?? "all",
     });
     setIsViewMenuOpen((open) => !open);
     setIsMenuOpen(false);
   };
 
-  const handleSortByChange = (sortBy: ColumnSortBy) => {
+  const handleSortByChange = (sortBy: ColumnSortOption) => {
     setDraftViewState((current) => ({
       ...current,
-      sortBy,
-      sortDirection: current.sortBy === sortBy
-        ? current.sortDirection ?? getDefaultDirection(sortBy)
-        : getDefaultDirection(sortBy),
+      sortBy: sortBy === "default" ? undefined : sortBy,
     }));
   };
 
@@ -244,7 +215,6 @@ export default function BoardColumn({
     const sortBy = draftViewState.sortBy;
     onColumnViewStateChange?.(columnId, {
       sortBy,
-      sortDirection: sortBy ? draftViewState.sortDirection ?? getDefaultDirection(sortBy) : undefined,
       dateFilter: draftViewState.dateFilter ?? "all",
     });
     setIsViewMenuOpen(false);
@@ -341,21 +311,12 @@ export default function BoardColumn({
                 <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Sort by</label>
                 <select
                   value={currentSortBy}
-                  onChange={(event) => handleSortByChange(event.target.value as ColumnSortBy)}
-                  className="mb-3 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                  onChange={(event) => handleSortByChange(event.target.value as ColumnSortOption)}
+                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-200"
                 >
-                  {[...sortOptions, ...(isCompletedColumn ? [completedSortOption] : [])].map((option) => (
+                  {sortOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
-                </select>
-                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Direction</label>
-                <select
-                  value={currentDirection}
-                  onChange={(event) => setDraftViewState((current) => ({ ...current, sortDirection: event.target.value as ColumnSortDirection }))}
-                  className="mb-3 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-200"
-                >
-                  <option value="asc">{directionLabels.asc}</option>
-                  <option value="desc">{directionLabels.desc}</option>
                 </select>
                 <div className="my-2 border-t border-slate-100" />
                 <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Due</label>
