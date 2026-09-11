@@ -151,6 +151,9 @@ type TaskReviewRow = {
   status: string | null;
 };
 
+type BoardSortBy = "default" | ColumnSortBy;
+type BoardTimeFilter = "all" | "today" | "week" | "month" | "overdue" | "near_due" | "completed";
+
 const isColumnViewStateActive = (state: ColumnViewState | undefined) =>
   Boolean(state?.sortBy || (state?.dateFilter && state.dateFilter !== "all"));
 
@@ -586,8 +589,8 @@ export default function ProjectBoardPage({
   // Part 3 - Pipeline search
   const [boardSearch, setBoardSearch] = useState("");
   // Part 4 - Sort & filter
-  const [boardSort, setBoardSort] = useState<"default" | "created" | "start" | "due" | "alpha" | "near_due" | "overdue">("default");
-  const [boardTimeFilter, setBoardTimeFilter] = useState<"all" | "today" | "week" | "month" | "overdue" | "near_due" | "completed">("all");
+  const [boardSort, setBoardSort] = useState<BoardSortBy>("default");
+  const [boardTimeFilter, setBoardTimeFilter] = useState<BoardTimeFilter>("all");
   const [boardMemberFilter, setBoardMemberFilter] = useState("all");
   const [columnViewState, setColumnViewState] = useState<BoardColumnViewState>({});
   const [showFilters, setShowFilters] = useState(false);
@@ -3224,18 +3227,20 @@ export default function ProjectBoardPage({
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
             <div>
               <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Sort By</label>
-              <select value={boardSort} onChange={(e) => setBoardSort(e.target.value as any)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
+              <select value={boardSort} onChange={(e) => setBoardSort(e.target.value as BoardSortBy)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
                 <option value="default">Default</option>
-                <option value="alpha">Alphabetical</option>
-                <option value="due">Due Date</option>
-                <option value="start">Start Date</option>
+                <option value="ascending">Ascending</option>
+                <option value="descending">Descending</option>
+                <option value="alphabetical">Alphabetical</option>
+                <option value="due_date">Due Date</option>
+                <option value="start_date">Start Date</option>
                 <option value="near_due">Near Due First</option>
                 <option value="overdue">Overdue First</option>
               </select>
             </div>
             <div>
               <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Time</label>
-              <select value={boardTimeFilter} onChange={(e) => setBoardTimeFilter(e.target.value as any)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
+              <select value={boardTimeFilter} onChange={(e) => setBoardTimeFilter(e.target.value as BoardTimeFilter)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none">
                 <option value="all">All Time</option>
                 <option value="today">Due Today</option>
                 <option value="week">Due This Week</option>
@@ -3323,57 +3328,25 @@ export default function ProjectBoardPage({
               }));
             }
 
-            // 5) Apply sort. A per-column sort deliberately overrides the global board sort
-            // for this column; otherwise the existing global sort behavior is preserved.
-            const sorted = viewState?.sortBy
+            const effectiveSort = viewState?.sortBy ?? (boardSort === "default" ? undefined : boardSort);
+
+            // 5) Apply sort. A per-column sort deliberately overrides the project-level
+            // board sort for this column; reset returns the column to the current board sort.
+            const sorted = effectiveSort
               ? sortTasksForColumnView({
                   tasks: filtered,
-                  sortBy: viewState.sortBy,
+                  sortBy: effectiveSort,
                   now,
                   timeZone: projectTimeZone,
                   workdayEnd: projectWorkdayEnd,
                 })
               : [...filtered].sort((a, b) => {
-                  switch (boardSort) {
-                    case "alpha": return (a.title ?? "").localeCompare(b.title ?? "");
-                    case "due": {
-                      if (!a.end_date && !b.end_date) return 0;
-                      if (!a.end_date) return 1;
-                      if (!b.end_date) return -1;
-                      return (getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity)
-                        - (getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity);
-                    }
-                    case "start": {
-                      if (!a.start_date && !b.start_date) return 0;
-                      if (!a.start_date) return 1;
-                      if (!b.start_date) return -1;
-                      return new Date(a.start_date).getTime() - new Date(b.start_date).getTime();
-                    }
-                    case "near_due": {
-                      const aDue = Math.abs((getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
-                      const bDue = Math.abs((getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
-                      return aDue - bDue;
-                    }
-                    case "overdue": {
-                      const aDueAt = getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
-                      const bDueAt = getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
-                      const aOver = getTaskDueState({ dueDate: a.end_date, completedAt: a.completed_at, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && aDueAt
-                        ? now.getTime() - aDueAt.getTime()
-                        : -Infinity;
-                      const bOver = getTaskDueState({ dueDate: b.end_date, completedAt: b.completed_at, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && bDueAt
-                        ? now.getTime() - bDueAt.getTime()
-                        : -Infinity;
-                      return bOver - aOver;
-                    }
-                    default: {
-                      // Default: future start dates pushed to bottom
-                      const aFuture = Boolean(a.start_date && a.start_date > projectToday);
-                      const bFuture = Boolean(b.start_date && b.start_date > projectToday);
-                      if (aFuture && !bFuture) return 1;
-                      if (!aFuture && bFuture) return -1;
-                      return 0;
-                    }
-                  }
+                  // Default: future start dates pushed to bottom.
+                  const aFuture = Boolean(a.start_date && a.start_date > projectToday);
+                  const bFuture = Boolean(b.start_date && b.start_date > projectToday);
+                  if (aFuture && !bFuture) return 1;
+                  if (!aFuture && bFuture) return -1;
+                  return 0;
                 });
 
             return (
