@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAppData } from "@/components/providers/AppDataProvider";
+import {
+  buildColumnLookup,
+  resolveTaskReportingStage,
+  type ReportingColumn,
+} from "@/lib/taskReportingStage";
 
 type AssignedUser = {
   id: string;
@@ -25,6 +30,7 @@ type TaskRow = {
   end_date: string | null;
   assigned_to: string | null;
   project_id: string | null;
+  column_id: string | null;
 };
 
 type SpreadsheetTaskRow = TaskRow & {
@@ -64,6 +70,7 @@ export default function SpreadsheetPage() {
   const [assigneeSearch, setAssigneeSearch] = useState("");
   const [selectedUser, setSelectedUser] = useState<DbUser | null>(null);
   const [directoryUsers, setDirectoryUsers] = useState<DbUser[]>([]);
+  const [projectColumns, setProjectColumns] = useState<ReportingColumn[]>([]);
 
   const currentUser = profile;
   const normalizedRole = (currentUser?.system_role ?? currentUser?.role ?? "").toLowerCase();
@@ -83,23 +90,35 @@ export default function SpreadsheetPage() {
     setLoading(true);
 
     try {
-      const { data: tasksData, error: tasksError } = await supabase
-        .from("tasks")
-        .select(
-          `
+      const [tasksResult, columnsResult] = await Promise.all([
+        supabase
+          .from("tasks")
+          .select(
+            `
     id,
     title,
     status,
+    column_id,
     start_date,
     end_date,
     assigned_to,
     project_id
   `,
-        );
+          ),
+        supabase
+          .from("project_board_columns")
+          .select("id, project_id, title, sort_order, color_key, stage_type, status_key")
+          .order("sort_order", { ascending: true }),
+      ]);
+      const { data: tasksData, error: tasksError } = tasksResult;
 
       if (tasksError) {
         throw tasksError;
       }
+      if (columnsResult.error) {
+        console.warn("Failed to load project stages for spreadsheet", columnsResult.error);
+      }
+      setProjectColumns((columnsResult.data ?? []) as ReportingColumn[]);
 
       const rows = (tasksData ?? []) as TaskRow[];
 
@@ -243,6 +262,7 @@ export default function SpreadsheetPage() {
     }
     return allTasks.filter((task) => task.assigned_to === selectedUser.id);
   }, [tasks, selectedUser]);
+  const columnsById = useMemo(() => buildColumnLookup(projectColumns), [projectColumns]);
 
   const handleDelete = async (taskId: string) => {
     const confirmed = window.confirm("Delete this task?");
@@ -352,7 +372,8 @@ export default function SpreadsheetPage() {
             <tr className="text-left text-xs text-gray-500 uppercase">
               <th className="px-4 py-2">Key</th>
               <th className="px-4 py-2">Summary</th>
-              <th className="px-4 py-2">Status</th>
+              <th className="px-4 py-2">Project Stage</th>
+              <th className="px-4 py-2">Workflow Status</th>
               <th className="px-4 py-2">Assignee</th>
               <th className="px-4 py-2">Start Date</th>
               <th className="px-4 py-2">Due Date</th>
@@ -362,19 +383,28 @@ export default function SpreadsheetPage() {
           <tbody>
             {filteredTasks.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
+                  <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-500">
                   No tasks to show.
                 </td>
               </tr>
             ) : (
               filteredTasks.map((task, index) => {
-                const statusKey = normalizeStatusKey(task.status);
-                const statusLabel = statusKey.replace(/_/g, " ");
+                const stage = resolveTaskReportingStage(task, columnsById);
+                const statusKey = normalizeStatusKey(stage.workflowStatus);
+                const statusLabel = stage.workflowStatusLabel;
 
                 return (
                 <tr key={task.id} className="border-t hover:bg-slate-50">
                   <td className="px-4 py-2">TASK-{index + 1}</td>
                   <td className="px-4 py-2 font-medium">{task.title ?? ""}</td>
+                  <td className="px-4 py-2">
+                    <span
+                      className="inline-block rounded px-2 py-1 text-xs font-medium"
+                      style={{ backgroundColor: `${stage.stageColor}18`, color: stage.stageColor }}
+                    >
+                      {stage.stageTitle}
+                    </span>
+                  </td>
                   <td className="px-4 py-2">
                     <span
                       className={[

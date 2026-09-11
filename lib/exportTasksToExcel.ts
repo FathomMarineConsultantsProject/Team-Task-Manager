@@ -2,6 +2,11 @@
 
 import ExcelJS from "exceljs";
 import { getProjectTimeSettings, getSignedDaysRemaining } from "@/lib/projectDateTime";
+import {
+  computeProjectStageDistribution,
+  getWorkflowStatusLabel,
+  type ReportingColumn,
+} from "@/lib/taskReportingStage";
 
 // -------------------------------------------------------------------
 // Types
@@ -24,6 +29,9 @@ export type ExportTask = {
   requiredBy?: string | null;
   reviewCompletedBy?: string | null;
   documentReferenceUrl?: string | null;
+  columnId?: string | null;
+  stageTitle?: string | null;
+  stageColor?: string | null;
   column?: string | null;
   draftReviewStartDate?: string | null;
   reviewDueDate?: string | null;
@@ -67,6 +75,7 @@ export type ExportProjectData = {
   projectReviewers?: string[];
   teamMembers: string[];
   tasks: ExportTask[];
+  projectStages?: ReportingColumn[];
   timeZone?: string | null;
   normalWorkdayEnd?: string | null;
 };
@@ -126,9 +135,11 @@ const REVIEW_STATUS_COLUMN_KEYS = [
 const HEADER_COLUMNS = [
   { header: "S.No", key: "serialNo", width: 8 },
   { header: "Task Name", key: "title", width: 45 },
+  { header: "Project Stage", key: "stageTitle", width: 24 },
+  { header: "Workflow Status", key: "workflowStatus", width: 18 },
+  { header: "Workflow Progress %", key: "workflowProgress", width: 18 },
   { header: "Description", key: "description", width: 60 },
   { header: "Required By", key: "requiredBy", width: 28 },
-  { header: "Status", key: "status", width: 16 },
   { header: "Assigned To", key: "assignees", width: 35 },
   { header: "Created By", key: "createdBy", width: 20 },
   { header: "Start Date", key: "startDate", width: 14 },
@@ -139,10 +150,8 @@ const HEADER_COLUMNS = [
   { header: "Issued Date", key: "issuedDate", width: 16 },
   { header: "Review Completed By", key: "reviewCompletedBy", width: 24 },
   { header: "Document / Reference Link", key: "documentReferenceUrl", width: 40 },
-  { header: "Column", key: "column", width: 22 },
   { header: "Draft Review Start Date", key: "draftReviewStartDate", width: 22 },
   { header: "Review Due Date", key: "reviewDueDate", width: 18 },
-  { header: "Progress %", key: "progress", width: 12 },
   { header: "Created Date", key: "createdAt", width: 14 },
   { header: "Last Updated", key: "updatedAt", width: 14 },
   { header: "Comment Count", key: "commentsCount", width: 14 },
@@ -623,14 +632,14 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   });
 
   // ============================================================
-  // STATUS BREAKDOWN — starts at row 11
+  // PROJECT STAGE BREAKDOWN — starts at row 11
   // ============================================================
   const statusStart = 11;
 
   // Section header
   ss.mergeCells(statusStart, 1, statusStart, 4);
   const sbTitleCell = ss.getRow(statusStart).getCell(1);
-  setSafeCellText(sbTitleCell, "STATUS BREAKDOWN");
+  setSafeCellText(sbTitleCell, "PROJECT STAGE BREAKDOWN");
   sbTitleCell.font = { size: 12, bold: true, ...WHITE_FONT };
   sbTitleCell.fill = DARK_BLUE;
   sbTitleCell.alignment = { vertical: "middle", horizontal: "center" };
@@ -641,7 +650,7 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   const sbHdrRow = statusStart + 1;
   const sbHdr = ss.getRow(sbHdrRow);
   ss.mergeCells(sbHdrRow, 1, sbHdrRow, 2);
-  setSafeCellText(sbHdr.getCell(1), "Status");
+  setSafeCellText(sbHdr.getCell(1), "Project Stage");
   ss.mergeCells(sbHdrRow, 3, sbHdrRow, 4);
   setSafeCellText(sbHdr.getCell(3), "Count");
   for (const c of [1, 3]) {
@@ -653,15 +662,27 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   }
   sbHdr.height = 24;
 
-  // Table data
-  const statusCounts: Record<string, number> = {};
-  data.tasks.forEach((t) => {
-    const label = formatStatusLabel(t.status);
-    statusCounts[label] = (statusCounts[label] ?? 0) + 1;
-  });
+  const projectStageEntries = data.projectStages?.length
+    ? computeProjectStageDistribution(
+        data.tasks.map((task) => ({
+          column_id: task.columnId ?? null,
+          status: task.status,
+        })),
+        data.projectStages,
+      )
+    : Array.from(data.tasks.reduce<Map<string, number>>((counts, task) => {
+        const label = task.stageTitle?.trim() || getWorkflowStatusLabel(task.status);
+        counts.set(label, (counts.get(label) ?? 0) + 1);
+        return counts;
+      }, new Map()).entries()).map(([label, count]) => ({
+        label,
+        count,
+        color: "",
+        columnId: null,
+        sortOrder: null,
+      }));
 
-  const statusEntries = Object.entries(statusCounts);
-  statusEntries.forEach(([label, count], idx) => {
+  projectStageEntries.forEach(({ label, count }, idx) => {
     const rowNum = sbHdrRow + 1 + idx;
     const row = ss.getRow(rowNum);
     const isAlt = idx % 2 === 1;
@@ -688,7 +709,63 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
   // ============================================================
   // TEAM MEMBERS — starts after status breakdown
   // ============================================================
-  const teamStart = sbHdrRow + 1 + statusEntries.length + 2;
+  const workflowStart = sbHdrRow + 1 + projectStageEntries.length + 2;
+
+  ss.mergeCells(workflowStart, 1, workflowStart, 4);
+  const workflowTitleCell = ss.getRow(workflowStart).getCell(1);
+  setSafeCellText(workflowTitleCell, "WORKFLOW STATUS BREAKDOWN");
+  workflowTitleCell.font = { size: 12, bold: true, ...WHITE_FONT };
+  workflowTitleCell.fill = DARK_BLUE;
+  workflowTitleCell.alignment = { vertical: "middle", horizontal: "center" };
+  workflowTitleCell.border = ALL_BORDERS;
+  ss.getRow(workflowStart).height = 28;
+
+  const workflowHdrRow = workflowStart + 1;
+  const workflowHdr = ss.getRow(workflowHdrRow);
+  ss.mergeCells(workflowHdrRow, 1, workflowHdrRow, 2);
+  setSafeCellText(workflowHdr.getCell(1), "Workflow Status");
+  ss.mergeCells(workflowHdrRow, 3, workflowHdrRow, 4);
+  setSafeCellText(workflowHdr.getCell(3), "Count");
+  for (const c of [1, 3]) {
+    const cell = workflowHdr.getCell(c);
+    cell.font = { bold: true, size: 11, ...WHITE_FONT };
+    cell.fill = DARK_BLUE;
+    cell.alignment = { vertical: "middle", horizontal: "center" };
+    cell.border = ALL_BORDERS;
+  }
+  workflowHdr.height = 24;
+
+  const workflowCounts = data.tasks.reduce<Map<string, number>>((counts, task) => {
+    const label = getWorkflowStatusLabel(task.status);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+    return counts;
+  }, new Map());
+  const workflowEntries = Array.from(workflowCounts.entries());
+  workflowEntries.forEach(([label, count], idx) => {
+    const rowNum = workflowHdrRow + 1 + idx;
+    const row = ss.getRow(rowNum);
+    const isAlt = idx % 2 === 1;
+
+    ss.mergeCells(rowNum, 1, rowNum, 2);
+    setSafeCellText(row.getCell(1), label);
+    row.getCell(1).font = { size: 11, color: { argb: "FF334155" } };
+    row.getCell(1).alignment = { vertical: "middle" };
+    row.getCell(1).border = ALL_BORDERS;
+
+    ss.mergeCells(rowNum, 3, rowNum, 4);
+    setSafeCellText(row.getCell(3), count);
+    row.getCell(3).font = { bold: true, size: 11 };
+    row.getCell(3).alignment = { vertical: "middle", horizontal: "center" };
+    row.getCell(3).border = ALL_BORDERS;
+
+    if (isAlt) {
+      row.getCell(1).fill = ALT_ROW_FILL;
+      row.getCell(3).fill = ALT_ROW_FILL;
+    }
+    row.height = 22;
+  });
+
+  const teamStart = workflowHdrRow + 1 + workflowEntries.length + 2;
 
   // Section header
   ss.mergeCells(teamStart, 1, teamStart, 4);
@@ -761,14 +838,16 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
     const task = prepared.task;
     const norm = normalizeStatus(task.status);
     const daysRemaining = getDaysRemaining(task.dueDate, projectTime.timeZone, projectTime.normalWorkdayEnd, exportNow);
-    const progress = getProgress(task.status);
+    const workflowProgress = getProgress(task.status);
 
     const rowValues: Record<string, string | number> = {
       serialNo: prepared.serialNo,
       title: sanitizeExcelText(task.title),
+      stageTitle: sanitizeExcelText(task.stageTitle ?? task.column ?? getWorkflowStatusLabel(task.status)),
+      workflowStatus: sanitizeExcelText(getWorkflowStatusLabel(task.status)),
+      workflowProgress,
       description: truncateExcelText(task.description ?? ""),
       requiredBy: sanitizeExcelText(task.requiredBy ?? ""),
-      status: sanitizeExcelText(formatStatusLabel(task.status)),
       assignees: sanitizeExcelText(task.assignees || "Unassigned"),
       createdBy: sanitizeExcelText(task.createdBy || "Unknown"),
       startDate: formatDate(task.startDate),
@@ -779,10 +858,8 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       issuedDate: formatDate(task.issuedDate ?? null),
       reviewCompletedBy: sanitizeExcelText(task.reviewCompletedBy ?? ""),
       documentReferenceUrl: sanitizeExcelText(task.documentReferenceUrl ?? ""),
-      column: sanitizeExcelText(task.column ?? ""),
       draftReviewStartDate: formatDate(task.draftReviewStartDate ?? null),
       reviewDueDate: formatDate(task.reviewDueDate ?? null),
-      progress: progress,
       createdAt: formatDate(task.createdAt),
       updatedAt: formatDate(task.updatedAt),
       commentsCount: task.commentsCount,
@@ -863,14 +940,20 @@ export async function exportProjectToExcel(data: ExportProjectData): Promise<voi
       }
     }
 
-    // ---- Status cell color ----
-    const statusCell = row.getCell("status");
+    // ---- Stage and workflow status cell color ----
+    const stageCell = row.getCell("stageTitle");
+    if (task.stageColor) {
+      stageCell.font = { ...(stageCell.font ?? {}), color: { argb: `FF${task.stageColor.replace("#", "").toUpperCase()}` }, bold: true };
+    }
+    stageCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+
+    const statusCell = row.getCell("workflowStatus");
     const statusFill = STATUS_FILLS[norm];
     if (statusFill) statusCell.fill = statusFill as ExcelJS.Fill;
     statusCell.alignment = { horizontal: "center", vertical: "middle" };
 
-    // ---- Progress cell ----
-    const progressCell = row.getCell("progress");
+    // ---- Workflow progress cell ----
+    const progressCell = row.getCell("workflowProgress");
     progressCell.alignment = { horizontal: "center", vertical: "middle" };
     progressCell.numFmt = "0";
 

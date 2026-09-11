@@ -3,6 +3,11 @@
 import { useCallback, useState } from "react";
 import { exportProjectToExcel } from "@/lib/exportTasksToExcel";
 import type { ExportPendingInput, ExportTask, ExportTaskComment, ExportTaskLink } from "@/lib/exportTasksToExcel";
+import {
+  buildColumnLookup,
+  resolveTaskReportingStage,
+  type ReportingColumn,
+} from "@/lib/taskReportingStage";
 
 type SupabaseClient = {
   from: (table: string) => any;
@@ -65,6 +70,7 @@ type ProjectReviewerRow = {
 type ExportTasksOptions = {
   statusFilter?: string;
   statusLabel?: string;
+  columnIdFilter?: string;
   taskIds?: string[];
 };
 
@@ -206,21 +212,18 @@ export function useExportTasks({
         updated_at: string | null;
       }[];
 
-      const columnNameById: Record<string, string> = {};
-      const columnNameByStatus: Record<string, string> = {};
       const { data: columnData } = await supabase
         .from("project_board_columns")
-        .select("id, title, status_key")
+        .select("id, project_id, title, sort_order, color_key, stage_type, status_key")
         .eq("project_id", projectId);
-      ((columnData ?? []) as { id: string; title: string; status_key: string }[]).forEach((column) => {
-        columnNameById[column.id] = column.title;
-        columnNameByStatus[column.status_key] ??= column.title;
-      });
+      const projectStages = (columnData ?? []) as ReportingColumn[];
+      const columnsById = buildColumnLookup(projectStages);
 
       const scopedTaskIds = options?.taskIds?.length ? new Set(options.taskIds) : null;
       taskRows = taskRows.filter((task) => {
         const matchesTaskId = scopedTaskIds ? scopedTaskIds.has(task.id) : true;
-        return matchesTaskId && statusMatchesFilter(task.status, options?.statusFilter);
+        const matchesColumn = options?.columnIdFilter ? task.column_id === options.columnIdFilter : true;
+        return matchesTaskId && matchesColumn && statusMatchesFilter(task.status, options?.statusFilter);
       });
 
       if (taskRows.length === 0) {
@@ -405,6 +408,12 @@ export function useExportTasks({
             label: link.label,
           }));
 
+        const stage = resolveTaskReportingStage({
+          column_id: t.column_id,
+          status: t.status,
+          project_id: projectId,
+        }, columnsById);
+
         return {
           id: t.id,
           title: t.title ?? "Untitled",
@@ -422,9 +431,10 @@ export function useExportTasks({
           requiredBy: t.required_by,
           reviewCompletedBy: t.review_completed_by,
           documentReferenceUrl: linkItems[0]?.url ?? null,
-          column: t.column_id
-            ? (columnNameById[t.column_id] ?? columnNameByStatus[t.status ?? ""] ?? "")
-            : (columnNameByStatus[t.status ?? ""] ?? ""),
+          columnId: stage.columnId,
+          stageTitle: stage.stageTitle,
+          stageColor: stage.stageColor,
+          column: stage.stageTitle,
           draftReviewStartDate: isDraftReview ? t.draft_review_started_at : null,
           reviewDueDate: isDraftReview ? t.draft_review_due_at : null,
           createdAt: t.created_at,
@@ -484,6 +494,7 @@ export function useExportTasks({
         projectReviewers: projectReviewerNames,
         teamMembers: teamMemberNames,
         tasks: exportTasks,
+        projectStages,
         timeZone: exportTimeZone,
         normalWorkdayEnd: exportWorkdayEnd,
       });

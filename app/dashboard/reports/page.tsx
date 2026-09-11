@@ -35,7 +35,6 @@ import {
 } from "@/lib/manHours";
 import {
   computeKPIs,
-  computeStatusDistribution,
   computeWorkload,
   computeVelocity,
   getOverdueTasks,
@@ -66,6 +65,13 @@ import {
   getProjectTimeSettings,
   parseDateOnly,
 } from "@/lib/projectDateTime";
+import {
+  buildColumnLookup,
+  computeProjectStageDistribution,
+  resolveTaskReportingStage,
+  type ReportingColumn,
+  type StageDistributionRow,
+} from "@/lib/taskReportingStage";
 import {
   PieChart,
   Pie,
@@ -111,6 +117,15 @@ type ProjectReviewerInfo = {
         job_role?: string | null;
       }[]
     | null;
+};
+type ProjectColumnInfo = ReportingColumn & {
+  id: string;
+  project_id: string;
+  title: string;
+  sort_order: number;
+  color_key: string | null;
+  stage_type: string | null;
+  status_key: string | null;
 };
 type TabId = "overview" | "board" | "doclist" | "activity" | "ai";
 
@@ -321,6 +336,7 @@ type ReportTaskWithDetails = AnalyticsTask & {
   title?: string | null;
   description?: string | null;
   project_id?: string;
+  column_id?: string | null;
   updated_at?: string | null;
   draft_review_started_at?: string | null;
   draft_review_due_at?: string | null;
@@ -334,6 +350,13 @@ type ReportTaskItem = {
   status: string;
   statusKey: ReportStatusKey;
   workflowStatusKey?: string;
+  workflowStatus?: string;
+  workflowStatusLabel?: string;
+  columnId?: string | null;
+  stageTitle: string;
+  stageColor: string;
+  stageColorKey?: string | null;
+  stageSortOrder?: number | null;
   color: string;
   projectName?: string;
   draftReviewDueDate?: string;
@@ -409,6 +432,7 @@ type ExecutiveReportData = {
     overdue: number;
   };
   statusDistribution: { label: string; count: number; color: string }[];
+  stageDistribution?: StageDistributionRow[];
   statusSummary: {
     todo: number;
     inProgress: number;
@@ -663,10 +687,12 @@ function toReportTaskItem(
   scopeWindow?: ReportScopeWindow,
   logs: (AnalyticsLog & { task_id?: string })[] = [],
   comments: EnrichedComment[] = [],
+  columnsById: Map<string, ReportingColumn> = new Map(),
 ): ReportTaskItem {
   const statusKey = deriveReportStatus(task as ReportTask);
   const status = REPORT_STATUS[statusKey];
   const workflowStatusKey = normalizeStatus(task.status);
+  const stage = resolveTaskReportingStage(task, columnsById);
   const dependencies = dependenciesByTaskId.get(task.id) ?? [];
   const pendingDependencies = dependencies.filter((item) => clean(item.status).toLowerCase() === "pending");
   const pendingDependencyTitles = pendingDependencies
@@ -698,6 +724,13 @@ function toReportTaskItem(
     status: status.label,
     statusKey,
     workflowStatusKey,
+    workflowStatus: stage.workflowStatus,
+    workflowStatusLabel: stage.workflowStatusLabel,
+    columnId: stage.columnId,
+    stageTitle: stage.stageTitle,
+    stageColor: stage.stageColor,
+    stageColorKey: stage.stageColorKey,
+    stageSortOrder: stage.stageSortOrder,
     color: status.color,
     projectName: task.project_id ? projectsById.get(task.project_id)?.name ?? undefined : undefined,
     draftReviewDueDate,
@@ -1141,6 +1174,7 @@ function buildGanttPdfData(
   logs: (AnalyticsLog & { task_id?: string })[] = [],
   comments: EnrichedComment[] = [],
   options: GanttPdfOptions = {},
+  columnsById: Map<string, ReportingColumn> = new Map(),
 ) {
   const isFullProjectReport = options.reportScope === "full_project";
   const datedTasks = tasks
@@ -1183,7 +1217,7 @@ function buildGanttPdfData(
       const span = getTaskBarSpan(start, end, rangeStart, rangeEnd);
       if (!span) return null;
       const item: GanttPdfItem = {
-        ...toReportTaskItem(task, usersById, projectsById, dependenciesByTaskId, scopeWindow, logs, comments),
+        ...toReportTaskItem(task, usersById, projectsById, dependenciesByTaskId, scopeWindow, logs, comments, columnsById),
         startValue: start.toISOString(),
         endValue: end.toISOString(),
         left: span.left,
@@ -1324,6 +1358,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
   const healthDot = report.health.riskLevel === "High" ? "🔴" : report.health.riskLevel === "Medium" ? "🟡" : "🟢";
   const healthLabel = report.health.riskLevel === "High" ? "At Risk" : report.health.riskLevel === "Medium" ? "Attention Required" : "Healthy";
   const activeTasks = Math.max(0, report.kpis.total - report.kpis.completed);
+  const visibleStageDistribution = report.stageDistribution?.length ? report.stageDistribution : report.statusDistribution;
   const leadDisplay = formatLeadDisplay(report.leads);
   const reviewerDisplay = report.reviewers?.length ? report.reviewers.join(", ") : null;
 
@@ -1398,7 +1433,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
         </div>
         <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_320px]">
           <div className="space-y-2">
-            {report.statusDistribution.map((status) => (
+            {visibleStageDistribution.map((status) => (
               <div key={status.label}>
                 <div className="mb-1 flex justify-between text-xs text-slate-500">
                   <span>{status.label}</span>
@@ -1431,7 +1466,10 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                     <div className="h-full rounded-full" style={{ width: task.statusKey === "overdue" ? "100%" : task.statusKey === "near_due" ? "78%" : "52%", backgroundColor: task.color }} />
                   </div>
                 </div>
-                <span className="text-xs font-semibold" style={{ color: task.color }}>{task.status}</span>
+                <div className="text-xs font-semibold" style={{ color: task.stageColor }}>
+                  <p>{task.stageTitle}</p>
+                  <p className="text-[10px] font-normal text-slate-400">Workflow: {task.workflowStatusLabel}</p>
+                </div>
               </div>
             ))
           )}
@@ -1486,7 +1524,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                 <div className="flex border-b border-slate-200 pb-1 mb-2">
                   <div className="w-[220px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Task</div>
                   <div className="w-[90px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Owner</div>
-                  <div className="w-[70px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Status</div>
+                  <div className="w-[110px] shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-400 px-2">Project Stage</div>
                   <div className="flex-1 relative" style={{ minWidth: 400 }}>
                     {months.map((m) => (
                       <span key={m.label} className="absolute text-[9px] font-semibold text-slate-400 -top-0.5" style={{ left: `${m.left}%` }}>{m.label}</span>
@@ -1497,14 +1535,14 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                   <div key={task.id} className={`flex items-center py-1.5 ${i % 2 === 0 ? "bg-white" : "bg-slate-50/60"} border-b border-slate-100`}>
                     <div className="w-[220px] shrink-0 px-2 text-xs font-medium text-slate-900 break-words leading-tight" title={task.title}>{task.title}</div>
                     <div className="w-[90px] shrink-0 px-2 text-[11px] text-slate-500 truncate" title={task.owner}>{task.owner}</div>
-                    <div className="w-[70px] shrink-0 px-2">
-                      <span className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ backgroundColor: `${task.color}18`, color: task.color }}>{task.status}</span>
+                    <div className="w-[110px] shrink-0 px-2">
+                      <span className="inline-flex max-w-full rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ backgroundColor: `${task.stageColor}18`, color: task.stageColor }}>{task.stageTitle}</span>
                     </div>
                     <div className="flex-1 relative h-5" style={{ minWidth: 400 }}>
                       {report.gantt.currentWeekLeft !== null && i === 0 && (
                         <div className="absolute top-0 bottom-0 w-px bg-slate-900 z-10" style={{ left: `${report.gantt.currentWeekLeft}%` }} />
                       )}
-                      <div className="absolute rounded-sm h-3 top-1" style={{ left: `${Math.max(0, Math.min(99, task.left))}%`, width: `${Math.max(1.5, Math.min(100 - task.left, task.width))}%`, backgroundColor: task.color }} />
+                      <div className="absolute rounded-sm h-3 top-1" style={{ left: `${Math.max(0, Math.min(99, task.left))}%`, width: `${Math.max(1.5, Math.min(100 - task.left, task.width))}%`, backgroundColor: task.stageColor }} />
                     </div>
                   </div>
                 ))}
@@ -1533,7 +1571,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                     <th className="w-[22%] px-3 py-2">Impact</th>
                     <th className="w-[12%] px-3 py-2">Severity</th>
                     <th className="w-[18%] px-3 py-2">Owner</th>
-                    <th className="w-[18%] px-3 py-2">Status</th>
+                    <th className="w-[18%] px-3 py-2">Project Stage</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1543,7 +1581,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                       <td className="px-3 py-2 text-slate-600 text-xs">{r.impact}</td>
                       <td className="px-3 py-2"><span className={`inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold ${r.severity === "High" ? "bg-red-50 text-red-700" : r.severity === "Medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{r.severity}</span></td>
                       <td className="px-3 py-2 text-slate-600 truncate" title={r.owner}>{r.owner}</td>
-                      <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${r.color}18`, color: r.color }}>{r.status}</span></td>
+                      <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${r.stageColor}18`, color: r.stageColor }}>{r.stageTitle}</span></td>
                     </tr>
                   ))}
                 </tbody>
@@ -1565,7 +1603,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                   <th className="w-[35%] px-3 py-2">Action</th>
                   <th className="w-[20%] px-3 py-2">Owner</th>
                   <th className="w-[18%] px-3 py-2">Due Date</th>
-                  <th className="w-[15%] px-3 py-2">Status</th>
+                  <th className="w-[15%] px-3 py-2">Project Stage</th>
                   <th className="w-[12%] px-3 py-2">Priority</th>
                 </tr>
               </thead>
@@ -1575,7 +1613,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                     <td className="px-3 py-2 font-medium text-slate-900 break-words" title={t.title}>{t.title}</td>
                     <td className="px-3 py-2 text-slate-600 truncate" title={t.owner}>{t.owner}</td>
                     <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{t.dueDate}</td>
-                    <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${t.color}18`, color: t.color }}>{t.status}</span></td>
+                    <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${t.stageColor}18`, color: t.stageColor }}>{t.stageTitle}</span></td>
                     <td className="px-3 py-2"><span className={`inline-flex rounded-md px-2 py-0.5 text-[10px] font-bold ${t.priority === "High" ? "bg-red-50 text-red-700" : t.priority === "Medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>{t.priority}</span></td>
                   </tr>
                 ))}
@@ -1597,8 +1635,8 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                   <th className="w-[35%] px-3 py-2">Task</th>
                   <th className="w-[20%] px-3 py-2">Owner</th>
                   <th className="w-[18%] px-3 py-2">Due Date</th>
-                  <th className="w-[15%] px-3 py-2">Status</th>
-                  <th className="w-[12%] px-3 py-2">Progress</th>
+                  <th className="w-[15%] px-3 py-2">Project Stage</th>
+                  <th className="w-[12%] px-3 py-2">Workflow Progress</th>
                 </tr>
               </thead>
               <tbody>
@@ -1607,7 +1645,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                     <td className="px-3 py-2 font-medium text-slate-900 break-words" title={t.title}>{t.title}</td>
                     <td className="px-3 py-2 text-slate-600 truncate" title={t.owner}>{t.owner}</td>
                     <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{t.dueDate}</td>
-                    <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${t.color}18`, color: t.color }}>{t.status}</span></td>
+                    <td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${t.stageColor}18`, color: t.stageColor }}>{t.stageTitle}</span></td>
                     <td className="px-3 py-2">
                       <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
                         <div className="h-full rounded-full" style={{ width: t.statusKey === "overdue" ? "100%" : t.statusKey === "near_due" ? "78%" : "52%", backgroundColor: t.color }} />
@@ -1632,7 +1670,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                 <tr className="text-left text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                   <th className="px-2 py-2 w-[18%]">Task</th>
                   <th className="px-2 py-2 w-[10%]">Owner</th>
-                  <th className="px-2 py-2 w-[8%]">Status</th>
+                  <th className="px-2 py-2 w-[10%]">Project Stage</th>
                   <th className="px-2 py-2 w-[6%]">Prog</th>
                   <th className="px-2 py-2 w-[9%]">Start</th>
                   <th className="px-2 py-2 w-[9%]">Due</th>
@@ -1647,7 +1685,7 @@ function ExecutiveReport({ report }: { report: ExecutiveReportData }) {
                   <tr key={t.id} className="border-t border-slate-100 align-top">
                     <td className="px-2 py-1.5 font-medium text-slate-900 break-words leading-tight" title={t.title}>{t.title}</td>
                     <td className="px-2 py-1.5 text-slate-600 truncate" title={t.owner}>{t.owner}</td>
-                    <td className="px-2 py-1.5"><span className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ backgroundColor: `${t.color}18`, color: t.color }}>{t.status}</span></td>
+                    <td className="px-2 py-1.5"><span className="inline-flex rounded px-1.5 py-0.5 text-[9px] font-bold" style={{ backgroundColor: `${t.stageColor}18`, color: t.stageColor }}>{t.stageTitle}</span></td>
                     <td className="px-2 py-1.5 text-slate-600 tabular-nums">{t.progress}%</td>
                     <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{t.startDate}</td>
                     <td className="px-2 py-1.5 text-slate-600 whitespace-nowrap">{t.dueDate}</td>
@@ -1704,7 +1742,15 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
     { label: "Completed", value: report.statusSummary.completed, color: CLIENT_STATUS_COLORS.completed },
     { label: "Overdue", value: report.statusSummary.overdue, color: CLIENT_STATUS_COLORS.overdue },
   ];
-  const kanbanColumns = [
+  const projectStageRows = report.stageDistribution?.length
+    ? report.stageDistribution.map((stage) => ({
+        key: stage.columnId ?? stage.label,
+        title: stage.label,
+        color: stage.color,
+        tasks: report.taskRegister.filter((task) => (task.columnId ?? task.stageTitle) === (stage.columnId ?? stage.label)),
+      }))
+    : [];
+  const kanbanColumns = projectStageRows.length ? projectStageRows : [
     { key: "todo", title: "Todo / Not Started", color: CLIENT_STATUS_COLORS.todo, tasks: report.taskRegister.filter((task) => (task.workflowStatusKey ?? normalizeStatus(task.status)) === "todo" && task.statusKey !== "completed" && task.statusKey !== "done_early") },
     { key: "inProgress", title: "In Progress", color: CLIENT_STATUS_COLORS.inProgress, tasks: report.taskRegister.filter((task) => (task.workflowStatusKey ?? normalizeStatus(task.status)) === "in_progress" || (!task.workflowStatusKey && (task.statusKey === "in_progress" || task.statusKey === "near_due"))) },
     { key: "draftReview", title: "Draft Review", color: CLIENT_STATUS_COLORS.draftReview, tasks: draftReviewTasks },
@@ -1750,7 +1796,7 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         </div>
       </div>
 
-      <ReportSection title="Client Status Summary">
+      <ReportSection title="Workflow Status Summary">
         <div className="grid gap-3 sm:grid-cols-6">
           {statusRows.map((row) => (
             <div key={row.label} className="rounded-lg border border-slate-200 bg-white p-3">
@@ -1761,8 +1807,8 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         </div>
       </ReportSection>
 
-      <ReportSection title="Client Kanban Summary">
-        <div className="grid gap-3 lg:grid-cols-3 xl:grid-cols-6">
+      <ReportSection title="Client Project Stage Summary">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {kanbanColumns.map((column) => (
             <div key={column.key} className="min-w-0 rounded-lg border border-slate-200 bg-slate-50">
               <div className="border-b border-slate-200 px-3 py-2" style={{ borderTop: `4px solid ${column.color}` }}>
@@ -1829,7 +1875,7 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
             <div key={task.id} className="rounded-lg border border-amber-200 bg-amber-50 p-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <p className="break-words text-sm font-bold text-slate-900">{task.title}</p>
-                <span className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold text-amber-700">{task.status}</span>
+                <span className="rounded-md bg-white px-2 py-0.5 text-[10px] font-semibold" style={{ color: task.stageColor }}>{task.stageTitle}</span>
               </div>
               <p className="mt-1 text-xs text-slate-600">Due {task.dueDate && task.dueDate !== "--" ? task.dueDate : "Not set"}</p>
               <ul className="mt-2 space-y-1 text-xs text-amber-800">
@@ -1858,7 +1904,7 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
                 <div key={task.id} className="flex items-center border-b border-slate-100 py-2">
                   <div className="w-[260px] shrink-0 break-words px-2 text-xs font-medium text-slate-900">{task.title}</div>
                   <div className="relative h-5 flex-1 bg-slate-50">
-                    <div className="absolute top-1 h-3 rounded-sm" style={{ left: `${task.left}%`, width: `${Math.max(1.5, Math.min(100 - task.left, task.width))}%`, backgroundColor: clientPreviewStatusColor(task.statusKey, task.status) }} />
+                    <div className="absolute top-1 h-3 rounded-sm" style={{ left: `${task.left}%`, width: `${Math.max(1.5, Math.min(100 - task.left, task.width))}%`, backgroundColor: task.stageColor || clientPreviewStatusColor(task.statusKey, task.status) }} />
                   </div>
                 </div>
               ))}
@@ -1874,14 +1920,14 @@ function ClientExecutiveReport({ report }: { report: ExecutiveReportData }) {
         <div className="overflow-x-auto">
           <table className="w-full min-w-[720px] table-fixed text-xs">
             <thead className="bg-slate-50 text-left text-[9px] font-semibold uppercase tracking-wider text-slate-400"><tr>
-              <th className="w-[36%] px-3 py-2">Task Name</th><th className="w-[13%] px-3 py-2">Status</th><th className="w-[10%] px-3 py-2">Progress</th><th className="w-[14%] px-3 py-2">Start Date</th><th className="w-[14%] px-3 py-2">Due Date</th><th className="w-[13%] px-3 py-2">Time Left</th>
+              <th className="w-[34%] px-3 py-2">Task Name</th><th className="w-[16%] px-3 py-2">Project Stage</th><th className="w-[10%] px-3 py-2">Workflow Progress</th><th className="w-[14%] px-3 py-2">Start Date</th><th className="w-[14%] px-3 py-2">Due Date</th><th className="w-[12%] px-3 py-2">Time Left</th>
             </tr></thead>
             <tbody>{report.taskRegister.map((task) => <tr key={task.id} className="border-t border-slate-100 align-top">
               <td className="break-words px-3 py-2 font-medium text-slate-900">
                 {task.title}
                 {(task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review") && task.expectedFirstHalfDate && task.expectedFirstHalfDate !== "--" && <p className="mt-1 text-[11px] font-normal text-cyan-700">Expected First Half: {task.expectedFirstHalfDate}</p>}
                 {(task.pendingDependencyCount ?? 0) > 0 && <p className="mt-1 break-words text-[11px] font-normal text-amber-700">Pending Inputs: {task.pendingDependencySummary}</p>}
-              </td><td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${clientPreviewStatusColor(task.statusKey, task.status)}18`, color: clientPreviewStatusColor(task.statusKey, task.status) }}>{task.status}</span></td><td className="px-3 py-2">{task.progress}%</td><td className="px-3 py-2">{task.startDate}</td><td className="px-3 py-2">{task.dueDate}</td><td className="px-3 py-2">{task.timeLeft}</td>
+              </td><td className="px-3 py-2"><span className="inline-flex rounded-md px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${task.stageColor}18`, color: task.stageColor }}>{task.stageTitle}</span><p className="mt-1 text-[10px] text-slate-400">Workflow: {task.workflowStatusLabel}</p></td><td className="px-3 py-2">{task.progress}%</td><td className="px-3 py-2">{task.startDate}</td><td className="px-3 py-2">{task.dueDate}</td><td className="px-3 py-2">{task.timeLeft}</td>
             </tr>)}</tbody>
           </table>
         </div>
@@ -2124,6 +2170,7 @@ export default function ReportsPage() {
   const [users, setUsers] = useState<AnalyticsUser[]>([]);
   const [projectMembers, setProjectMembers] = useState<ProjectMemberInfo[]>([]);
   const [projectReviewers, setProjectReviewers] = useState<ProjectReviewerInfo[]>([]);
+  const [projectColumns, setProjectColumns] = useState<ProjectColumnInfo[]>([]);
 
   // Activity feed
   const [comments, setComments] = useState<EnrichedComment[]>([]);
@@ -2144,7 +2191,7 @@ export default function ReportsPage() {
   const [manHoursError, setManHoursError] = useState<string | null>(null);
 
   // Report status filter
-  const [reportStatusFilter, setReportStatusFilter] = useState<ReportStatusKey | "all">("all");
+  const [reportStatusFilter, setReportStatusFilter] = useState<string | "all">("all");
   const [timerNow, setTimerNow] = useState<number | null>(null);
   const taskDetailMembers = useMemo(
     () =>
@@ -2188,14 +2235,15 @@ export default function ReportsPage() {
         setUsers([]);
         setComments([]);
         setProjectReviewers([]);
+        setProjectColumns([]);
         return;
       }
 
       // Fetch tasks, logs, assignees, users, comments, project members, and reviewers in parallel
-      const [tasksRes, logsRes, assigneesRes, usersRes, commentsRes, pmRes, reviewersRes] = await Promise.all([
+      const [tasksRes, logsRes, assigneesRes, usersRes, commentsRes, pmRes, reviewersRes, columnsRes] = await Promise.all([
         supabase
           .from("tasks")
-          .select("id, status, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, created_at, updated_at, completed_at, project_id, title, description")
+          .select("id, status, column_id, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, created_at, updated_at, completed_at, project_id, title, description")
           .in("project_id", projectIds),
         supabase
           .from("task_logs")
@@ -2221,6 +2269,11 @@ export default function ReportsPage() {
           .from("project_reviewers")
           .select("project_id, user_id, reviewer:users!project_reviewers_user_id_fkey(id, name, email, job_role)")
           .in("project_id", projectIds),
+        supabase
+          .from("project_board_columns")
+          .select("id, project_id, title, sort_order, color_key, stage_type, status_key")
+          .in("project_id", projectIds)
+          .order("sort_order", { ascending: true }),
       ]);
 
       const projectSettingsById = new Map(projects.map((project) => [project.id, project]));
@@ -2240,6 +2293,7 @@ export default function ReportsPage() {
       setUsers(allUsers);
       setProjectMembers((pmRes.data ?? []) as ProjectMemberInfo[]);
       setProjectReviewers((reviewersRes.data ?? []) as ProjectReviewerInfo[]);
+      setProjectColumns((columnsRes.data ?? []) as ProjectColumnInfo[]);
 
       // Enrich comments
       const usersById = new Map(allUsers.map((u) => [u.id, u]));
@@ -2302,6 +2356,11 @@ export default function ReportsPage() {
     if (projectFilter === "all") return tasks;
     return tasks.filter((t: any) => t.project_id === projectFilter);
   }, [tasks, projectFilter]);
+  const filteredProjectColumns = useMemo(() => {
+    if (projectFilter === "all") return projectColumns;
+    return projectColumns.filter((column) => column.project_id === projectFilter);
+  }, [projectColumns, projectFilter]);
+  const projectColumnsById = useMemo(() => buildColumnLookup(projectColumns), [projectColumns]);
 
   const filteredLogs = useMemo(() => {
     if (projectFilter === "all") return logs;
@@ -2315,7 +2374,10 @@ export default function ReportsPage() {
 
   // ── Compute KPIs ──────────────────────────────
   const kpis = useMemo(() => computeKPIs(filteredTasks, reportNow), [filteredTasks, reportNow]);
-  const statusDist = useMemo(() => computeStatusDistribution(filteredTasks), [filteredTasks]);
+  const stageDist = useMemo(
+    () => computeProjectStageDistribution(filteredTasks as ReportTaskWithDetails[], filteredProjectColumns),
+    [filteredTasks, filteredProjectColumns],
+  );
   const overviewWorkloadScope = useMemo(
     () => scopeProjectWorkloadInputs(filteredTasks, assignees, users, projectFilter, projectMembers, allProjects),
     [filteredTasks, assignees, users, projectFilter, projectMembers, allProjects],
@@ -2329,8 +2391,6 @@ export default function ReportsPage() {
 
   // Report-level derived status computations
   const reportKpis = useMemo(() => computeReportKPIs(filteredTasks as ReportTask[], reportNow), [filteredTasks, reportNow]);
-  const reportStatusDist = useMemo(() => computeReportStatusDistribution(filteredTasks as ReportTask[], reportNow), [filteredTasks, reportNow]);
-
   // ── Unified Activity Feed ─────────────────────
   const activityFeed = useMemo<ActivityEvent[]>(() => {
     const usersById = new Map(users.map((u) => [u.id, u]));
@@ -2548,6 +2608,10 @@ export default function ReportsPage() {
       if (aiProjectFilter !== "all") {
         aiTasks = aiTasks.filter((t: any) => t.project_id === aiProjectFilter);
       }
+      const aiProjectColumns = aiProjectFilter === "all"
+        ? projectColumns
+        : projectColumns.filter((column) => column.project_id === aiProjectFilter);
+      const aiProjectColumnsById = buildColumnLookup(aiProjectColumns);
       const aiWorkloadScope = scopeProjectWorkloadInputs(aiTasks, assignees, users, aiProjectFilter, projectMembers, allProjects);
       const reportLogs = logs as (AnalyticsLog & { task_id?: string })[];
 
@@ -2563,7 +2627,7 @@ export default function ReportsPage() {
         const userTasks = aiTasks.filter((task) => task.assigned_to === aiUserFilter || assignedTaskIds.has(task.id));
         const projectsById = new Map(allProjects.map((p) => [p.id, p]));
         const reportUsersById = new Map(users.map((u) => [u.id, u]));
-        const userTaskItems = userTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById));
+        const userTaskItems = userTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById, undefined, undefined, [], [], aiProjectColumnsById));
         const userReportKpis = computeReportKPIs(userTasks as ReportTask[]);
         const activeItems = userTaskItems.filter((task) => task.statusKey !== "completed" && task.statusKey !== "done_early");
         const nearDueItems = userTaskItems.filter((task) => task.statusKey === "near_due");
@@ -2671,7 +2735,7 @@ Utilization: ${utilizationScore}%`;
               totalAssignments: userTasks.length,
             },
             workHistory: userTasks.map((task) => ({
-              ...toReportTaskItem(task, reportUsersById, projectsById),
+              ...toReportTaskItem(task, reportUsersById, projectsById, undefined, undefined, [], [], aiProjectColumnsById),
               assignedDate: formatReportDate(task.created_at),
               completedDate: formatReportDate(task.completed_at),
             })),
@@ -2762,9 +2826,10 @@ Utilization: ${utilizationScore}%`;
 
       const aiReportKpis = computeReportKPIs(aiTasks as ReportTask[]);
       const aiStatusDist = computeReportStatusDistribution(aiTasks as ReportTask[]);
+      const aiStageDist = computeProjectStageDistribution(aiTasks, aiProjectColumns);
       const projectsById = new Map(allProjects.map((p) => [p.id, p]));
       const reportUsersById = new Map(users.map((u) => [u.id, u]));
-      const taskItems = aiTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments));
+      const taskItems = aiTasks.map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments, aiProjectColumnsById));
       const statusSummary = aiTasks.reduce((summary, task) => {
         const reportStatus = deriveReportStatus(task as ReportTask);
         const workflowStatusKey = normalizeStatus(task.status);
@@ -2795,11 +2860,11 @@ Utilization: ${utilizationScore}%`;
         projectStartDate: ganttProjectStartDate,
         projectEndDate: ganttProjectEndDate,
         reportScope,
-      });
+      }, aiProjectColumnsById);
       const overdueItems = taskItems.filter((task) => task.statusKey === "overdue");
       const nearDueItems = taskItems.filter((task) => task.statusKey === "near_due");
-      const staleItems = aiTasks.filter(isStaleReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments));
-      const inactiveItems = aiTasks.filter(isInactiveReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments));
+      const staleItems = aiTasks.filter(isStaleReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments, aiProjectColumnsById));
+      const inactiveItems = aiTasks.filter(isInactiveReportTask).map((task) => toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments, aiProjectColumnsById));
       const completedItems = taskItems.filter((task) => task.statusKey === "completed" || task.statusKey === "done_early");
       const inProgressItems = taskItems.filter((task) => task.statusKey === "in_progress");
       const upcomingItems = taskItems
@@ -2808,7 +2873,7 @@ Utilization: ${utilizationScore}%`;
       const taskRegister: DetailedTaskRegisterItem[] = aiTasks.map((task) => {
         const statusKey = deriveReportStatus(task as ReportTask);
         return {
-          ...toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments),
+          ...toReportTaskItem(task, reportUsersById, projectsById, pendingDependenciesByTaskId, clientScope.window, reportLogs, comments, aiProjectColumnsById),
           progress: getDocumentProgress(statusKey),
           startDate: formatReportDate(task.start_date ?? task.created_at),
           timeLeft: getDocumentTimeLeft(task as ReportTask, statusKey),
@@ -2986,6 +3051,7 @@ Utilization: ${utilizationScore}%`;
             overdue: aiReportKpis.overdue,
           },
           statusDistribution: aiStatusDist,
+          stageDistribution: aiStageDist,
           statusSummary,
           gantt,
           timeline: taskItems
@@ -3024,7 +3090,7 @@ Utilization: ${utilizationScore}%`;
     } finally {
       setIsGeneratingAi(false);
     }
-  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, reportTimeZone, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, supabase, manHoursData, manHoursDataKey, manHoursQueryKey, manHoursLoading, manHoursError]);
+  }, [profile?.id, aiProjectFilter, aiUserFilter, aiReportType, reportAudience, reportScope, reportTimeZone, taskSelectionMode, selectedTaskIds, allProjects, tasks, users, assignees, comments, logs, commentCounts, projectMembers, projectReviewers, projectColumns, supabase, manHoursData, manHoursDataKey, manHoursQueryKey, manHoursLoading, manHoursError]);
 
   const refreshClientReportDataForPdf = useCallback(async (report: ExecutiveReportData): Promise<ExecutiveReportData> => {
     const taskIds = Array.from(new Set(report.taskRegister.map((task) => task.id).filter(Boolean)));
@@ -3034,7 +3100,7 @@ Utilization: ${utilizationScore}%`;
     try {
       const { data: latestTasks, error: latestTasksError } = await supabase
         .from("tasks")
-        .select("id, status, start_date, end_date, draft_review_due_at, completed_at")
+        .select("id, status, column_id, project_id, start_date, end_date, draft_review_due_at, completed_at")
         .in("id", taskIds);
 
       if (latestTasksError) {
@@ -3085,6 +3151,11 @@ Utilization: ${utilizationScore}%`;
       const latestTask = latestTasksById.get(item.id);
       const statusKey = latestTask?.id ? deriveReportStatus(latestTask as ReportTask) : item.statusKey;
       const workflowStatusKey = latestTask?.id ? normalizeStatus(latestTask.status) : item.workflowStatusKey ?? normalizeStatus(item.status);
+      const stage = resolveTaskReportingStage({
+        column_id: latestTask?.column_id !== undefined ? latestTask.column_id : item.columnId,
+        status: latestTask?.status !== undefined ? latestTask.status : item.workflowStatus ?? item.workflowStatusKey ?? item.status,
+        project_id: latestTask?.project_id ?? undefined,
+      }, projectColumnsById);
       const pendingDependencies = pendingDependenciesByTaskId.get(item.id) ?? [];
       const pendingDependencyTitles = dependencyRefreshFailed
         ? item.pendingDependencyTitles
@@ -3109,6 +3180,13 @@ Utilization: ${utilizationScore}%`;
         status: REPORT_STATUS[statusKey]?.label ?? item.status,
         statusKey,
         workflowStatusKey,
+        workflowStatus: stage.workflowStatus,
+        workflowStatusLabel: stage.workflowStatusLabel,
+        columnId: stage.columnId,
+        stageTitle: stage.stageTitle,
+        stageColor: stage.stageColor,
+        stageColorKey: stage.stageColorKey,
+        stageSortOrder: stage.stageSortOrder,
         color: REPORT_STATUS[statusKey]?.color ?? item.color,
         draftReviewDueDate,
         draftReviewDueValue: latestTask?.draft_review_due_at !== undefined ? latestTask.draft_review_due_at ?? null : item.draftReviewDueValue,
@@ -3132,6 +3210,13 @@ Utilization: ${utilizationScore}%`;
     };
 
     const taskRegister = report.taskRegister.map((task) => mergeItem(task));
+    const refreshedStageDistribution = computeProjectStageDistribution(
+      taskRegister.map((task) => ({
+        column_id: task.columnId,
+        status: task.workflowStatus ?? task.workflowStatusKey ?? task.status,
+      })),
+      projectColumns,
+    );
     const summarize = taskRegister.reduce((summary, task) => {
       const workflowStatusKey = task.workflowStatusKey ?? normalizeStatus(task.status);
       if (task.statusKey === "completed" || task.statusKey === "done_early") summary.completed += 1;
@@ -3147,6 +3232,7 @@ Utilization: ${utilizationScore}%`;
     return {
       ...report,
       statusSummary: summarize,
+      stageDistribution: refreshedStageDistribution,
       taskRegister,
       gantt: {
         ...report.gantt,
@@ -3170,7 +3256,7 @@ Utilization: ${utilizationScore}%`;
       draftReviewTasks: taskRegister.filter((task) => task.workflowStatusKey === "draft_review" || task.statusKey === "draft_review"),
       pendingInputTasks: taskRegister.filter((task) => (task.pendingDependencyCount ?? 0) > 0),
     };
-  }, [supabase]);
+  }, [projectColumns, projectColumnsById, supabase]);
 
   const exportAiReportPdf = useCallback(async () => {
     if (!aiReport) {
@@ -3333,14 +3419,14 @@ Utilization: ${utilizationScore}%`;
 
               {/* Charts Row */}
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                {/* Status Distribution Pie */}
+                {/* Project Stage Distribution Pie */}
                 <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Status Distribution</p>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Project Stage Distribution</p>
                   <div className="mt-4 flex items-center justify-center">
                     <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
                         <Pie
-                          data={reportStatusDist.filter((d) => d.count > 0)}
+                          data={stageDist.filter((d) => d.count > 0)}
                           cx="50%"
                           cy="50%"
                           innerRadius={55}
@@ -3350,7 +3436,7 @@ Utilization: ${utilizationScore}%`;
                           paddingAngle={3}
                           strokeWidth={0}
                         >
-                          {reportStatusDist.filter((d) => d.count > 0).map((entry, i) => (
+                          {stageDist.filter((d) => d.count > 0).map((entry, i) => (
                             <Cell key={i} fill={entry.color} />
                           ))}
                         </Pie>
@@ -3366,8 +3452,8 @@ Utilization: ${utilizationScore}%`;
                     </ResponsiveContainer>
                   </div>
                   <div className="mt-2 flex flex-wrap justify-center gap-4">
-                    {reportStatusDist.map((d) => (
-                      <div key={d.key} className="flex items-center gap-1.5 text-xs text-slate-600">
+                    {stageDist.map((d) => (
+                      <div key={d.columnId ?? d.label} className="flex items-center gap-1.5 text-xs text-slate-600">
                         <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: d.color }} />
                         {d.label}: {d.count}
                       </div>
@@ -3476,22 +3562,26 @@ Utilization: ${utilizationScore}%`;
 
           {/* ═══ BOARD TAB ═══ */}
           {activeTab === "board" && (() => {
-            const allReportTasks = (filteredTasks as (AnalyticsTask & { project_id?: string; title?: string; description?: string | null; assigned_to?: string | null })[]).map((t) => ({
-              ...t,
-              _reportStatus: deriveReportStatus(t as ReportTask),
-              _timerLabel: getTaskTimerLabel(t as ReportTask),
-              _commentCount: commentCounts[t.id] ?? 0,
-              _assignee: t.assigned_to ? usersById.get(t.assigned_to) ?? null : null,
-            }));
+            const allReportTasks = (filteredTasks as (ReportTaskWithDetails)[]).map((t) => {
+              const stage = resolveTaskReportingStage(t, projectColumnsById);
+              return {
+                ...t,
+                _reportStatus: deriveReportStatus(t as ReportTask),
+                _stage: stage,
+                _timerLabel: getTaskTimerLabel(t as ReportTask),
+                _commentCount: commentCounts[t.id] ?? 0,
+                _assignee: t.assigned_to ? usersById.get(t.assigned_to) ?? null : null,
+              };
+            });
 
             const boardFiltered = reportStatusFilter === "all"
               ? allReportTasks
-              : allReportTasks.filter((t) => t._reportStatus === reportStatusFilter);
-
-            const grouped: Record<ReportStatusKey, typeof allReportTasks> = {
-              not_started: [], in_progress: [], draft_review: [], near_due: [], done_early: [], completed: [], overdue: [],
-            };
-            boardFiltered.forEach((t) => { grouped[t._reportStatus]?.push(t); });
+              : allReportTasks.filter((t) => (t._stage.columnId ?? t._stage.stageTitle) === reportStatusFilter);
+            const stageRows = stageDist.map((stage) => ({
+              ...stage,
+              key: stage.columnId ?? stage.label,
+              tasks: boardFiltered.filter((task) => (task._stage.columnId ?? task._stage.stageTitle) === (stage.columnId ?? stage.label)),
+            }));
 
             return (
               <div className="space-y-4">
@@ -3500,30 +3590,29 @@ Utilization: ${utilizationScore}%`;
                   <button type="button" onClick={() => setReportStatusFilter("all")}
                     className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${reportStatusFilter === "all" ? "bg-slate-900 text-white" : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
                   >All ({allReportTasks.length})</button>
-                  {REPORT_STATUS_KEYS.map((key) => {
-                    const cfg = REPORT_STATUS[key];
-                    const count = allReportTasks.filter((t) => t._reportStatus === key).length;
+                  {stageDist.map((stage) => {
+                    const count = allReportTasks.filter((t) => (t._stage.columnId ?? t._stage.stageTitle) === (stage.columnId ?? stage.label)).length;
+                    const active = reportStatusFilter === (stage.columnId ?? stage.label);
                     return (
-                      <button key={key} type="button" onClick={() => setReportStatusFilter(key)}
-                        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${reportStatusFilter === key ? "text-white" : `border ${cfg.border} ${cfg.bg} ${cfg.text} hover:brightness-95`}`}
-                        style={reportStatusFilter === key ? { backgroundColor: cfg.color } : undefined}
+                      <button key={stage.columnId ?? stage.label} type="button" onClick={() => setReportStatusFilter(stage.columnId ?? stage.label)}
+                        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${active ? "text-white" : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+                        style={active ? { backgroundColor: stage.color } : undefined}
                       >
-                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: reportStatusFilter === key ? "#fff" : cfg.color }} />
-                        {cfg.label} ({count})
+                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: active ? "#fff" : stage.color }} />
+                        {stage.label} ({count})
                       </button>
                     );
                   })}
                 </div>
                 {/* Board columns */}
-                <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
-                  {REPORT_STATUS_KEYS.map((key) => {
-                    const cfg = REPORT_STATUS[key];
-                    const colTasks = grouped[key];
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+                  {stageRows.map((stage) => {
+                    const colTasks = stage.tasks;
                     return (
-                      <div key={key}>
-                        <div className="mb-2 flex items-center justify-between rounded-lg px-3 py-2" style={{ backgroundColor: cfg.color + "15" }}>
-                          <span className="text-[10px] font-bold uppercase tracking-[0.1em]" style={{ color: cfg.color }}>{cfg.label}</span>
-                          <span className="text-xs font-bold" style={{ color: cfg.color }}>{colTasks.length}</span>
+                      <div key={stage.key}>
+                        <div className="mb-2 flex items-center justify-between gap-3 rounded-lg px-3 py-2" style={{ backgroundColor: stage.color + "15" }}>
+                          <span className="break-words text-[10px] font-bold uppercase tracking-[0.1em]" style={{ color: stage.color }}>{stage.label}</span>
+                          <span className="shrink-0 text-xs font-bold" style={{ color: stage.color }}>{colTasks.length}</span>
                         </div>
                         <div className="space-y-2">
                           {colTasks.map((t: any) => (
@@ -3531,17 +3620,17 @@ Utilization: ${utilizationScore}%`;
                               key={t.id}
                               type="button"
                               onClick={() => openReportTaskDetails(t)}
-                              className={`w-full rounded-xl border bg-white/90 p-3 text-left shadow-[0_12px_24px_-20px_rgba(15,23,42,0.45)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_30px_-22px_rgba(15,23,42,0.55)] ${cfg.border}`}
-                              style={{ borderLeftWidth: "4px", borderLeftColor: cfg.color }}
+                              className="w-full rounded-xl border border-slate-200 bg-white/90 p-3 text-left shadow-[0_12px_24px_-20px_rgba(15,23,42,0.45)] transition hover:-translate-y-0.5 hover:shadow-[0_18px_30px_-22px_rgba(15,23,42,0.55)]"
+                              style={{ borderLeftWidth: "4px", borderLeftColor: stage.color }}
                             >
                               <p className="text-sm font-semibold text-slate-900 line-clamp-2">{t.title ?? "Untitled"}</p>
                               {t.end_date && (
                                 <p className="mt-1 text-[11px] text-slate-400">Due: {formatProjectDate(t.end_date, t.timeZone ?? DEFAULT_PROJECT_TIME_ZONE, { day: "2-digit", month: "short" })}</p>
                               )}
                               {getReportTimer(t) && (
-                                <span className={`mt-1.5 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${cfg.bg} ${cfg.text}`}>
-                                  {getReportTimer(t)}
-                                </span>
+                                  <span className="mt-1.5 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: `${stage.color}15`, color: stage.color }}>
+                                    {getReportTimer(t)}
+                                  </span>
                               )}
                               <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
                                 <div className="flex items-center gap-1">
@@ -3602,8 +3691,8 @@ Utilization: ${utilizationScore}%`;
                       <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Type</th>
                       <th className="px-3 py-3 text-center text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Lead</th>
                       <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Draft</th>
-                      <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Status</th>
-                      <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Progress</th>
+                      <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Project Stage</th>
+                      <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Workflow Progress</th>
                       <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Time Left</th>
                       <th className="px-3 py-3 text-center text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">Comments</th>
                     </tr>
@@ -3612,6 +3701,7 @@ Utilization: ${utilizationScore}%`;
                     {(filteredTasks as any[]).map((t, i) => {
                       const rStatus = deriveReportStatus(t as ReportTask);
                       const rCfg = REPORT_STATUS[rStatus];
+                      const stage = resolveTaskReportingStage(t, projectColumnsById);
                       const projName = allProjects.find((p) => p.id === t.project_id)?.name ?? "—";
                       const assignee = t.assigned_to ? usersById.get(t.assigned_to) ?? null : null;
                       const docId = `DOC-${String(i + 1).padStart(2, "0")}`;
@@ -3662,9 +3752,12 @@ Utilization: ${utilizationScore}%`;
                             <span className="text-[12px] font-medium text-slate-600">{draftWeek}</span>
                           </td>
                           <td className="px-3 py-2.5 align-middle">
-                            <span className={`inline-flex rounded-md border px-2 py-1 text-[11px] font-semibold ${rCfg.bg} ${rCfg.text} ${rCfg.border}`}>
-                              {rCfg.label}
-                            </span>
+                            <div className="space-y-1">
+                              <span className="inline-flex max-w-full rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: `${stage.stageColor}15`, color: stage.stageColor }}>
+                                {stage.stageTitle}
+                              </span>
+                              <p className="text-[10px] text-slate-400">Workflow: {stage.workflowStatusLabel}</p>
+                            </div>
                           </td>
                           <td className="px-3 py-2.5 align-middle">
                             <div className="flex items-center gap-2">

@@ -1,4 +1,5 @@
 import { formatDuration, type ReportEffortData } from "@/lib/manHours";
+import type { StageDistributionRow } from "@/lib/taskReportingStage";
 
 export const runtime = "nodejs";
 
@@ -19,6 +20,13 @@ type ReportTaskItem = {
   status: string;
   statusKey: ReportStatusKey;
   workflowStatusKey?: string;
+  workflowStatus?: string;
+  workflowStatusLabel?: string;
+  columnId?: string | null;
+  stageTitle?: string;
+  stageColor?: string;
+  stageColorKey?: string | null;
+  stageSortOrder?: number | null;
   color: string;
   projectName?: string;
   draftReviewDueDate?: string;
@@ -94,6 +102,7 @@ type ExecutiveReportData = {
     overdue: number;
   };
   statusDistribution: { label: string; count: number; color: string }[];
+  stageDistribution?: StageDistributionRow[];
   statusSummary: {
     todo: number;
     inProgress: number;
@@ -696,7 +705,21 @@ function bars(c: Canvas, x: number, y: number, w: number, rows: { label: string;
 }
 
 function statusText(task: ReportTaskItem) {
-  return `${task.status}${task.projectName ? ` / ${task.projectName}` : ""}`;
+  return `${stageAndWorkflowText(task)}${task.projectName ? ` / ${task.projectName}` : ""}`;
+}
+
+function stageText(task: ReportTaskItem) {
+  return clean(task.stageTitle) || task.status;
+}
+
+function workflowText(task: ReportTaskItem) {
+  return clean(task.workflowStatusLabel) || task.status;
+}
+
+function stageAndWorkflowText(task: ReportTaskItem) {
+  const stage = stageText(task);
+  const workflow = workflowText(task);
+  return stage === workflow ? stage : `${stage} / Workflow: ${workflow}`;
 }
 
 function buildClientRecommendationCards(report: ExecutiveReportData): ProjectManagerRecommendation[] {
@@ -950,7 +973,7 @@ function clientCompactBars(c: Canvas, x: number, y: number, w: number, rows: { l
 }
 
 type ClientKanbanColumn = {
-  key: "todo" | "inProgress" | "draftReview" | "inReview" | "completed" | "overdue";
+  key: string;
   title: string;
   color: string;
   tasks: DetailedTaskRegisterItem[];
@@ -978,26 +1001,22 @@ function clientKanbanSortValue(task: DetailedTaskRegisterItem, index: number) {
 }
 
 function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKanbanColumn[] {
-  const columns: ClientKanbanColumn[] = [
-    { key: "todo", title: "Todo / Not Started", color: CLIENT_STATUS_COLORS.todo, tasks: [] },
-    { key: "inProgress", title: "In Progress", color: CLIENT_STATUS_COLORS.inProgress, tasks: [] },
-    { key: "draftReview", title: "Draft Review", color: CLIENT_STATUS_COLORS.draftReview, tasks: [] },
-    { key: "inReview", title: "In Review", color: CLIENT_STATUS_COLORS.inReview, tasks: [] },
-    { key: "completed", title: "Completed", color: CLIENT_STATUS_COLORS.completed, tasks: [] },
-    { key: "overdue", title: "Overdue", color: CLIENT_STATUS_COLORS.overdue, tasks: [] },
-  ];
-  const byKey = new Map(columns.map((column) => [column.key, column]));
-
+  const columns: ClientKanbanColumn[] = [];
+  const byKey = new Map<string, ClientKanbanColumn>();
   tasks.forEach((task) => {
-    const statusLabel = clean(task.status).toLowerCase();
-    const statusKey = task.statusKey as ReportStatusKey | "in_review" | string;
-    const workflowStatusKey = clean(task.workflowStatusKey).toLowerCase();
-    if (statusKey === "completed" || statusKey === "done_early") byKey.get("completed")?.tasks.push(task);
-    else if (workflowStatusKey === "draft_review" || statusKey === "draft_review") byKey.get("draftReview")?.tasks.push(task);
-    else if (workflowStatusKey === "in_review" || statusKey === "in_review" || statusLabel.includes("review")) byKey.get("inReview")?.tasks.push(task);
-    else if (statusKey === "overdue") byKey.get("overdue")?.tasks.push(task);
-    else if (statusKey === "not_started") byKey.get("todo")?.tasks.push(task);
-    else byKey.get("inProgress")?.tasks.push(task);
+    const key = task.columnId ?? stageText(task);
+    let column = byKey.get(key);
+    if (!column) {
+      column = {
+        key,
+        title: stageText(task),
+        color: task.stageColor || clientStatusColor(task.statusKey, task.status),
+        tasks: [],
+      };
+      byKey.set(key, column);
+      columns.push(column);
+    }
+    column.tasks.push(task);
   });
 
   columns.forEach((column) => {
@@ -1007,25 +1026,39 @@ function groupTasksForClientKanban(tasks: DetailedTaskRegisterItem[]): ClientKan
       .map((row) => row.task);
   });
 
-  return columns;
+  return columns.sort((a, b) => {
+    const leftOrder = a.tasks[0]?.stageSortOrder ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = b.tasks[0]?.stageSortOrder ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return a.title.localeCompare(b.title);
+  });
 }
 
 function buildClientKanbanPage(pdf: PdfDoc, report: ExecutiveReportData) {
-  const columns = groupTasksForClientKanban(report.taskRegister ?? []);
+  const columns = report.stageDistribution?.length
+    ? report.stageDistribution.map((stage) => ({
+        key: stage.columnId ?? stage.label,
+        title: stage.label,
+        color: stage.color,
+        tasks: (report.taskRegister ?? []).filter((task) => (task.columnId ?? stageText(task)) === (stage.columnId ?? stage.label)),
+      }))
+    : groupTasksForClientKanban(report.taskRegister ?? []);
+  const columnGroups = chunk(columns, 4);
   const batchSize = 5;
-  const batchCount = Math.max(1, ...columns.map((column) => Math.ceil(column.tasks.length / batchSize)));
-  Array.from({ length: batchCount }, (_, batchIndex) => batchIndex).forEach((batchIndex) => {
+  columnGroups.forEach((columnSet, groupIndex) => {
+    const batchCount = Math.max(1, ...columnSet.map((column) => Math.ceil(column.tasks.length / batchSize)));
+    Array.from({ length: batchCount }, (_, batchIndex) => batchIndex).forEach((batchIndex) => {
     pdf.addPage((c, pageNo, pageCount) => {
-      clientSectionHeader(c, batchIndex === 0 ? "Client Kanban Summary" : "Client Kanban Summary Continued");
+      clientSectionHeader(c, groupIndex === 0 && batchIndex === 0 ? "Client Project Stage Summary" : "Client Project Stage Summary Continued");
       const columnGap = 10;
       const columnY = 86;
       const columnH = 430;
-      const columnW = (PAGE_W - M * 2 - columnGap * (columns.length - 1)) / columns.length;
+      const columnW = (PAGE_W - M * 2 - columnGap * Math.max(0, columnSet.length - 1)) / Math.max(1, columnSet.length);
       if (batchCount > 1) {
         c.text(`Page batch ${batchIndex + 1} of ${batchCount}`, M, 70, 9, COLORS.muted, true);
       }
 
-      columns.forEach((column, index) => {
+      columnSet.forEach((column, index) => {
         const x = M + index * (columnW + columnGap);
         c.rect(x, columnY, columnW, columnH, "#f8fafc", COLORS.border);
         c.rect(x, columnY, columnW, 5, column.color);
@@ -1060,6 +1093,7 @@ function buildClientKanbanPage(pdf: PdfDoc, report: ExecutiveReportData) {
       });
 
       footer(c, report.generatedAt, pageNo, pageCount);
+    });
     });
   });
 }
@@ -1135,7 +1169,7 @@ function buildClientPendingInputsPages(pdf: PdfDoc, report: ExecutiveReportData)
         c.text("No pending inputs in this report scope.", M, 112, 12, COLORS.muted);
       } else {
         const widths = [210, 95, 95, 250, 95];
-        const headers = ["Task", "Status", "Task Due Date", "Pending Input", "Input Due Date"];
+        const headers = ["Task", "Project Stage", "Task Due Date", "Pending Input", "Input Due Date"];
         const total = widths.reduce((sum, width) => sum + width, 0);
         let top = 92;
         c.rect(M, top, total, 28, "#24124d");
@@ -1156,7 +1190,7 @@ function buildClientPendingInputsPages(pdf: PdfDoc, report: ExecutiveReportData)
           cursor = M;
           c.textLines(taskLines, cursor + 5, top + 8, 8.5, COLORS.ink, true, 10);
           cursor += widths[0];
-          c.textLines(wrapCell(task.status, 14, 2), cursor + 5, top + 8, 8.5, COLORS.ink, false, 10);
+          c.textLines(wrapCell(stageAndWorkflowText(task), 16, 3), cursor + 5, top + 8, 8.5, COLORS.ink, false, 10);
           cursor += widths[1];
           c.textLines(wrapCell(task.dueDate, 14, 2), cursor + 5, top + 8, 8.5, COLORS.ink, false, 10);
           cursor += widths[2];
@@ -1180,8 +1214,8 @@ function buildScopedClientTaskRegister(pdf: PdfDoc, report: ExecutiveReportData)
     const rows = register.slice(offset, offset + 8);
     pdf.addPage((c, pageNo, pageCount) => {
       clientSectionHeader(c, offset === 0 ? "Client Task Register" : "Client Task Register Continued");
-      const widths = [310, 96, 66, 88, 88, 88];
-      const headers = ["Task Name", "Status", "Progress %", "Start Date", "Due Date", "Time Left"];
+      const widths = [284, 122, 66, 88, 88, 88];
+      const headers = ["Task Name", "Project Stage", "Workflow %", "Start Date", "Due Date", "Time Left"];
       const x = M;
       const y = 82;
       miniTable(c, x, y, widths, headers, [], 24);
@@ -1198,10 +1232,10 @@ function buildScopedClientTaskRegister(pdf: PdfDoc, report: ExecutiveReportData)
         c.rect(x, rowTop, widths.reduce((sum, width) => sum + width, 0), rowH, index % 2 === 0 ? "#ffffff" : "#f8fafc", COLORS.border);
         c.textLines(titleLines, x + 5, rowTop + 8, 8.5, COLORS.ink, true, 10);
         if (metaLines.length > 0) c.textLines(metaLines, x + 5, rowTop + 8 + titleLines.length * 10, 7.2, COLORS.muted, false, 9);
-        const cells = [task.status, `${task.progress}%`, task.startDate, task.dueDate, task.timeLeft];
+        const cells = [stageAndWorkflowText(task), `${task.progress}%`, task.startDate, task.dueDate, task.timeLeft];
         let cursor = x + widths[0];
         cells.forEach((cell, cellIndex) => {
-          c.textLines(wrap(cell, Math.floor(widths[cellIndex + 1] / 6), 2), cursor + 5, rowTop + 10, 8, cellIndex === 0 ? clientStatusColor(task.statusKey, task.status) : COLORS.ink, cellIndex === 0, 10);
+          c.textLines(wrap(cell, Math.floor(widths[cellIndex + 1] / 6), 3), cursor + 5, rowTop + 10, 8, cellIndex === 0 ? (task.stageColor || clientStatusColor(task.statusKey, task.status)) : COLORS.ink, cellIndex === 0, 10);
           cursor += widths[cellIndex + 1];
         });
         rowTop += rowH + 2;
@@ -1293,9 +1327,11 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
 
   pdf.addPage((c, pageNo, pageCount) => {
     clientSectionHeader(c, "Executive Progress Summary");
-    c.text("Task Status Distribution", 82, 88, 13, COLORS.ink, true);
-    drawClientStatusDonut(c, 220, 225, 95, 54, statusRows, statusTotal);
-    statusRows.forEach((row, index) => {
+    const stageRows = (report.stageDistribution?.length ? report.stageDistribution : statusRows).map((row) => ({ label: row.label, value: "value" in row ? row.value : row.count, color: row.color }));
+    const stageTotal = Math.max(1, stageRows.reduce((sum, row) => sum + row.value, 0));
+    c.text("Project Stage Distribution", 82, 88, 13, COLORS.ink, true);
+    drawClientStatusDonut(c, 220, 225, 95, 54, stageRows, stageTotal);
+    stageRows.slice(0, 10).forEach((row, index) => {
       const cardX = 430 + (index % 2) * 180;
       const cardY = 92 + Math.floor(index / 2) * 64;
       c.rect(cardX, cardY, 165, 52, COLORS.panel, "#d9d5f5");
@@ -1303,8 +1339,8 @@ function buildClientProjectPdf(report: ExecutiveReportData) {
       c.text(row.label.toUpperCase(), cardX + 16, cardY + 10, 8, COLORS.muted, true);
       c.text(row.value, cardX + 16, cardY + 27, 18, row.color, true);
     });
-    panel(c, M, 350, PAGE_W - M * 2, 175, "Status Breakdown");
-    clientCompactBars(c, M + 18, 388, PAGE_W - M * 2 - 36, statusRows, Math.max(1, statusTotal));
+    panel(c, M, 350, PAGE_W - M * 2, 175, "Project Stage Breakdown");
+    clientCompactBars(c, M + 18, 388, PAGE_W - M * 2 - 36, stageRows.slice(0, 8), Math.max(1, stageTotal));
     footer(c, report.generatedAt, pageNo, pageCount);
   });
 
@@ -1446,7 +1482,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
     kpi(c, M, 82, 238, "Completion", `${report.health.completionRate}%`, COLORS.green);
     kpi(c, 302, 82, 238, "Risk", report.health.riskLevel, statusBannerColor);
     kpi(c, 572, 82, 238, "Utilization", `${report.resource.averageUtilization}%`, COLORS.purple);
-    panel(c, M, 176, PAGE_W - M * 2, 128, "Status Distribution");
+    panel(c, M, 176, PAGE_W - M * 2, 128, "Workflow Status Distribution");
     const statusRows = report.statusDistribution.map((row) => ({ label: row.label, value: row.count, color: row.color }));
     const maxStatus = Math.max(1, report.kpis.total);
     statusRows.forEach((row, index) => {
@@ -1461,10 +1497,10 @@ function buildProjectPdf(report: ExecutiveReportData) {
       M,
       352,
       [260, 150, 120, 110, 138],
-      ["Task", "Owner", "Due Date", "Status", "Days Remaining"],
+      ["Task", "Owner", "Due Date", "Project Stage", "Days Remaining"],
       upcoming.slice(0, 6).map((task) => {
         const registerItem = report.taskRegister.find((item) => item.id === task.id);
-        return [task.title, task.owner, task.dueDate, task.status, registerItem?.timeLeft ?? task.dueDate];
+        return [task.title, task.owner, task.dueDate, stageText(task), registerItem?.timeLeft ?? task.dueDate];
       }),
       28,
       526,
@@ -1516,7 +1552,7 @@ function buildProjectPdf(report: ExecutiveReportData) {
       const labelW = widths.reduce((sum, width) => sum + width, 0);
       const timelineX = x + labelW + 8;
       const timelineW = PAGE_W - timelineX - M;
-      miniTable(c, x, y, widths, ["Task Name", "Owner", "Status", "Start", "Due", "Dur"], [], 24);
+      miniTable(c, x, y, widths, ["Task Name", "Owner", "Project Stage", "Start", "Due", "Dur"], [], 24);
       if (report.gantt.tasks.length === 0) {
         c.text("No dated tasks available for this Gantt range.", x + 8, y + 48, 12, COLORS.muted);
         footer(c, report.generatedAt, pageNo, pageCount);
@@ -1536,10 +1572,10 @@ function buildProjectPdf(report: ExecutiveReportData) {
         const duration = Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())
           ? "--"
           : `${Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000))}d`;
-        const row = [task.title, task.owner, task.status, formatDate(task.startValue), formatDate(task.endValue), duration];
+        const row = [task.title, task.owner, stageAndWorkflowText(task), formatDate(task.startValue), formatDate(task.endValue), duration];
         let cursor = x;
         row.forEach((cell, cellIndex) => {
-          c.textLines(wrap(cell, Math.floor(widths[cellIndex] / 6), cellIndex === 0 ? 2 : 1), cursor + 4, top + 9, 8.5, cellIndex === 2 ? statusColor(task.statusKey) : COLORS.ink, cellIndex === 2, 11);
+          c.textLines(wrap(cell, Math.floor(widths[cellIndex] / 6), cellIndex === 0 || cellIndex === 2 ? 2 : 1), cursor + 4, top + 9, 8.5, cellIndex === 2 ? (task.stageColor || statusColor(task.statusKey)) : COLORS.ink, cellIndex === 2, 11);
           cursor += widths[cellIndex];
         });
         const taskStart = new Date(task.startValue ?? report.gantt.rangeStart).getTime();
@@ -1573,16 +1609,16 @@ function buildProjectPdf(report: ExecutiveReportData) {
   });
 
   const riskRows = [
-    ...report.risks.overdue.map((task) => [task.title, "Schedule delay", "High", task.owner, "Confirm blocker, owner, and recovery date.", task.status]),
-    ...report.risks.nearDue.map((task) => [task.title, "Near-term delivery risk", "Medium", task.owner, "Run near-due checkpoint and protect delivery path.", task.status]),
-    ...report.risks.stale.map((task) => [task.title, "Stale execution signal", "Medium", task.owner, "Require status update or closure decision.", task.status]),
-    ...report.risks.inactive.map((task) => [task.title, "Inactive ownership", "Low", task.owner, "Assign accountable owner and next action.", task.status]),
+    ...report.risks.overdue.map((task) => [task.title, "Schedule delay", "High", task.owner, "Confirm blocker, owner, and recovery date.", stageAndWorkflowText(task)]),
+    ...report.risks.nearDue.map((task) => [task.title, "Near-term delivery risk", "Medium", task.owner, "Run near-due checkpoint and protect delivery path.", stageAndWorkflowText(task)]),
+    ...report.risks.stale.map((task) => [task.title, "Stale execution signal", "Medium", task.owner, "Require status update or closure decision.", stageAndWorkflowText(task)]),
+    ...report.risks.inactive.map((task) => [task.title, "Inactive ownership", "Low", task.owner, "Assign accountable owner and next action.", stageAndWorkflowText(task)]),
   ];
   if (riskRows.length > 0) {
     chunk(riskRows, 10).forEach((rows, chunkIndex) => {
       pdf.addPage((c, pageNo, pageCount) => {
         sectionHeader(c, chunkIndex === 0 ? "Risk Register" : "Risk Register Continued");
-        miniTable(c, M, 82, [190, 122, 68, 96, 210, 70], ["Risk", "Impact", "Severity", "Owner", "Mitigation", "Status"], rows, 40);
+        miniTable(c, M, 82, [190, 122, 68, 96, 210, 70], ["Risk", "Impact", "Severity", "Owner", "Mitigation", "Project Stage"], rows, 40);
         footer(c, report.generatedAt, pageNo, pageCount);
       });
     });
@@ -1597,8 +1633,8 @@ function buildProjectPdf(report: ExecutiveReportData) {
         M,
         82,
         [250, 110, 90, 92, 72, 110],
-        ["Action", "Owner", "Due Date", "Status", "Priority", "Days Remaining"],
-        rows.map((task) => [task.title, task.owner, task.dueDate, task.status, task.priority, task.timeLeft]),
+        ["Action", "Owner", "Due Date", "Project Stage", "Priority", "Days Remaining"],
+        rows.map((task) => [task.title, task.owner, task.dueDate, stageAndWorkflowText(task), task.priority, task.timeLeft]),
         34,
       );
       footer(c, report.generatedAt, pageNo, pageCount);
@@ -1623,8 +1659,8 @@ function buildProjectPdf(report: ExecutiveReportData) {
         M,
         82,
         [120, 70, 58, 44, 64, 64, 62, 42, 54, 178],
-        ["Task", "Owner", "Status", "Prog", "Start", "Due", "Time Left", "Cmnts", "Priority", "Description"],
-        rows.map((task) => [task.title, task.owner, task.status, `${task.progress}%`, task.startDate, task.dueDate, task.timeLeft, task.comments, task.priority, wrapCell(task.description, 26, 2).join(" ")]),
+        ["Task", "Owner", "Project Stage", "Workflow %", "Start", "Due", "Time Left", "Cmnts", "Priority", "Description"],
+        rows.map((task) => [task.title, task.owner, stageAndWorkflowText(task), `${task.progress}%`, task.startDate, task.dueDate, task.timeLeft, task.comments, task.priority, wrapCell(task.description, 26, 2).join(" ")]),
         46,
       );
       footer(c, report.generatedAt, pageNo, pageCount);
@@ -1706,7 +1742,7 @@ function buildUserPdf(report: UserPerformanceReportData) {
   chunk(userResponsibilities, 13).forEach((rows, chunkIndex) => {
     pdf.addPage((c, pageNo, pageCount) => {
       userSectionHeader(c, chunkIndex === 0 ? "Current Responsibilities" : "Current Responsibilities Continued");
-      miniTable(c, M, 82, [330, 160, 120, 130], ["Task", "Owner", "Due Date", "Status"], rows.map((task) => [task.title, task.owner, task.dueDate, statusText(task)]), 32);
+      miniTable(c, M, 82, [330, 160, 120, 130], ["Task", "Owner", "Due Date", "Project Stage"], rows.map((task) => [task.title, task.owner, task.dueDate, statusText(task)]), 32);
       footer(c, report.generatedAt, pageNo, pageCount);
     });
   });

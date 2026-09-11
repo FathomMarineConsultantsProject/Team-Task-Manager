@@ -111,6 +111,7 @@ export type ReportTask = {
   completed_at?: string | null;
   assigned_to?: string | null;
   project_id?: string;
+  column_id?: string | null;
   title?: string;
   timeZone?: string | null;
   normalWorkdayEnd?: string | null;

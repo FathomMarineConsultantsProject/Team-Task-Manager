@@ -7,6 +7,12 @@ import { useAppData } from "@/components/providers/AppDataProvider";
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
 import { STATUS_CONFIG, normalizeStatus } from "@/lib/statusConfig";
 import {
+  buildColumnLookup,
+  computeProjectStageDistribution,
+  resolveTaskReportingStage,
+  type ReportingColumn,
+} from "@/lib/taskReportingStage";
+import {
   formatWeekLabel,
   getAvailableWeeks,
   getTaskDate,
@@ -40,6 +46,7 @@ type TaskRow = {
   id: string;
   title: string | null;
   status: string | null;
+  column_id: string | null;
   assigned_to: string | null;
   project_id: string | null;
   start_date: string | null;
@@ -187,6 +194,7 @@ export default function RoadmapGrid() {
   const { supabase, profile, isAuthLoading } = useAppData();
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<RoadmapProjectRecord[]>([]);
+  const [projectColumns, setProjectColumns] = useState<ReportingColumn[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string>("all");
@@ -285,18 +293,21 @@ export default function RoadmapGrid() {
         if (accessibleProjectIds.length === 0) {
           if (isMounted) {
             setProjects([]);
+            setProjectColumns([]);
             setIsLoading(false);
           }
           return;
         }
 
-        const { data: taskRows, error: taskError } = await supabase
+        const [taskResult, columnResult] = await Promise.all([
+          supabase
           .from("tasks")
           .select(
             `
               id,
               title,
               status,
+              column_id,
               assigned_to,
               project_id,
               updated_at,
@@ -311,10 +322,23 @@ export default function RoadmapGrid() {
             `,
           )
           .in("project_id", accessibleProjectIds)
-          .order("created_at", { ascending: false, nullsFirst: false });
+          .order("created_at", { ascending: false, nullsFirst: false }),
+          supabase
+            .from("project_board_columns")
+            .select("id, project_id, title, sort_order, color_key, stage_type, status_key")
+            .in("project_id", accessibleProjectIds)
+            .order("sort_order", { ascending: true }),
+        ]);
+        const { data: taskRows, error: taskError } = taskResult;
 
         if (taskError) {
           throw taskError;
+        }
+        if (columnResult.error) {
+          console.warn("Roadmap project stages unavailable", columnResult.error);
+        }
+        if (isMounted) {
+          setProjectColumns((columnResult.data ?? []) as ReportingColumn[]);
         }
 
         const tasksByProjectId = new Map<string, RoadmapTask[]>();
@@ -345,6 +369,7 @@ export default function RoadmapGrid() {
             id: task.id,
             title: task.title,
             status: task.status,
+            column_id: task.column_id,
             assigned_to: task.assigned_to,
             assigned_user: normalizedAssignedUser,
             project_id: task.project_id,
@@ -519,19 +544,14 @@ export default function RoadmapGrid() {
       .filter((project): project is RoadmapProjectRecord => project !== null);
   }, [currentWeek, selectedProjects]);
 
-  const kanbanGroups = useMemo(() => {
-    const groups = {
-      todo: [] as RoadmapTask[],
-      in_progress: [] as RoadmapTask[],
-      draft_review: [] as RoadmapTask[],
-      in_review: [] as RoadmapTask[],
-      done: [] as RoadmapTask[],
-    };
+  const roadmapColumnsById = useMemo(() => buildColumnLookup(projectColumns), [projectColumns]);
 
+  const kanbanGroups = useMemo(() => {
     if (!currentWeek) {
-      return groups;
+      return [] as Array<{ key: string; title: string; color: string; tasks: RoadmapTask[] }>;
     }
 
+    const visibleTasks: RoadmapTask[] = [];
     visibleProjects.forEach((project) => {
       project.tasksInWeek.forEach((task) => {
         const taskDate = getTaskDate(task);
@@ -539,23 +559,24 @@ export default function RoadmapGrid() {
           return;
         }
 
-        if (!task.status) {
-          return;
-        }
-
-        let status = task.status.toLowerCase();
-        if (status === "review") {
-          status = "in_review";
-        }
-
-        if (status in groups) {
-          groups[status as keyof typeof groups].push(task);
-        }
+        visibleTasks.push(task);
       });
     });
 
-    return groups;
-  }, [visibleProjects, currentWeek]);
+    const visibleProjectIds = new Set(visibleProjects.map((project) => project.id));
+    const relevantColumns = projectColumns.filter((column) => !column.project_id || visibleProjectIds.has(column.project_id));
+    const stageRows = computeProjectStageDistribution(visibleTasks, relevantColumns);
+
+    return stageRows.map((stage) => ({
+      key: stage.columnId ?? stage.label,
+      title: stage.label,
+      color: stage.color,
+      tasks: visibleTasks.filter((task) => {
+        const resolved = resolveTaskReportingStage(task, roadmapColumnsById);
+        return (resolved.columnId ?? resolved.stageTitle) === (stage.columnId ?? stage.label);
+      }),
+    }));
+  }, [visibleProjects, currentWeek, projectColumns, roadmapColumnsById]);
 
   const epicGroups = useMemo(() => {
     if (!currentWeek) {
@@ -915,14 +936,17 @@ export default function RoadmapGrid() {
         )}
 
         {zoom === "week" && layout === "kanban" && (
-          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-            {Object.entries(kanbanGroups).map(([status, tasks]) => {
-              const ui = STATUS_UI[status as keyof typeof STATUS_UI];
+          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+            {kanbanGroups.map((column) => {
+              const tasks = column.tasks;
               return (
-                <div key={status}>
-                  <div className={`mb-3 rounded-md px-3 py-2 text-xs font-semibold ${ui?.header ?? ""}`}>{ui?.label ?? status.toUpperCase()}</div>
+                <div key={column.key}>
+                  <div className="mb-3 flex items-center justify-between gap-3 rounded-md px-3 py-2 text-xs font-semibold" style={{ backgroundColor: `${column.color}15`, color: column.color }}>
+                    <span className="break-words uppercase tracking-[0.08em]">{column.title}</span>
+                    <span className="shrink-0">{tasks.length}</span>
+                  </div>
                   {tasks.map((task) => (
-                    <div key={task.id} onClick={() => { const project = visibleProjects.find((p) => p.id === task.project_id || p.tasksInWeek.some((t) => t.id === task.id)); if (project) openRoadmapTaskDetails(task, project); }} className={`mb-3 cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:shadow-md border-l-4 ${ui?.border ?? "border-l-slate-400"}`}>
+                    <div key={task.id} onClick={() => { const project = visibleProjects.find((p) => p.id === task.project_id || p.tasksInWeek.some((t) => t.id === task.id)); if (project) openRoadmapTaskDetails(task, project); }} className="mb-3 cursor-pointer rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition hover:shadow-md" style={{ borderLeftWidth: 4, borderLeftColor: column.color }}>
                       <p className="text-sm font-medium text-slate-900 break-words line-clamp-2">{task.title ?? "Untitled task"}</p>
                       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
                         <span>{(() => { const assignees = task.assignees ?? []; if (assignees.length === 0) return task.assigned_user?.name || "Unassigned"; if (assignees.length === 1) return assignees[0].name ?? "Unknown"; return `${assignees[0].name ?? "Unknown"} +${assignees.length - 1}`; })()}</span>
@@ -1066,6 +1090,7 @@ export default function RoadmapGrid() {
                         {dayTasks.slice(0, 4).map((task) => {
                           const sKey = normalizeStatus(task.status);
                           const cfg = STATUS_CONFIG[sKey];
+                          const stage = resolveTaskReportingStage(task, roadmapColumnsById);
                           const isOverdue = sKey !== "done" && getTaskDueState({
                             dueDate: task.end_date,
                             now,
@@ -1075,7 +1100,7 @@ export default function RoadmapGrid() {
                           return (
                             <div
                               key={task.id}
-                              title={`${task.title ?? "Untitled"} • ${cfg.label}`}
+                              title={`${task.title ?? "Untitled"} • Stage: ${stage.stageTitle} • Workflow: ${cfg.label}`}
                               className={`cursor-pointer truncate rounded px-1.5 py-0.5 text-[10px] font-medium leading-tight transition hover:brightness-90 ${isOverdue ? "ring-1 ring-red-400" : ""}`}
                               style={{ backgroundColor: cfg.barColor + "20", color: cfg.barColor, borderLeft: `2px solid ${cfg.barColor}` }}
                               onClick={() => {

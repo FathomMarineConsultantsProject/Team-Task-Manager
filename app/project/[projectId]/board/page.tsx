@@ -3379,7 +3379,7 @@ export default function ProjectBoardPage({
                 onExportTasks={(columnId) => {
                   const colDef = projectColumns.find((c) => c.id === columnId);
                   return handleExportTasks({
-                    statusFilter: (colDef?.status_key || "todo") as any,
+                    columnIdFilter: columnId,
                     statusLabel: colDef?.title || getColumnExportLabel(columnId, projectColumns),
                   });
                 }}

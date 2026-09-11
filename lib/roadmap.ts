@@ -2,6 +2,7 @@ export type RoadmapTask = {
   id: string;
   title: string | null;
   status?: string | null;
+  column_id?: string | null;
   assigned_to?: string | null;
   start_date?: string | null;
   end_date?: string | null;
