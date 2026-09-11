@@ -13,7 +13,12 @@ import {
   getColumnTasks,
   initializeColumnTaskMap,
   type BoardColumnDefinition,
+  type BoardColumnViewState,
+  type ColumnDateFilter,
   type ColumnId,
+  type ColumnSortBy,
+  type ColumnSortDirection,
+  type ColumnViewState,
   type ColumnTaskMap,
   type Task,
   type TaskReviewProgress,
@@ -56,6 +61,7 @@ type DbTask = {
   end_date: string | null;
   draft_review_started_at: string | null;
   draft_review_due_at: string | null;
+  created_at?: string | null;
   completed_at?: string | null;
 };
 
@@ -144,6 +150,123 @@ type TaskReviewRow = {
   reviewer_id: string | null;
   status: string | null;
 };
+
+const isColumnViewStateActive = (state: ColumnViewState | undefined) =>
+  Boolean(state?.sortBy || (state?.dateFilter && state.dateFilter !== "all"));
+
+const applyColumnDateFilter = ({
+  task,
+  filter,
+  now,
+  timeZone,
+  workdayEnd,
+}: {
+  task: Task;
+  filter: ColumnDateFilter | undefined;
+  now: Date;
+  timeZone: string;
+  workdayEnd: string;
+}) => {
+  if (!filter || filter === "all") return true;
+
+  const dueState = getTaskDueState({
+    dueDate: task.end_date,
+    completedAt: task.completed_at,
+    now,
+    timeZone,
+    workdayEnd,
+  });
+  const today = getProjectLocalDate(timeZone, now);
+
+  switch (filter) {
+    case "today":
+      return dueState.state === "due_today";
+    case "tomorrow":
+      return Boolean(task.end_date && compareDateOnly(task.end_date, addDaysToDateOnly(today, 1)) === 0);
+    case "next_3_days":
+    case "next_7_days":
+    case "next_14_days": {
+      if (!task.end_date || dueState.state === "overdue" || dueState.state === "completed") return false;
+      const days = filter === "next_3_days" ? 3 : filter === "next_7_days" ? 7 : 14;
+      return compareDateOnly(task.end_date, today) >= 0 && compareDateOnly(task.end_date, addDaysToDateOnly(today, days)) <= 0;
+    }
+    case "overdue":
+      return dueState.state === "overdue";
+    case "no_due_date":
+      return dueState.state === "no_due_date";
+    case "completed":
+      return Boolean(task.completed_at) || dueState.state === "completed";
+    default:
+      return true;
+  }
+};
+
+const compareNullableNumber = (left: number | null, right: number | null, direction: ColumnSortDirection) => {
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return direction === "asc" ? left - right : right - left;
+};
+
+const getColumnSortDefaultDirection = (sortBy: ColumnSortBy): ColumnSortDirection => {
+  if (sortBy === "title" || sortBy === "due_date" || sortBy === "start_date") return "asc";
+  return "desc";
+};
+
+const sortTasksForColumnView = ({
+  tasks,
+  sortBy,
+  sortDirection,
+  timeZone,
+  workdayEnd,
+  taskSummaryById,
+}: {
+  tasks: Task[];
+  sortBy: ColumnSortBy;
+  sortDirection: ColumnSortDirection;
+  timeZone: string;
+  workdayEnd: string;
+  taskSummaryById: Map<string, LiveTaskManHoursSummary>;
+}) => [...tasks].sort((a, b) => {
+  switch (sortBy) {
+    case "title": {
+      const result = (a.title ?? "").localeCompare(b.title ?? "");
+      return sortDirection === "asc" ? result : -result;
+    }
+    case "due_date":
+      return compareNullableNumber(
+        getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone, workdayEnd })?.getTime() ?? null,
+        getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone, workdayEnd })?.getTime() ?? null,
+        sortDirection,
+      );
+    case "start_date":
+      return compareNullableNumber(
+        a.start_date ? new Date(a.start_date).getTime() : null,
+        b.start_date ? new Date(b.start_date).getTime() : null,
+        sortDirection,
+      );
+    case "created_at":
+      return compareNullableNumber(
+        a.created_at ? new Date(a.created_at).getTime() : null,
+        b.created_at ? new Date(b.created_at).getTime() : null,
+        sortDirection,
+      );
+    case "man_hours":
+      return compareNullableNumber(
+        taskSummaryById.get(a.id)?.totalManHoursSeconds ?? 0,
+        taskSummaryById.get(b.id)?.totalManHoursSeconds ?? 0,
+        sortDirection,
+      );
+    case "completed_at":
+      return compareNullableNumber(
+        a.completed_at ? new Date(a.completed_at).getTime() : null,
+        b.completed_at ? new Date(b.completed_at).getTime() : null,
+        sortDirection,
+      );
+    default:
+      return 0;
+  }
+});
 
 const getColumnAccent = (colId: string, cols: BoardColumnDefinition[] = []) => {
   const col = cols.find((c) => c.id === colId);
@@ -455,6 +578,7 @@ export default function ProjectBoardPage({
   const [boardSort, setBoardSort] = useState<"default" | "created" | "start" | "due" | "alpha" | "near_due" | "overdue">("default");
   const [boardTimeFilter, setBoardTimeFilter] = useState<"all" | "today" | "week" | "month" | "overdue" | "near_due" | "completed">("all");
   const [boardMemberFilter, setBoardMemberFilter] = useState("all");
+  const [columnViewState, setColumnViewState] = useState<BoardColumnViewState>({});
   const [showFilters, setShowFilters] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const newTaskTargetColumn = useMemo(
@@ -467,6 +591,23 @@ export default function ProjectBoardPage({
     setWorkingDatesDirty(false);
     setCreateTaskError(null);
     setShowCreateTaskModal(true);
+  }, []);
+  const handleColumnViewStateChange = useCallback((columnId: ColumnId, state: ColumnViewState) => {
+    setColumnViewState((current) => {
+      if (!isColumnViewStateActive(state)) {
+        const rest = { ...current };
+        delete rest[columnId];
+        return rest;
+      }
+      return { ...current, [columnId]: state };
+    });
+  }, []);
+  const handleColumnViewStateReset = useCallback((columnId: ColumnId) => {
+    setColumnViewState((current) => {
+      const rest = { ...current };
+      delete rest[columnId];
+      return rest;
+    });
   }, []);
   const [managingMemberId, setManagingMemberId] = useState<string | null>(null);
   const [projectTeamTab, setProjectTeamTab] = useState<"add" | "manage" | "reviewer">("add");
@@ -1759,7 +1900,7 @@ export default function ProjectBoardPage({
       // 2. Fetch tasks
       const { data: taskRows, error: taskError } = await supabase
         .from("tasks")
-        .select("id, title, description, status, column_id, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, completed_at")
+        .select("id, title, description, status, column_id, assigned_to, start_date, end_date, draft_review_started_at, draft_review_due_at, created_at, completed_at")
         .eq("project_id", projectId)
         .order("created_at", { ascending: false, nullsFirst: false });
 
@@ -1868,6 +2009,7 @@ export default function ProjectBoardPage({
           end_date: row.end_date,
           draft_review_started_at: row.draft_review_started_at,
           draft_review_due_at: row.draft_review_due_at,
+          created_at: row.created_at,
           completed_at: row.completed_at,
           statusLabel: getColumnStatusLabel(columnId, fetchedColumns),
           canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
@@ -3134,12 +3276,12 @@ export default function ProjectBoardPage({
               );
             }
 
-            // 3) Apply time filter
+            // 3) Apply existing global time filter
             if (boardTimeFilter !== "all") {
               filtered = filtered.filter((t) => {
                 const due = getEffectiveTaskDueAt({ dueDate: t.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
                 const daysRemaining = getSignedDaysRemaining({ dueDate: t.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
-                const dueState = getTaskDueState({ dueDate: t.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                const dueState = getTaskDueState({ dueDate: t.end_date, completedAt: t.completed_at, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
                 switch (boardTimeFilter) {
                   case "today": return dueState.state === "due_today";
                   case "week": return daysRemaining !== null && daysRemaining >= 0 && daysRemaining <= 7;
@@ -3156,49 +3298,73 @@ export default function ProjectBoardPage({
               });
             }
 
-            // 4) Apply sort
-            const sorted = [...filtered].sort((a, b) => {
-              switch (boardSort) {
-                case "alpha": return (a.title ?? "").localeCompare(b.title ?? "");
-                case "due": {
-                  if (!a.end_date && !b.end_date) return 0;
-                  if (!a.end_date) return 1;
-                  if (!b.end_date) return -1;
-                  return (getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity)
-                    - (getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity);
-                }
-                case "start": {
-                  if (!a.start_date && !b.start_date) return 0;
-                  if (!a.start_date) return 1;
-                  if (!b.start_date) return -1;
-                  return new Date(a.start_date).getTime() - new Date(b.start_date).getTime();
-                }
-                case "near_due": {
-                  const aDue = Math.abs((getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
-                  const bDue = Math.abs((getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
-                  return aDue - bDue;
-                }
-                case "overdue": {
-                  const aDueAt = getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
-                  const bDueAt = getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
-                  const aOver = getTaskDueState({ dueDate: a.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && aDueAt
-                    ? now.getTime() - aDueAt.getTime()
-                    : -Infinity;
-                  const bOver = getTaskDueState({ dueDate: b.end_date, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && bDueAt
-                    ? now.getTime() - bDueAt.getTime()
-                    : -Infinity;
-                  return bOver - aOver;
-                }
-                default: {
-                  // Default: future start dates pushed to bottom
-                  const aFuture = Boolean(a.start_date && a.start_date > projectToday);
-                  const bFuture = Boolean(b.start_date && b.start_date > projectToday);
-                  if (aFuture && !bFuture) return 1;
-                  if (!aFuture && bFuture) return -1;
-                  return 0;
-                }
-              }
-            });
+            const viewState = columnViewState[column.id];
+
+            // 4) Apply column-specific date filter. This is a view transform only;
+            // columns[column.id] remains the raw source of truth for drag/drop and persistence.
+            if (viewState?.dateFilter && viewState.dateFilter !== "all") {
+              filtered = filtered.filter((task) => applyColumnDateFilter({
+                task,
+                filter: viewState.dateFilter,
+                now,
+                timeZone: projectTimeZone,
+                workdayEnd: projectWorkdayEnd,
+              }));
+            }
+
+            // 5) Apply sort. A per-column sort deliberately overrides the global board sort
+            // for this column; otherwise the existing global sort behavior is preserved.
+            const sorted = viewState?.sortBy
+              ? sortTasksForColumnView({
+                  tasks: filtered,
+                  sortBy: viewState.sortBy,
+                  sortDirection: viewState.sortDirection ?? getColumnSortDefaultDirection(viewState.sortBy),
+                  timeZone: projectTimeZone,
+                  workdayEnd: projectWorkdayEnd,
+                  taskSummaryById: manHours.taskSummaryById,
+                })
+              : [...filtered].sort((a, b) => {
+                  switch (boardSort) {
+                    case "alpha": return (a.title ?? "").localeCompare(b.title ?? "");
+                    case "due": {
+                      if (!a.end_date && !b.end_date) return 0;
+                      if (!a.end_date) return 1;
+                      if (!b.end_date) return -1;
+                      return (getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity)
+                        - (getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity);
+                    }
+                    case "start": {
+                      if (!a.start_date && !b.start_date) return 0;
+                      if (!a.start_date) return 1;
+                      if (!b.start_date) return -1;
+                      return new Date(a.start_date).getTime() - new Date(b.start_date).getTime();
+                    }
+                    case "near_due": {
+                      const aDue = Math.abs((getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
+                      const bDue = Math.abs((getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd })?.getTime() ?? Infinity) - now.getTime());
+                      return aDue - bDue;
+                    }
+                    case "overdue": {
+                      const aDueAt = getEffectiveTaskDueAt({ dueDate: a.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                      const bDueAt = getEffectiveTaskDueAt({ dueDate: b.end_date, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd });
+                      const aOver = getTaskDueState({ dueDate: a.end_date, completedAt: a.completed_at, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && aDueAt
+                        ? now.getTime() - aDueAt.getTime()
+                        : -Infinity;
+                      const bOver = getTaskDueState({ dueDate: b.end_date, completedAt: b.completed_at, now, timeZone: projectTimeZone, workdayEnd: projectWorkdayEnd }).state === "overdue" && bDueAt
+                        ? now.getTime() - bDueAt.getTime()
+                        : -Infinity;
+                      return bOver - aOver;
+                    }
+                    default: {
+                      // Default: future start dates pushed to bottom
+                      const aFuture = Boolean(a.start_date && a.start_date > projectToday);
+                      const bFuture = Boolean(b.start_date && b.start_date > projectToday);
+                      if (aFuture && !bFuture) return 1;
+                      if (!aFuture && bFuture) return -1;
+                      return 0;
+                    }
+                  }
+                });
 
             return (
               <BoardColumn
@@ -3255,6 +3421,9 @@ export default function ProjectBoardPage({
                 colorKey={column.color_key}
                 trackManHours={column.track_man_hours}
                 canManageColumns={canManageProjectColumns}
+                columnViewState={viewState}
+                onColumnViewStateChange={handleColumnViewStateChange}
+                onColumnViewStateReset={handleColumnViewStateReset}
                 onEditColumn={(colId) => {
                   const colDef = projectColumns.find((c) => c.id === colId);
                   if (colDef) {

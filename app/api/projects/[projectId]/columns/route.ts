@@ -82,6 +82,9 @@ export async function POST(req: Request, { params }: RouteContext) {
     const statusKey = body.status_key && ALLOWED_STATUS_KEYS.includes(body.status_key)
       ? body.status_key
       : "in_progress";
+    const trackManHours = statusKey === "todo" || statusKey === "done"
+      ? false
+      : body.trackManHours;
 
     // Ensure default columns exist first so we don't start with empty sort_order
     const existing = await ensureDefaultColumns(adminClient, projectId);
@@ -98,7 +101,7 @@ export async function POST(req: Request, { params }: RouteContext) {
         status_key: statusKey,
         is_locked: false,
         color_key: body.colorKey,
-        track_man_hours: body.trackManHours,
+        track_man_hours: trackManHours,
       })
       .select("*")
       .single();

@@ -1,8 +1,8 @@
-import { Clock3, FileDown, GripVertical, Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Clock3, FileDown, GripVertical, Lock, MoreHorizontal, Pencil, Plus, SlidersHorizontal, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, MouseEvent } from "react";
 import TaskCard from "./TaskCard";
-import type { ColumnId, Task } from "./types";
+import type { ColumnDateFilter, ColumnId, ColumnSortBy, ColumnSortDirection, ColumnViewState, Task } from "./types";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
 import { COLUMN_COLORS, type ColumnColorKey } from "@/lib/columnColors";
 
@@ -47,9 +47,58 @@ interface BoardColumnProps {
   onColumnHeaderDragEnd?: () => void;
   isColumnDragOver?: boolean;
   isColumnDragging?: boolean;
+  columnViewState?: ColumnViewState;
+  onColumnViewStateChange?: (columnId: ColumnId, state: ColumnViewState) => void;
+  onColumnViewStateReset?: (columnId: ColumnId) => void;
 }
 
 const DEFAULT_VISIBLE_TASKS = 7;
+
+const sortOptions: { value: ColumnSortBy; label: string }[] = [
+  { value: "due_date", label: "Due Date" },
+  { value: "start_date", label: "Start Date" },
+  { value: "title", label: "Task Name" },
+  { value: "created_at", label: "Created" },
+  { value: "man_hours", label: "Man-Hours" },
+];
+
+const completedSortOption: { value: ColumnSortBy; label: string } = { value: "completed_at", label: "Completed Date" };
+
+const dateFilterOptions: { value: ColumnDateFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "today", label: "Due Today" },
+  { value: "tomorrow", label: "Due Tomorrow" },
+  { value: "next_3_days", label: "Next 3 Days" },
+  { value: "next_7_days", label: "Next 7 Days" },
+  { value: "next_14_days", label: "Next 14 Days" },
+  { value: "overdue", label: "Overdue" },
+  { value: "no_due_date", label: "No Due Date" },
+  { value: "completed", label: "Completed" },
+];
+
+const getDefaultDirection = (sortBy: ColumnSortBy): ColumnSortDirection => {
+  if (sortBy === "title" || sortBy === "due_date" || sortBy === "start_date") return "asc";
+  return "desc";
+};
+
+const getDirectionLabels = (sortBy: ColumnSortBy) => {
+  switch (sortBy) {
+    case "due_date":
+      return { asc: "Soonest first", desc: "Latest first" };
+    case "start_date":
+      return { asc: "Earliest first", desc: "Latest first" };
+    case "title":
+      return { asc: "A-Z", desc: "Z-A" };
+    case "created_at":
+      return { desc: "Newest first", asc: "Oldest first" };
+    case "man_hours":
+      return { desc: "Highest first", asc: "Lowest first" };
+    case "completed_at":
+      return { desc: "Newest first", asc: "Oldest first" };
+    default:
+      return { asc: "Ascending", desc: "Descending" };
+  }
+};
 
 export default function BoardColumn({
   columnId,
@@ -91,11 +140,26 @@ export default function BoardColumn({
   onColumnHeaderDragEnd,
   isColumnDragOver = false,
   isColumnDragging = false,
+  columnViewState,
+  onColumnViewStateChange,
+  onColumnViewStateReset,
 }: BoardColumnProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
+  const [draftViewState, setDraftViewState] = useState<ColumnViewState>({});
   const [showAllTasks, setShowAllTasks] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const viewMenuRef = useRef<HTMLDivElement | null>(null);
   const visibleTasks = showAllTasks ? tasks : tasks.slice(0, DEFAULT_VISIBLE_TASKS);
+  const isCompletedColumn = stageType === "done" || statusKey === "done";
+  const activeViewState = columnViewState ?? {};
+  const hasActiveViewState = Boolean(
+    activeViewState.sortBy ||
+    (activeViewState.dateFilter && activeViewState.dateFilter !== "all"),
+  );
+  const currentSortBy = draftViewState.sortBy ?? "due_date";
+  const currentDirection = draftViewState.sortDirection ?? getDefaultDirection(currentSortBy);
+  const directionLabels = getDirectionLabels(currentSortBy);
 
   useEffect(() => {
     setShowAllTasks(false);
@@ -153,8 +217,48 @@ export default function BoardColumn({
     setIsMenuOpen(false);
   };
 
+  const handleOpenViewMenu = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const nextSortBy = activeViewState.sortBy ?? "due_date";
+    setDraftViewState({
+      sortBy: nextSortBy,
+      sortDirection: activeViewState.sortDirection ?? getDefaultDirection(nextSortBy),
+      dateFilter: activeViewState.dateFilter ?? "all",
+    });
+    setIsViewMenuOpen((open) => !open);
+    setIsMenuOpen(false);
+  };
+
+  const handleSortByChange = (sortBy: ColumnSortBy) => {
+    setDraftViewState((current) => ({
+      ...current,
+      sortBy,
+      sortDirection: current.sortBy === sortBy
+        ? current.sortDirection ?? getDefaultDirection(sortBy)
+        : getDefaultDirection(sortBy),
+    }));
+  };
+
+  const handleApplyViewState = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const sortBy = draftViewState.sortBy;
+    onColumnViewStateChange?.(columnId, {
+      sortBy,
+      sortDirection: sortBy ? draftViewState.sortDirection ?? getDefaultDirection(sortBy) : undefined,
+      dateFilter: draftViewState.dateFilter ?? "all",
+    });
+    setIsViewMenuOpen(false);
+  };
+
+  const handleResetViewState = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    setDraftViewState({});
+    onColumnViewStateReset?.(columnId);
+    setIsViewMenuOpen(false);
+  };
+
   useEffect(() => {
-    if (!isMenuOpen) {
+    if (!isMenuOpen && !isViewMenuOpen) {
       return;
     }
 
@@ -162,13 +266,16 @@ export default function BoardColumn({
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setIsMenuOpen(false);
       }
+      if (viewMenuRef.current && !viewMenuRef.current.contains(event.target as Node)) {
+        setIsViewMenuOpen(false);
+      }
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
     };
-  }, [isMenuOpen]);
+  }, [isMenuOpen, isViewMenuOpen]);
 
   return (
     <div
@@ -209,6 +316,69 @@ export default function BoardColumn({
         </div>
 
         <div className="flex items-center gap-2 text-gray-400 shrink-0">
+          <div ref={viewMenuRef} className="relative" onClick={handleMenuClick}>
+            <button
+              type="button"
+              draggable={false}
+              aria-label={`${title} sort and filter`}
+              aria-expanded={isViewMenuOpen}
+              onPointerDown={(event) => event.stopPropagation()}
+              onDragStart={(event) => event.preventDefault()}
+              onClick={handleOpenViewMenu}
+              className={`relative rounded-full border p-1 transition hover:border-gray-300 hover:bg-white ${
+                hasActiveViewState ? "border-slate-300 bg-white text-slate-700" : "border-gray-200 text-gray-400"
+              }`}
+            >
+              <SlidersHorizontal size={14} />
+              {hasActiveViewState ? (
+                <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-slate-700" aria-hidden="true" />
+              ) : null}
+            </button>
+            {isViewMenuOpen ? (
+              <div className="absolute right-0 top-8 z-50 w-56 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700 shadow-lg">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Sort &amp; Filter</div>
+                <div className="my-2 border-t border-slate-100" />
+                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Sort by</label>
+                <select
+                  value={currentSortBy}
+                  onChange={(event) => handleSortByChange(event.target.value as ColumnSortBy)}
+                  className="mb-3 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                >
+                  {[...sortOptions, ...(isCompletedColumn ? [completedSortOption] : [])].map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Direction</label>
+                <select
+                  value={currentDirection}
+                  onChange={(event) => setDraftViewState((current) => ({ ...current, sortDirection: event.target.value as ColumnSortDirection }))}
+                  className="mb-3 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                >
+                  <option value="asc">{directionLabels.asc}</option>
+                  <option value="desc">{directionLabels.desc}</option>
+                </select>
+                <div className="my-2 border-t border-slate-100" />
+                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Due</label>
+                <select
+                  value={draftViewState.dateFilter ?? "all"}
+                  onChange={(event) => setDraftViewState((current) => ({ ...current, dateFilter: event.target.value as ColumnDateFilter }))}
+                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                >
+                  {dateFilterOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <div className="mt-3 flex items-center justify-between">
+                  <button type="button" onClick={handleResetViewState} className="text-xs font-medium text-slate-500 hover:text-slate-700">
+                    Reset
+                  </button>
+                  <button type="button" onClick={handleApplyViewState} className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800">
+                    Apply
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
           <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${accent.border} ${accent.text} ${accent.tint}`}>
             {tasks.length}
           </span>

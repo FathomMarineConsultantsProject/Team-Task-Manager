@@ -162,6 +162,8 @@ export async function ensureDefaultColumns(
     stage_type: col.stage_type,
     status_key: col.status_key,
     is_locked: col.is_locked,
+    color_key: col.color_key,
+    track_man_hours: col.track_man_hours,
   }));
 
   const { data: inserted, error: insertError } = await adminClient

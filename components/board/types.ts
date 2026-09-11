@@ -29,6 +29,7 @@ export type Task = {
   column_id?: string | null;
   status?: string | null;
   progress?: number | null;
+  created_at?: string | null;
   completed_at?: string | null;
   updated_at?: string | null;
   description?: string | null;
@@ -52,6 +53,35 @@ export type Task = {
 };
 
 export type ColumnTaskMap = Record<string, Task[] | undefined>;
+
+export type ColumnSortBy =
+  | "due_date"
+  | "start_date"
+  | "title"
+  | "created_at"
+  | "man_hours"
+  | "completed_at";
+
+export type ColumnSortDirection = "asc" | "desc";
+
+export type ColumnDateFilter =
+  | "all"
+  | "today"
+  | "tomorrow"
+  | "next_3_days"
+  | "next_7_days"
+  | "next_14_days"
+  | "overdue"
+  | "no_due_date"
+  | "completed";
+
+export interface ColumnViewState {
+  sortBy?: ColumnSortBy;
+  sortDirection?: ColumnSortDirection;
+  dateFilter?: ColumnDateFilter;
+}
+
+export type BoardColumnViewState = Record<string, ColumnViewState>;
 
 export function getColumnTasks(columns: ColumnTaskMap, columnId: string): Task[] {
   return columns[columnId] ?? [];
