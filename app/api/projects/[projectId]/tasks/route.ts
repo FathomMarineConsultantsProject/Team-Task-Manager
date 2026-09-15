@@ -18,6 +18,7 @@ type CreateTaskRequest = {
   primaryAssigneeId?: string | null;
   additionalAssigneeIds?: string[];
   workingDates?: string[];
+  checkpoints?: Array<{ title?: string; sortOrder?: number }>;
 };
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -42,9 +43,21 @@ export async function POST(req: Request, { params }: RouteContext) {
     const status = body.status ?? "todo";
     const primaryAssigneeId = body.primaryAssigneeId ?? null;
     const additionalAssigneeIds = body.additionalAssigneeIds ?? [];
+    const checkpoints = Array.isArray(body.checkpoints)
+      ? body.checkpoints
+          .map((checkpoint, index) => ({
+            title: typeof checkpoint.title === "string" ? checkpoint.title.trim() : "",
+            sortOrder: Number.isFinite(checkpoint.sortOrder) ? Number(checkpoint.sortOrder) : index,
+          }))
+          .filter((checkpoint) => checkpoint.title.length > 0)
+          .sort((a, b) => a.sortOrder - b.sortOrder)
+      : [];
 
     if (!title) return jsonNoStore({ error: "Task title is required." }, 400);
     if (!isTaskStatus(status)) return jsonNoStore({ error: "Valid task status is required." }, 400);
+    if (checkpoints.some((checkpoint) => checkpoint.title.length > 240)) {
+      return jsonNoStore({ error: "Checkpoint titles must be 240 characters or less." }, 400);
+    }
     if (primaryAssigneeId !== null && !UUID_PATTERN.test(primaryAssigneeId)) {
       return jsonNoStore({ error: "primaryAssigneeId must be a valid user id or null." }, 400);
     }
@@ -76,18 +89,11 @@ export async function POST(req: Request, { params }: RouteContext) {
       p_primary_assignee_id: primaryAssigneeId,
       p_additional_assignee_ids: [...new Set(additionalAssigneeIds)],
       p_working_dates: [...new Set(body.workingDates)],
+      p_column_id: body.columnId && UUID_PATTERN.test(body.columnId) ? body.columnId : null,
+      p_checkpoints: checkpoints.map((checkpoint) => ({ title: checkpoint.title })),
     });
 
     if (error) return jsonNoStore({ error: error.message }, rpcErrorStatus(error.code));
-
-    const taskResult = data as { task?: { id?: string; column_id?: string | null } } | null;
-    if (taskResult?.task?.id && body.columnId && UUID_PATTERN.test(body.columnId)) {
-      await adminClient
-        .from("tasks")
-        .update({ column_id: body.columnId })
-        .eq("id", taskResult.task.id);
-      taskResult.task.column_id = body.columnId;
-    }
 
     return jsonNoStore(data, 201);
   } catch (error) {

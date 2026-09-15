@@ -13,6 +13,7 @@ import ModalPortal from "@/components/ModalPortal";
 import TaskManHoursPanel from "@/components/tasks/TaskManHoursPanel";
 import TaskWorkingDaysPanel from "@/components/tasks/TaskWorkingDaysPanel";
 import TaskWorkingScheduleSection from "@/components/tasks/TaskWorkingScheduleSection";
+import TaskCheckpoints from "@/components/tasks/TaskCheckpoints";
 import type { TaskWorkingSchedule } from "@/lib/manHours";
 import useTaskWorkingSchedule from "@/lib/useTaskWorkingSchedule";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
@@ -172,6 +173,7 @@ type WorkflowOptions = {
   onExtensionChanged?: (taskId: string) => void | Promise<void>;
   onEditTask?: (taskId: string) => void;
   onEditWorkingDates?: (taskId: string) => void;
+  onCheckpointSummaryChange?: (taskId: string, summary: { checkpointCount: number; completedCheckpointCount: number }) => void;
   showWorkingDaysPanel?: boolean;
   manHoursByTaskId?: Map<string, LiveTaskManHoursSummary>;
 };
@@ -271,6 +273,7 @@ export function useTaskDetailsWorkflow({
   onExtensionChanged,
   onEditTask,
   onEditWorkingDates,
+  onCheckpointSummaryChange,
   showWorkingDaysPanel = false,
   manHoursByTaskId,
 }: WorkflowOptions) {
@@ -892,6 +895,13 @@ export function useTaskDetailsWorkflow({
                   </p>
                 </div>
               )}
+
+              <TaskCheckpoints
+                taskId={selectedTaskDetails.id}
+                getAccessToken={getAccessToken}
+                canManage={attachmentPermissions.canUpload}
+                onSummaryChange={onCheckpointSummaryChange}
+              />
 
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-1">Assigned To</p>

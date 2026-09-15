@@ -130,11 +130,11 @@ export default function TaskWorkingDatesCalendar({
   }, [visibleMonth]);
 
   useEffect(() => {
-    if (readOnly && !focusRequested.current) return;
+    if (!focusRequested.current) return;
     if (!cells.includes(focusedDate)) return;
     dayRefs.current.get(focusedDate)?.focus();
     focusRequested.current = false;
-  }, [cells, focusedDate, readOnly]);
+  }, [cells, focusedDate]);
 
   const isDisabledDate = (date: string) =>
     disabled

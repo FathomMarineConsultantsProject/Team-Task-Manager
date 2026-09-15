@@ -1,7 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
-import { MouseEvent, ReactNode, useEffect, useRef } from "react";
+import { MouseEvent, ReactNode, RefObject, useEffect, useLayoutEffect, useRef } from "react";
 import ModalPortal from "@/components/ModalPortal";
 
 interface ModalProps {
@@ -11,11 +11,21 @@ interface ModalProps {
   children: ReactNode;
   footer?: ReactNode;
   maxWidth?: string;
+  bodyRef?: RefObject<HTMLDivElement | null>;
+  resetScrollOnOpen?: boolean;
 }
 
-export default function Modal({ title, isOpen, onClose, children, footer, maxWidth }: ModalProps) {
+export default function Modal({ title, isOpen, onClose, children, footer, maxWidth, bodyRef, resetScrollOnOpen = false }: ModalProps) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+
+  useLayoutEffect(() => {
+    if (!isOpen || !resetScrollOnOpen || !bodyRef?.current) {
+      return;
+    }
+
+    bodyRef.current.scrollTop = 0;
+  }, [bodyRef, isOpen, resetScrollOnOpen]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -64,7 +74,7 @@ export default function Modal({ title, isOpen, onClose, children, footer, maxWid
               <X size={16} />
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto px-6 pb-2 break-words">{children}</div>
+          <div ref={bodyRef} className="flex-1 overflow-y-auto px-6 pb-2 break-words">{children}</div>
           {footer ? <div className="px-6 pb-6 pt-2 flex flex-wrap justify-end gap-3">{footer}</div> : null}
         </div>
       </div>

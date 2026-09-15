@@ -50,6 +50,8 @@ export type Task = {
   canDrag?: boolean;
   updatesCount?: number;
   reviewProgress?: TaskReviewProgress;
+  checkpointCount?: number;
+  completedCheckpointCount?: number;
   assignees?: { id: string; name: string | null; email: string | null; avatar_url?: string | null }[];
 };
 

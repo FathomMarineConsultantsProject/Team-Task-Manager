@@ -27,6 +27,7 @@ import { useAppData } from "@/components/providers/AppDataProvider";
 import CreateTaskAttachments from "@/components/tasks/CreateTaskAttachments";
 import type { PendingAttachment } from "@/components/tasks/CreateTaskAttachments";
 import { useTaskDetailsWorkflow } from "@/components/tasks/useTaskDetailsWorkflow";
+import TaskCheckpoints from "@/components/tasks/TaskCheckpoints";
 import { addWorkingDays } from "@/lib/workingDays";
 import { useProjectManHours } from "@/lib/useProjectManHours";
 import type { LiveTaskManHoursSummary } from "@/lib/useProjectManHours";
@@ -126,6 +127,146 @@ type ProjectReviewer = {
     avatar_url?: string | null;
   } | null;
 };
+
+type DraftCheckpoint = {
+  id: string;
+  title: string;
+};
+
+type AssignedMembersSelectProps = {
+  members: DbProjectMember[];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+  disabled?: boolean;
+};
+
+function AssignedMembersSelect({ members, selectedIds, onChange, disabled = false }: AssignedMembersSelectProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const memberOptions = useMemo(() => members.filter((member) => member.user), [members]);
+  const selectedUsers = useMemo(
+    () => selectedIds.flatMap((id) => memberOptions.find((member) => member.user_id === id)?.user ?? []),
+    [memberOptions, selectedIds],
+  );
+  const displayText = selectedUsers.length === 0
+    ? "Unassigned"
+    : selectedUsers.length <= 2
+      ? selectedUsers.map((user) => user.name ?? user.email ?? "Unknown").join(", ")
+      : `${selectedUsers.slice(0, 2).map((user) => user.name ?? user.email ?? "Unknown").join(", ")} +${selectedUsers.length - 2}`;
+  const filteredMembers = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return memberOptions;
+    return memberOptions.filter((member) => {
+      const user = member.user;
+      const name = user?.name?.toLowerCase() ?? "";
+      const email = user?.email?.toLowerCase() ?? "";
+      return name.includes(term) || email.includes(term);
+    });
+  }, [memberOptions, search]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown, true);
+    const frame = window.requestAnimationFrame(() => searchInputRef.current?.focus({ preventScroll: true }));
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown, true);
+      window.cancelAnimationFrame(frame);
+    };
+  }, [isOpen]);
+
+  const toggleMember = (userId: string) => {
+    const next = selectedSet.has(userId)
+      ? selectedIds.filter((id) => id !== userId)
+      : [...selectedIds, userId];
+    onChange([...new Set(next)]);
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <label className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
+        Assigned Members (Optional)
+      </label>
+      <button
+        type="button"
+        onClick={() => {
+          if (disabled) return;
+          setIsOpen((open) => !open);
+        }}
+        disabled={disabled}
+        aria-expanded={isOpen}
+        className="mt-1 flex w-full items-center justify-between gap-3 rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-900 focus:border-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 disabled:bg-slate-50 disabled:text-slate-500"
+      >
+        <span className={`min-w-0 truncate ${selectedUsers.length === 0 ? "text-slate-400" : ""}`}>{displayText}</span>
+        <ChevronDown size={16} className="shrink-0 text-slate-400" />
+      </button>
+
+      {isOpen ? (
+        <div className="absolute left-0 right-0 z-50 mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
+          <div className="border-b border-slate-100 p-2">
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search project members..."
+              className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+            />
+          </div>
+          <div className="max-h-64 overflow-y-auto py-1">
+            {filteredMembers.length === 0 ? (
+              <p className="px-3 py-3 text-sm text-slate-500">No members found.</p>
+            ) : (
+              filteredMembers.map((member) => {
+                const user = member.user;
+                if (!user) return null;
+                const checked = selectedSet.has(user.id);
+                const label = user.name ?? user.email ?? "Unknown";
+                return (
+                  <button
+                    key={user.id}
+                    type="button"
+                    onClick={() => toggleMember(user.id)}
+                    className="flex w-full items-center gap-3 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 focus:bg-slate-50 focus:outline-none"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleMember(user.id)}
+                      onClick={(event) => event.stopPropagation()}
+                      className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-900"
+                      aria-label={`${checked ? "Remove" : "Assign"} ${label}`}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{label}</span>
+                      {user.email ? <span className="block truncate text-xs text-slate-400">{user.email}</span> : null}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 type StatusUpdateResult = {
   task?: {
@@ -550,6 +691,7 @@ export default function ProjectBoardPage({
   const [newTaskAssignee, setNewTaskAssignee] = useState("");
   const [newTaskDescription, setNewTaskDescription] = useState("");
   const [newTaskWorkingDates, setNewTaskWorkingDates] = useState<string[]>([]);
+  const [newTaskCheckpoints, setNewTaskCheckpoints] = useState<DraftCheckpoint[]>([]);
   const [workingDatesDirty, setWorkingDatesDirty] = useState(false);
   const [createTaskError, setCreateTaskError] = useState<string | null>(null);
   const [extensionTask, setExtensionTask] = useState<{ task: Task; summary: LiveTaskManHoursSummary } | null>(null);
@@ -577,8 +719,10 @@ export default function ProjectBoardPage({
   const [editScheduleReason, setEditScheduleReason] = useState("");
   const [editScheduleReasonRequired, setEditScheduleReasonRequired] = useState(false);
   const [editScheduleReasonError, setEditScheduleReasonError] = useState<string | null>(null);
-  const [editTarget, setEditTarget] = useState<"task" | "working-dates">("task");
-  const editWorkingDatesSectionRef = useRef<HTMLDivElement | null>(null);
+  const createTaskModalBodyRef = useRef<HTMLDivElement | null>(null);
+  const editTaskModalBodyRef = useRef<HTMLDivElement | null>(null);
+  const createTaskTitleRef = useRef<HTMLInputElement | null>(null);
+  const editTaskTitleRef = useRef<HTMLInputElement | null>(null);
   const editTaskRequestRef = useRef<(taskId: string, target?: "task" | "working-dates") => void>(() => undefined);
   const scheduleChangedRequestRef = useRef<(taskId: string, schedule: TaskWorkingSchedule) => void>(() => undefined);
   const extensionChangedRequestRef = useRef<(taskId: string) => void>(() => undefined);
@@ -673,11 +817,30 @@ export default function ProjectBoardPage({
     const dates = [...new Set(editWorkingDates)].sort();
     return { start: dates[0] ?? null, end: dates.at(-1) ?? null };
   }, [editWorkingDates]);
-  const editAssignedUsers = useMemo(() => editAssigneeIds.flatMap((userId) => {
-    const user = members.find((member) => member.user_id === userId)?.user
-      ?? editingTask?.assignees?.find((assignee) => assignee.id === userId);
-    return user ? [user] : [];
-  }), [editAssigneeIds, editingTask?.assignees, members]);
+  const createAssignedMemberIds = useMemo(() => [...new Set([
+    ...(newTaskAssignee ? [newTaskAssignee] : []),
+    ...selectedAdditionalAssignees.map((user) => user.id),
+  ])], [newTaskAssignee, selectedAdditionalAssignees]);
+  const handleCreateAssignedMembersChange = useCallback((ids: string[]) => {
+    const nextIds = [...new Set(ids)];
+    const nextPrimaryId = newTaskAssignee && nextIds.includes(newTaskAssignee)
+      ? newTaskAssignee
+      : nextIds[0] ?? "";
+    setNewTaskAssignee(nextPrimaryId);
+    setSelectedAdditionalAssignees(
+      nextIds
+        .filter((id) => id !== nextPrimaryId)
+        .flatMap((id) => members.find((member) => member.user_id === id)?.user ?? []),
+    );
+  }, [members, newTaskAssignee]);
+  const handleEditAssignedMembersChange = useCallback((ids: string[]) => {
+    const nextIds = [...new Set(ids)];
+    const nextPrimaryId = editPrimaryAssigneeId && nextIds.includes(editPrimaryAssigneeId)
+      ? editPrimaryAssigneeId
+      : nextIds[0] ?? null;
+    setEditPrimaryAssigneeId(nextPrimaryId);
+    setEditAssigneeIds(nextIds);
+  }, [editPrimaryAssigneeId]);
   const workingDatesValidation = useMemo(() => {
     if (newTaskWorkingDates.length === 0) return "Select at least one working date.";
     if (newTaskWorkingDates.length > 366) return "Select no more than 366 working dates.";
@@ -689,6 +852,24 @@ export default function ProjectBoardPage({
     if (!showCreateTaskModal || workingDatesDirty) return;
     setNewTaskWorkingDates([projectToday]);
   }, [projectToday, showCreateTaskModal, workingDatesDirty]);
+
+  useEffect(() => {
+    if (!showCreateTaskModal) return;
+    const frame = window.requestAnimationFrame(() => {
+      createTaskTitleRef.current?.focus({ preventScroll: true });
+      createTaskModalBodyRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [showCreateTaskModal]);
+
+  useEffect(() => {
+    if (!editingTask) return;
+    const frame = window.requestAnimationFrame(() => {
+      editTaskTitleRef.current?.focus({ preventScroll: true });
+      editTaskModalBodyRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editingTask?.id]);
 
   // Excel export hook
   const { isExporting, handleExportTasks } = useExportTasks({
@@ -734,6 +915,21 @@ export default function ProjectBoardPage({
     const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? null;
   }, [supabase]);
+  const updateCheckpointSummary = useCallback((taskId: string, summary: { checkpointCount: number; completedCheckpointCount: number }) => {
+    setColumns((current) => {
+      const next: ColumnTaskMap = {};
+      Object.keys(current).forEach((columnId) => {
+        next[columnId] = getColumnTasks(current, columnId).map((task) => task.id === taskId
+          ? {
+              ...task,
+              checkpointCount: summary.checkpointCount,
+              completedCheckpointCount: summary.completedCheckpointCount,
+            }
+          : task);
+      });
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!project) return;
@@ -1156,6 +1352,7 @@ export default function ProjectBoardPage({
     onExtensionChanged: requestExtensionChanged,
     onEditTask: (taskId) => requestEditTask(taskId, "task"),
     onEditWorkingDates: (taskId) => requestEditTask(taskId, "working-dates"),
+    onCheckpointSummaryChange: updateCheckpointSummary,
     showWorkingDaysPanel: true,
     manHoursByTaskId: manHours.taskSummaryById,
   });
@@ -1441,9 +1638,17 @@ export default function ProjectBoardPage({
             primaryAssigneeId: newTaskAssignee || null,
             additionalAssigneeIds: selectedAdditionalAssignees.map((user) => user.id),
             workingDates: newTaskWorkingDates,
+            checkpoints: newTaskCheckpoints
+              .map((checkpoint, index) => ({ title: checkpoint.title.trim(), sortOrder: index }))
+              .filter((checkpoint) => checkpoint.title.length > 0),
           }),
         });
-        const result = await response.json().catch(() => ({}));
+        const result = await response.json().catch(() => ({})) as {
+          error?: string;
+          task?: DbTask;
+          checkpointCount?: number;
+          completedCheckpointCount?: number;
+        };
         if (!response.ok) throw new Error(result.error ?? "Failed to create task.");
         const newTask = result.task as DbTask | undefined;
         if (!newTask) throw new Error("Task creation returned no task.");
@@ -1490,6 +1695,8 @@ export default function ProjectBoardPage({
                 draft_review_due_at: newTask.draft_review_due_at ?? null,
                 statusLabel: getColumnStatusLabel(columnId, projectColumns),
                 canDrag: canMoveTask(newTask.assigned_to, assignees, newTask.start_date),
+                checkpointCount: result.checkpointCount ?? 0,
+                completedCheckpointCount: result.completedCheckpointCount ?? 0,
                 assignees,
               },
               ...getColumnTasks(prev, columnId),
@@ -1550,6 +1757,7 @@ export default function ProjectBoardPage({
         setNewTaskTargetColumnId(null);
         setNewTaskStatusKey("todo");
         setNewTaskDescription("");
+        setNewTaskCheckpoints([]);
         setSelectedAdditionalAssignees([]);
         setNewTaskWorkingDates([]);
         setWorkingDatesDirty(false);
@@ -1564,7 +1772,7 @@ export default function ProjectBoardPage({
         setIsSubmitting(false);
       }
     },
-    [projectId, workingDatesValidation, supabase, profile?.id, newTaskDescription, newTaskTargetColumnId, newTaskStatusKey, newTaskAssignee, selectedAdditionalAssignees, newTaskWorkingDates, initializeTaskReviewCycle, members, canMoveTask, pendingAttachments, projectColumns, showBoardNotice],
+    [projectId, workingDatesValidation, supabase, profile?.id, newTaskDescription, newTaskTargetColumnId, newTaskStatusKey, newTaskAssignee, selectedAdditionalAssignees, newTaskWorkingDates, newTaskCheckpoints, initializeTaskReviewCycle, members, canMoveTask, pendingAttachments, projectColumns, showBoardNotice],
   );
 
   const handleAddMembers = useCallback(
@@ -1920,6 +2128,7 @@ export default function ProjectBoardPage({
       // 1. Fetch project columns
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token;
+      const boardActorId = sessionData.session?.user?.id ?? profile?.id ?? null;
       if (!token) throw new Error("Please sign in again to load this board.");
       const colsRes = await fetch(`/api/projects/${projectId}/columns`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -1994,6 +2203,32 @@ export default function ProjectBoardPage({
 
       // Fetch multi-assignees for all tasks
       const allTaskIds = ((taskRows as DbTask[] | null | undefined) ?? []).map(t => t.id);
+      let checkpointCountsMap: Record<string, { checkpointCount: number; completedCheckpointCount: number }> = {};
+      if (allTaskIds.length > 0) {
+        try {
+          const { data: checkpointCountRows, error: checkpointCountError } = await supabase.rpc("get_task_checkpoint_counts", {
+            p_project_id: projectId,
+            p_task_ids: allTaskIds,
+            p_actor_id: boardActorId,
+          });
+
+          if (!checkpointCountError && checkpointCountRows) {
+            checkpointCountsMap = ((checkpointCountRows as Array<{
+              task_id: string;
+              checkpoint_count: number;
+              completed_checkpoint_count: number;
+            }> | null) ?? []).reduce<Record<string, { checkpointCount: number; completedCheckpointCount: number }>>((acc, row) => {
+              acc[row.task_id] = {
+                checkpointCount: row.checkpoint_count ?? 0,
+                completedCheckpointCount: row.completed_checkpoint_count ?? 0,
+              };
+              return acc;
+            }, {});
+          }
+        } catch {
+          checkpointCountsMap = {};
+        }
+      }
       let assigneesMap: Record<string, { id: string; name: string | null; email: string | null }[]> = {};
       if (allTaskIds.length > 0) {
         try {
@@ -2050,6 +2285,8 @@ export default function ProjectBoardPage({
           statusLabel: getColumnStatusLabel(columnId, fetchedColumns),
           canDrag: canMoveTask(row.assigned_to, assignees, row.start_date),
           updatesCount: updatesMap[row.id] ?? 0,
+          checkpointCount: checkpointCountsMap[row.id]?.checkpointCount ?? 0,
+          completedCheckpointCount: checkpointCountsMap[row.id]?.completedCheckpointCount ?? 0,
           assignees,
         }];
       });
@@ -2063,7 +2300,7 @@ export default function ProjectBoardPage({
     } finally {
       setLoading(false);
     }
-  }, [canMoveTask, projectId, supabase]);
+  }, [canMoveTask, profile?.id, projectId, supabase]);
 
   useEffect(() => {
     void loadBoard();
@@ -2430,7 +2667,6 @@ export default function ProjectBoardPage({
     setEditScheduleReason("");
     setEditScheduleReasonRequired(false);
     setEditScheduleReasonError(null);
-    setEditTarget("task");
   }, []);
 
   const loadEditWorkingDates = useCallback(async (task: Task) => {
@@ -2461,7 +2697,6 @@ export default function ProjectBoardPage({
         return;
       }
 
-      setEditTarget(target);
       setEditScheduleReason("");
       setEditScheduleReasonRequired(false);
       setEditScheduleReasonError(null);
@@ -2491,15 +2726,6 @@ export default function ProjectBoardPage({
   const editScheduleLoading = editingTask ? taskSchedules.getLoading(editingTask.id) : false;
   const resolvedEditScheduleError = editScheduleError
     ?? (editingTask ? taskSchedules.getError(editingTask.id) : null);
-
-  useEffect(() => {
-    if (!editingTask || editTarget !== "working-dates" || editScheduleLoading || !editScheduleState) return;
-    const frame = window.requestAnimationFrame(() => {
-      editWorkingDatesSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      editWorkingDatesSectionRef.current?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [editScheduleLoading, editScheduleState, editTarget, editingTask]);
 
   const handleUpdateTask = useCallback(async () => {
     if (!editingTask) return;
@@ -3588,7 +3814,7 @@ export default function ProjectBoardPage({
       </Modal>
 
       {/* CREATE TASK MODAL */}
-      <Modal title="Create Task" isOpen={showCreateTaskModal} onClose={() => { setShowCreateTaskModal(false); setNewTaskTargetColumnId(null); setNewTaskStatusKey("todo"); setPendingAttachments([]); setWorkingDatesDirty(false); setCreateTaskError(null); }}>
+      <Modal title="Create Task" isOpen={showCreateTaskModal} bodyRef={createTaskModalBodyRef} resetScrollOnOpen onClose={() => { setShowCreateTaskModal(false); setNewTaskTargetColumnId(null); setNewTaskStatusKey("todo"); setNewTaskCheckpoints([]); setPendingAttachments([]); setWorkingDatesDirty(false); setCreateTaskError(null); }}>
         <div className="space-y-4">
           <div className="border-b border-slate-200 pb-3">
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Column</p>
@@ -3600,14 +3826,63 @@ export default function ProjectBoardPage({
             </label>
             <input
               id="task-title"
+              ref={createTaskTitleRef}
               type="text"
               placeholder="e.g., Implement user authentication"
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
               value={newTaskTitle}
               onChange={(e) => setNewTaskTitle(e.target.value)}
               disabled={isSubmitting}
-              autoFocus
             />
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Checkpoints</p>
+              {newTaskCheckpoints.length > 0 ? (
+                <span className="text-xs font-semibold text-slate-400">{newTaskCheckpoints.filter((checkpoint) => checkpoint.title.trim()).length}</span>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              {newTaskCheckpoints.map((checkpoint, index) => (
+                <div key={checkpoint.id} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={checkpoint.title}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setNewTaskCheckpoints((current) => current.map((item) => item.id === checkpoint.id ? { ...item, title: value } : item));
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        setNewTaskCheckpoints((current) => [...current, { id: `${Date.now()}-${current.length}`, title: "" }]);
+                      }
+                    }}
+                    placeholder={index === 0 ? "Draft procedures" : "Add checkpoint"}
+                    disabled={isSubmitting}
+                    maxLength={240}
+                    className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setNewTaskCheckpoints((current) => current.filter((item) => item.id !== checkpoint.id))}
+                    disabled={isSubmitting}
+                    className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setNewTaskCheckpoints((current) => [...current, { id: `${Date.now()}-${current.length}`, title: "" }])}
+                disabled={isSubmitting}
+                className="text-sm font-semibold text-slate-700 hover:text-slate-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 disabled:opacity-50"
+              >
+                + Add checkpoint
+              </button>
+            </div>
           </div>
 
           <div>
@@ -3625,95 +3900,12 @@ export default function ProjectBoardPage({
             />
           </div>
 
-          <div>
-            <label htmlFor="task-assignee" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-              Assign To (Optional)
-            </label>
-            <select
-              id="task-assignee"
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none"
-              value={newTaskAssignee}
-              onChange={(e) => setNewTaskAssignee(e.target.value)}
-              disabled={isSubmitting}
-            >
-              <option value="">Unassigned</option>
-              {members.map((member) => {
-                const user = member.user;
-                if (!user) return null;
-                return (
-                  <option key={member.user_id} value={member.user_id}>
-                    {user.name || user.email}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-
-          <div className={newTaskAssignee ? "" : "opacity-50 pointer-events-none"}>
-            <label className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
-              Additional Assignees (Optional)
-            </label>
-            {!newTaskAssignee && (
-              <p className="text-xs text-gray-400 mt-1">
-                Select a primary assignee first
-              </p>
-            )}
-            {selectedAdditionalAssignees.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {selectedAdditionalAssignees.map((user) => (
-                  <span
-                    key={user.id}
-                    className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
-                  >
-                    {user.name ?? user.email ?? user.id}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSelectedAdditionalAssignees((prev) =>
-                          prev.filter((u) => u.id !== user.id)
-                        )
-                      }
-                      className="ml-0.5 text-slate-400 hover:text-slate-600"
-                    >
-                      ✕
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div className="mt-2 flex flex-wrap gap-2">
-              {members
-                .filter((member) => {
-                  const user = member.user;
-                  if (!user) return false;
-                  // Exclude the primary assignee
-                  if (user.id === newTaskAssignee) return false;
-                  // Exclude already selected
-                  if (selectedAdditionalAssignees.some((u) => u.id === user.id)) return false;
-                  return true;
-                })
-                .map((member) => {
-                  const user = member.user;
-                  if (!user) return null;
-                  return (
-                    <button
-                      key={user.id}
-                      type="button"
-                      onClick={() =>
-                        setSelectedAdditionalAssignees((prev) => {
-                          if (prev.find((u) => u.id === user.id)) return prev;
-                          return [...prev, user as DbUser];
-                        })
-                      }
-                      className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-50 hover:border-slate-300"
-                      disabled={isSubmitting}
-                    >
-                      + {user.name ?? user.email ?? "Unknown"}
-                    </button>
-                  );
-                })}
-            </div>
-          </div>
+          <AssignedMembersSelect
+            members={members}
+            selectedIds={createAssignedMemberIds}
+            onChange={handleCreateAssignedMembersChange}
+            disabled={isSubmitting}
+          />
 
           <div className="mt-4">
             <div className="mb-2">
@@ -3760,6 +3952,7 @@ export default function ProjectBoardPage({
               setShowCreateTaskModal(false);
               setNewTaskTargetColumnId(null);
               setNewTaskStatusKey("todo");
+              setNewTaskCheckpoints([]);
               setPendingAttachments([]);
               setWorkingDatesDirty(false);
               setCreateTaskError(null);
@@ -4156,7 +4349,7 @@ export default function ProjectBoardPage({
       </Modal>
 
       {/* EDIT TASK MODAL */}
-      <Modal title="Edit Task" isOpen={Boolean(editingTask)} onClose={closeEditTask}>
+      <Modal title="Edit Task" isOpen={Boolean(editingTask)} bodyRef={editTaskModalBodyRef} resetScrollOnOpen onClose={closeEditTask}>
         {editingTask && (
           <div className="space-y-4">
             <div>
@@ -4165,14 +4358,20 @@ export default function ProjectBoardPage({
               </label>
               <input
                 id="edit-task-title"
+                ref={editTaskTitleRef}
                 type="text"
                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
                 value={editingTask.title}
                 onChange={(e) => setEditingTask({ ...editingTask, title: e.target.value })}
                 disabled={isSavingEdit2}
-                autoFocus
               />
             </div>
+            <TaskCheckpoints
+              taskId={editingTask.id}
+              getAccessToken={getAccessToken}
+              canManage={canEditTaskSchedule(editingTask)}
+              onSummaryChange={updateCheckpointSummary}
+            />
             <div>
               <label htmlFor="edit-task-description" className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">
                 Description
@@ -4188,80 +4387,14 @@ export default function ProjectBoardPage({
               />
             </div>
             {canEditTaskAssignments ? (
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Assigned Members</p>
-                <label htmlFor="edit-primary-assignee" className="mt-2 block text-xs font-medium text-slate-500">
-                  Primary assignee
-                </label>
-                <select
-                  id="edit-primary-assignee"
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-900 focus:outline-none disabled:bg-slate-50"
-                  value={editPrimaryAssigneeId ?? ""}
-                  onChange={(event) => setEditPrimaryAssigneeId(event.target.value || null)}
-                  disabled={isSavingEdit2 || editAssignedUsers.length === 0}
-                >
-                  {editAssignedUsers.length === 0 ? <option value="">Unassigned</option> : null}
-                  {editAssignedUsers.map((user) => (
-                    <option key={user.id} value={user.id}>{user.name ?? user.email ?? user.id}</option>
-                  ))}
-                </select>
-
-                {editAssignedUsers.length > 0 ? (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {editAssignedUsers.map((user) => (
-                      <span
-                        key={user.id}
-                        className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700"
-                      >
-                        {user.name ?? user.email ?? user.id}
-                        {user.id === editPrimaryAssigneeId ? (
-                          <span className="rounded-full bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">Primary</span>
-                        ) : null}
-                        <button
-                          type="button"
-                          aria-label={`Remove ${user.name ?? user.email ?? "member"}`}
-                          onClick={() => setEditAssigneeIds((current) => {
-                            const next = current.filter((userId) => userId !== user.id);
-                            if (editPrimaryAssigneeId === user.id) setEditPrimaryAssigneeId(next[0] ?? null);
-                            return next;
-                          })}
-                          className="ml-0.5 text-slate-400 hover:text-slate-600"
-                          disabled={isSavingEdit2}
-                        >
-                          ✕
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-xs text-slate-500">No members assigned.</p>
-                )}
-
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {members
-                    .filter((member) => member.user && !editAssigneeIds.includes(member.user_id))
-                    .map((member) => {
-                      const user = member.user;
-                      if (!user) return null;
-                      return (
-                        <button
-                          key={user.id}
-                          type="button"
-                          onClick={() => {
-                            setEditAssigneeIds((current) => [...current, user.id]);
-                            if (!editPrimaryAssigneeId) setEditPrimaryAssigneeId(user.id);
-                          }}
-                          className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
-                          disabled={isSavingEdit2}
-                        >
-                          + {user.name ?? user.email ?? "Unknown"}
-                        </button>
-                      );
-                    })}
-                </div>
-              </div>
+              <AssignedMembersSelect
+                members={members}
+                selectedIds={editAssigneeIds}
+                onChange={handleEditAssignedMembersChange}
+                disabled={isSavingEdit2}
+              />
             ) : null}
-            <div ref={editWorkingDatesSectionRef} tabIndex={-1} className="min-w-0 scroll-mt-4 rounded-lg focus-visible:ring-2 focus-visible:ring-blue-500">
+            <div className="min-w-0 rounded-lg">
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-600">Working Dates</p>
               {editScheduleLoading ? (
                 <p className="mt-2 text-sm text-slate-500">Loading working dates…</p>

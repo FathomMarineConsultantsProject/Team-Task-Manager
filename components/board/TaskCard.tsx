@@ -156,6 +156,9 @@ export default function TaskCard({ columnId, stageType, statusKey, onOpenDetails
     "Unassigned";
   const isUnassigned = !task.assigneeId;
   const commentCount = task.updatesCount ?? 0;
+  const checkpointCount = task.checkpointCount ?? 0;
+  const completedCheckpointCount = Math.min(task.completedCheckpointCount ?? 0, checkpointCount);
+  const checkpointPercent = checkpointCount > 0 ? Math.round((completedCheckpointCount / checkpointCount) * 100) : 0;
   const reviewProgress = isReview ? task.reviewProgress : undefined;
   const showReviewBadge = Boolean(reviewProgress && reviewProgress.total > 0);
   const reviewBadgeText = reviewProgress
@@ -383,6 +386,20 @@ export default function TaskCard({ columnId, stageType, statusKey, onOpenDetails
             </span>
           ) : null}
         </div>
+        {checkpointCount > 0 ? (
+          <div className="mt-3" aria-label={`${completedCheckpointCount} of ${checkpointCount} checkpoints complete`}>
+            <div className="flex items-center justify-between gap-3 text-[11px] font-semibold text-slate-500">
+              <span>{completedCheckpointCount} / {checkpointCount} checkpoints</span>
+              <span>{checkpointPercent}%</span>
+            </div>
+            <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className={`h-full rounded-full ${completedCheckpointCount === checkpointCount ? "bg-slate-700" : "bg-blue-500"}`}
+                style={{ width: `${checkpointPercent}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
         <div className="mt-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             {task.assignees && task.assignees.length > 0 ? (
